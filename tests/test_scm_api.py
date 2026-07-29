@@ -93,6 +93,10 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(obj.LogicalRouter.get_endpoint(), "/config/network/v1/logical-routers")
         self.assertTrue(obj.LogicalRouter.uses_payload_scope())
 
+    def test_ospf_auth_profile_endpoint_is_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.OSPFAuthProfile.get_endpoint(), "/config/network/v1/ospf-auth-profiles")
+        self.assertTrue(obj.OSPFAuthProfile.uses_payload_scope())
+
     def test_route_filter_endpoints_are_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.RoutePrefixList.get_endpoint(), "/config/network/v1/route-prefix-lists")
         self.assertEqual(obj.RouteAccessList.get_endpoint(), "/config/network/v1/route-access-lists")
@@ -536,6 +540,11 @@ class ProcessorTests(unittest.TestCase):
 
     def test_route_access_community_path_and_redist_post_put_scope_in_payload(self):
         cases = [
+            (
+                obj.OSPFAuthProfile,
+                "/config/network/v1/ospf-auth-profiles",
+                {"name": "ospf-simple", "password": "ospf-secret"},
+            ),
             (
                 obj.RouteAccessList,
                 "/config/network/v1/route-access-lists",

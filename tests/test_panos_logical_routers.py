@@ -64,6 +64,14 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                           </route-table>
                         </match>
                       </entry>
+                      <entry name="import-v6">
+                        <action>allow</action>
+                        <match>
+                          <ipv6-address-prefix>
+                            <entry name="2001:db8:100::/48" />
+                          </ipv6-address-prefix>
+                        </match>
+                      </entry>
                     </rules>
                   </import>
                   <export>
@@ -82,6 +90,30 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                         <set>
                           <local-preference>200</local-preference>
                           <metric>50</metric>
+                          <med>75</med>
+                          <next-hop>203.0.113.1</next-hop>
+                          <regular-community>
+                            <member>65001:200</member>
+                          </regular-community>
+                          <as-path-prepend>
+                            <member>65001</member>
+                            <member>65001</member>
+                          </as-path-prepend>
+                          <overwrite-community>yes</overwrite-community>
+                        </set>
+                      </entry>
+                      <entry name="export-v6">
+                        <action>allow</action>
+                        <match>
+                          <ipv6-address-prefix>
+                            <entry name="2001:db8::/32" />
+                          </ipv6-address-prefix>
+                        </match>
+                        <set>
+                          <next-hop>2001:db8::1</next-hop>
+                          <large-community>
+                            <member>65001:1:100</member>
+                          </large-community>
                         </set>
                       </entry>
                     </rules>
@@ -103,8 +135,21 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
               <ospf>
                 <enable>yes</enable>
                 <router-id>192.0.2.1</router-id>
+                <auth-profile>
+                  <entry name="ospf-simple">
+                    <password>ospf-secret</password>
+                  </entry>
+                  <entry name="ospf-md5">
+                    <md5>
+                      <entry name="1">
+                        <key>md5-secret</key>
+                      </entry>
+                    </md5>
+                  </entry>
+                </auth-profile>
                 <area>
                   <entry name="0.0.0.0">
+                    <authentication>ospf-simple</authentication>
                     <type>
                       <normal />
                     </type>
@@ -113,6 +158,7 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                         <enable>yes</enable>
                         <passive>no</passive>
                         <metric>10</metric>
+                        <authentication>ospf-md5</authentication>
                         <link-type>
                           <p2p />
                         </link-type>
@@ -133,6 +179,7 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                       <entry name="ethernet1/1">
                         <enable>yes</enable>
                         <metric>20</metric>
+                        <authentication>ospf-simple</authentication>
                       </entry>
                     </interface>
                   </entry>
@@ -221,7 +268,12 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                     "bgp": {
                                         "route_map": "default-export-export-default-rm",
                                     }
-                                }
+                                },
+                                "ipv6": {
+                                    "bgp": {
+                                        "route_map": "default-export-export-v6-rm",
+                                    }
+                                },
                             },
                             "bgp": {
                                 "enable": True,
@@ -246,6 +298,12 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                                             "import_route_map": "default-import-import-private-rm",
                                                             "export_route_map": "default-export-export-default-rm",
                                                         }
+                                                    },
+                                                    "ipv6": {
+                                                        "unicast": {
+                                                            "import_route_map": "default-import-import-v6-rm",
+                                                            "export_route_map": "default-export-export-v6-rm",
+                                                        }
                                                     }
                                                 },
                                             }
@@ -259,6 +317,7 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                 "area": [
                                     {
                                         "name": "0.0.0.0",
+                                        "authentication": "ospf-simple",
                                         "type": {"normal": {}},
                                         "interface": [
                                             {
@@ -266,6 +325,7 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                                 "enable": True,
                                                 "passive": False,
                                                 "metric": 10,
+                                                "authentication": "ospf-md5",
                                                 "link_type": {"p2p": {}},
                                                 "bfd": {"profile": "default"},
                                             }
@@ -284,6 +344,7 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                                 "name": "ethernet1/1",
                                                 "enable": True,
                                                 "metric": 20,
+                                                "authentication": "ospf-simple",
                                             }
                                         ],
                                     }
@@ -359,6 +420,7 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
 
             parsed = XMLParser(str(xml_path), "local").parse_specific_types(
                 [
+                    "OSPFAuthProfile",
                     "RoutePrefixList",
                     "RouteAccessList",
                     "RouteCommunityList",
@@ -369,6 +431,24 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                 ]
             )
 
+        self.assertEqual(
+            parsed["OSPFAuthProfile"],
+            [
+                {
+                    "name": "ospf-simple",
+                    "password": "ospf-secret",
+                },
+                {
+                    "name": "ospf-md5",
+                    "md5": [
+                        {
+                            "key": "md5-secret",
+                            "key_id": 1,
+                        }
+                    ],
+                },
+            ],
+        )
         self.assertEqual(
             parsed["RoutePrefixList"],
             [
@@ -384,12 +464,32 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                     ],
                 },
                 {
+                    "name": "default-import-import-v6-pl",
+                    "prefix_list": [
+                        {
+                            "name": 1,
+                            "action": "permit",
+                            "prefix": "2001:db8:100::/48",
+                        }
+                    ],
+                },
+                {
                     "name": "default-export-export-default-pl",
                     "prefix_list": [
                         {
                             "name": 1,
                             "action": "permit",
                             "prefix": "0.0.0.0/0",
+                        }
+                    ],
+                },
+                {
+                    "name": "default-export-export-v6-pl",
+                    "prefix_list": [
+                        {
+                            "name": 1,
+                            "action": "permit",
+                            "prefix": "2001:db8::/32",
                         }
                     ],
                 },
@@ -479,6 +579,23 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                     ],
                 },
                 {
+                    "name": "default-import-import-v6-rm",
+                    "description": "Generated from PAN-OS BGP import rule import-v6",
+                    "route_map": [
+                        {
+                            "name": 30,
+                            "action": "permit",
+                            "match": {
+                                "ipv6": {
+                                    "address": {
+                                        "prefix_list": "default-import-import-v6-pl",
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                },
+                {
                     "name": "default-export-export-default-rm",
                     "description": "Generated from PAN-OS BGP export rule export-default",
                     "route_map": [
@@ -496,7 +613,33 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                             },
                             "set": {
                                 "local_preference": 200,
+                                "med": 75,
                                 "metric": {"action": "set", "value": 50},
+                                "ipv4": {"next_hop": "203.0.113.1"},
+                                "regular_community": ["65001:200"],
+                                "as_path_prepend": [65001, 65001],
+                                "overwrite_regular_community": True,
+                            },
+                        }
+                    ],
+                },
+                {
+                    "name": "default-export-export-v6-rm",
+                    "description": "Generated from PAN-OS BGP export rule export-v6",
+                    "route_map": [
+                        {
+                            "name": 20,
+                            "action": "permit",
+                            "match": {
+                                "ipv6": {
+                                    "address": {
+                                        "prefix_list": "default-export-export-v6-pl",
+                                    }
+                                }
+                            },
+                            "set": {
+                                "ipv6": {"next_hop": "2001:db8::1"},
+                                "large_community": ["65001:1:100"],
                             },
                         }
                     ],

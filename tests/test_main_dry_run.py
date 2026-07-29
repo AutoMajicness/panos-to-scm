@@ -280,6 +280,7 @@ class MainDryRunTests(unittest.TestCase):
             "VlanInterface": [{"name": "vlan.100", "vlan_tag": "100", "ip": [{"name": "10.100.0.1/24"}]}],
             "TunnelInterface": [{"name": "tunnel.1", "default_value": "tunnel.1", "ip": [{"name": "169.254.1.1/30"}]}],
             "LoopbackInterface": [{"name": "loopback.1", "ip": ["10.255.0.1/32"]}],
+            "OSPFAuthProfile": [{"name": "ospf-simple", "password": "ospf-secret"}],
             "LogicalRouter": [{"name": "default", "routing_stack": "advanced", "vrf": [{"name": "default"}]}],
             "RoutePrefixList": [{"name": "default-export-default-pl", "prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}]}],
             "RouteAccessList": [{"name": "routes-acl", "access_list": [{"name": 1, "action": "permit", "source": "corp-routes"}]}],
@@ -303,19 +304,19 @@ class MainDryRunTests(unittest.TestCase):
             with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
                 plan = main.main(
                     AppConfig(),
-                    run_objects="InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,RoutePrefixList,RouteAccessList,RouteCommunityList,RoutePathAccessList,BgpRouteMap,BgpRouteMapRedistribution,BgpRedistributionProfile,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,PbfRule,Zones",
+                    run_objects="InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,OSPFAuthProfile,RoutePrefixList,RouteAccessList,RouteCommunityList,RoutePathAccessList,BgpRouteMap,BgpRouteMapRedistribution,BgpRedistributionProfile,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,PbfRule,Zones",
                     json_file=str(parsed_path),
                     dry_run=True,
                     network_scope="snippet:Network-Stack",
                 )
 
-        self.assertEqual(plan.summary()["creates"], 24)
+        self.assertEqual(plan.summary()["creates"], 25)
         self.assertEqual(
             [change.object_type for change in plan.creates],
             [
                 "InterfaceManagementProfile", "ZoneProtectionProfile", "DHCPInterface",
                 "AggregateInterface", "EthernetInterface", "Layer2Subinterface", "Layer3Subinterface",
-                "VlanInterface", "TunnelInterface", "LoopbackInterface", "RoutePrefixList",
+                "VlanInterface", "TunnelInterface", "LoopbackInterface", "OSPFAuthProfile", "RoutePrefixList",
                 "RouteAccessList", "RouteCommunityList", "RoutePathAccessList", "BgpRouteMap",
                 "BgpRouteMapRedistribution", "BgpRedistributionProfile", "LogicalRouter",
                 "IKECryptoProfile", "IPsecCryptoProfile", "IKEGateway", "IPsecTunnel",
@@ -488,6 +489,7 @@ class MainDryRunTests(unittest.TestCase):
 
     def test_route_filters_can_use_network_scope_for_dry_run(self):
         parsed_data = {
+            "OSPFAuthProfile": [{"name": "ospf-simple", "password": "ospf-secret"}],
             "RoutePrefixList": [{"name": "default-export-default-pl", "prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}]}],
             "RouteAccessList": [{"name": "routes-acl", "access_list": [{"name": 1, "action": "permit", "source": "corp-routes"}]}],
             "RouteCommunityList": [{"name": "communities", "community_list": [{"name": 1, "action": "permit", "community": "65001:100"}]}],
@@ -504,16 +506,17 @@ class MainDryRunTests(unittest.TestCase):
             with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
                 plan = main.main(
                     AppConfig(),
-                    run_objects="RoutePrefixList,RouteAccessList,RouteCommunityList,RoutePathAccessList,BgpRouteMap,BgpRouteMapRedistribution,BgpRedistributionProfile",
+                    run_objects="OSPFAuthProfile,RoutePrefixList,RouteAccessList,RouteCommunityList,RoutePathAccessList,BgpRouteMap,BgpRouteMapRedistribution,BgpRedistributionProfile",
                     json_file=str(parsed_path),
                     dry_run=True,
                     network_scope="snippet:Network-Stack",
                 )
 
-        self.assertEqual(plan.summary()["creates"], 7)
+        self.assertEqual(plan.summary()["creates"], 8)
         self.assertEqual(
             [change.object_type for change in plan.creates],
             [
+                "OSPFAuthProfile",
                 "RoutePrefixList",
                 "RouteAccessList",
                 "RouteCommunityList",

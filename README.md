@@ -77,7 +77,7 @@ python3 main.py \
   --object-scope folder:All \
   --policy-scope folder:All \
   --dry-run \
-  -o InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,RoutePrefixList,RouteAccessList,RouteCommunityList,RoutePathAccessList,BgpRouteMap,BgpRouteMapRedistribution,BgpRedistributionProfile,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,PbfRule,Zones
+  -o InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,OSPFAuthProfile,RoutePrefixList,RouteAccessList,RouteCommunityList,RoutePathAccessList,BgpRouteMap,BgpRouteMapRedistribution,BgpRedistributionProfile,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,PbfRule,Zones
 ```
 
 The legacy `--scope folder:All` option still works as a fallback for all categories. Prefer the category-specific flags when network snippets and policy folders are different.
@@ -138,6 +138,7 @@ The legacy `--scope folder:All` option still works as a fallback for all categor
 - **VLAN Interfaces**
 - **Tunnel Interfaces**
 - **Loopback Interfaces**
+- **OSPF Auth Profiles**
 - **Route Prefix Lists from BGP Import/Export Policy Prefix Matches**
 - **Route Access Lists from BGP Policy Access-List Matches**
 - **Route Community Lists from BGP Policy Community Matches**
@@ -159,9 +160,9 @@ Network features currently support local firewall XML only. Panorama templates a
 
 DHCP client mode is supported for Layer 3 ethernet interfaces and Layer 3 ethernet subinterfaces. Static IP mode remains supported for ethernet, aggregate, subinterface, VLAN, tunnel, and loopback interfaces.
 
-PAN-OS local firewall XML stores routes under `network/virtual-router`; this tool maps those source entries into SCM Logical Routers with `routing_stack` set to `advanced` for ARE-enabled firewalls. DHCP interface migration covers common local firewall DHCP server and relay interface settings. Logical router migration includes IPv4/IPv6 static routes, BFD profile references, static route path-monitor data, BGP peer groups/peers, OSPF/OSPFv3 areas/interfaces, and BGP export route-map references under the Logical Router RIB filter.
+PAN-OS local firewall XML stores routes under `network/virtual-router`; this tool maps those source entries into SCM Logical Routers with `routing_stack` set to `advanced` for ARE-enabled firewalls. DHCP interface migration covers common local firewall DHCP server and relay interface settings. Logical router migration includes IPv4/IPv6 static routes, BFD profile references, static route path-monitor data, BGP peer groups/peers, OSPF/OSPFv3 areas/interfaces with auth profile bindings, and BGP export route-map references under the Logical Router RIB filter.
 
-BGP import policy rules are converted into route-map objects and attached to migrated BGP peers under IPv4 unicast address-family data. Validate these payloads with `--dry-run` against real SCM current data before posting, because advanced routing schemas are strict and local PAN-OS XML can vary by PAN-OS release.
+BGP import/export policy rules are converted into route-map objects and attached to migrated BGP peers under IPv4 or IPv6 unicast address-family data based on the matched prefix family. Route-map conversion includes prefix, access-list, community, AS-path, metric, local-preference, MED, next-hop, community, and AS-path set operations. Validate these payloads with `--dry-run` against real SCM current data before posting, because advanced routing schemas are strict and local PAN-OS XML can vary by PAN-OS release.
 
 Virtual-wire zone membership is parsed under security zones. Physical ethernet interfaces using virtual-wire mode are detected in the ethernet interface parser, but SCM currently exposes virtual-wire assignment differently than a standalone network object, so validate those dry-run payloads before posting.
 

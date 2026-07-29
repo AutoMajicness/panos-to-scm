@@ -119,6 +119,7 @@ class XMLParser:
             'VlanInterface': self._parse_entries(self._vlan_interface_entries),
             'TunnelInterface': self._parse_entries(self._tunnel_interface_entries),
             'LoopbackInterface': self._parse_entries(self._loopback_interface_entries),
+            'OSPFAuthProfile': self._parse_entries(self._ospf_auth_profile_entries),
             'LogicalRouter': self._parse_entries(self._logical_router_entries),
             'RoutePrefixList': self._parse_entries(self._route_prefix_list_entries),
             'RouteAccessList': self._parse_entries(self._route_access_list_entries),
@@ -177,6 +178,7 @@ class XMLParser:
             'VlanInterface': self._vlan_interface_entries,
             'TunnelInterface': self._tunnel_interface_entries,
             'LoopbackInterface': self._loopback_interface_entries,
+            'OSPFAuthProfile': self._ospf_auth_profile_entries,
             'LogicalRouter': self._logical_router_entries,
             'RoutePrefixList': self._route_prefix_list_entries,
             'RouteAccessList': self._route_access_list_entries,
@@ -2479,11 +2481,17 @@ class XMLParser:
             routing_table = vrf.setdefault('routing_table', {})
             routing_table['ipv6'] = {'static_route': static_routes_v6}
 
-        export_route_maps = self._bgp_policy_route_map_names(entry, 'export')
-        if export_route_maps:
+        export_ipv4_route_maps = self._bgp_policy_route_map_names(entry, 'export', family='ipv4')
+        if export_ipv4_route_maps:
             rib_filter = vrf.setdefault('rib_filter', {})
             ipv4_filter = rib_filter.setdefault('ipv4', {})
-            ipv4_filter['bgp'] = {'route_map': export_route_maps[0]}
+            ipv4_filter['bgp'] = {'route_map': export_ipv4_route_maps[0]}
+
+        export_ipv6_route_maps = self._bgp_policy_route_map_names(entry, 'export', family='ipv6')
+        if export_ipv6_route_maps:
+            rib_filter = vrf.setdefault('rib_filter', {})
+            ipv6_filter = rib_filter.setdefault('ipv6', {})
+            ipv6_filter['bgp'] = {'route_map': export_ipv6_route_maps[0]}
 
         bgp = self._convert_bgp(entry.find('protocol/bgp'), entry)
         if bgp:
@@ -3020,6 +3028,61 @@ class XMLParser:
 
         return payload or None
 
+    def _ospf_auth_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("OSPF auth profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for protocol_name in ['ospf', 'ospfv3']:
+                for profile_entry in self._ospf_auth_profile_config_entries(router_entry.find(f'protocol/{protocol_name}')):
+                    profile = self._convert_ospf_auth_profile(profile_entry)
+                    if not profile or profile['name'] in seen_names:
+                        continue
+                    seen_names.add(profile['name'])
+                    profiles.append(profile)
+
+        return profiles
+
+    def _ospf_auth_profile_config_entries(self, protocol_entry):
+        if protocol_entry is None:
+            return []
+
+        entries = []
+        for path in ['auth-profile/entry', 'auth-profiles/entry']:
+            entries.extend(protocol_entry.findall(path))
+        return entries
+
+    def _convert_ospf_auth_profile(self, profile_entry):
+        profile_name = profile_entry.get('name')
+        if not profile_name:
+            return None
+
+        payload = {'name': profile_name}
+        password = self._child_text(profile_entry, 'password')
+        if password:
+            payload['password'] = password
+            return payload
+
+        md5_entries = []
+        for key_entry in profile_entry.findall('md5/entry'):
+            key_id = key_entry.get('name')
+            key = self._child_text(key_entry, 'key') or self._child_text(key_entry, 'password')
+            if not key_id or not key:
+                continue
+            md5 = {'key': key}
+            if key_id.isdigit():
+                md5['key_id'] = int(key_id)
+            else:
+                md5['name'] = key_id
+            md5_entries.append(md5)
+        if md5_entries:
+            payload['md5'] = md5_entries
+
+        return payload if len(payload) > 1 else None
+
     def _route_prefix_list_entries(self):
         if self.config_type != 'local':
             self.logger.warning("Route prefix list migration currently supports local firewall XML only.")
@@ -3169,8 +3232,9 @@ class XMLParser:
 
                     prefixes = self._bgp_policy_rule_prefixes(rule_entry)
                     if prefixes:
+                        family = self._bgp_policy_rule_family(rule_entry)
                         rule['match'] = {
-                            'ipv4': {
+                            family: {
                                 'address': {
                                     'prefix_list': self._bgp_policy_prefix_list_name(router_entry, direction, rule_entry)
                                 }
@@ -3181,7 +3245,8 @@ class XMLParser:
                     if access_list:
                         match = rule.setdefault('match', {})
                         ipv4 = match.setdefault('ipv4', {})
-                        ipv4['address'] = {'access_list': access_list}
+                        address = ipv4.setdefault('address', {})
+                        address['access_list'] = access_list
 
                     community_list = self._bgp_policy_community_list_name_if_needed(router_entry, direction, rule_entry)
                     if community_list:
@@ -3190,6 +3255,11 @@ class XMLParser:
                     path_access_list = self._bgp_policy_path_access_list_name_if_needed(router_entry, direction, rule_entry)
                     if path_access_list:
                         rule.setdefault('match', {})['as_path_access_list'] = path_access_list
+
+                    scalar_match = self._convert_bgp_policy_match(rule_entry.find('match'))
+                    if scalar_match:
+                        match = rule.setdefault('match', {})
+                        match.update(scalar_match)
 
                     set_payload = self._convert_bgp_policy_set(rule_entry.find('set'))
                     if set_payload:
@@ -3330,14 +3400,24 @@ class XMLParser:
             if value:
                 payload[scm_name] = value.lower() == 'yes' if panos_name == 'enable' else value
 
-        import_route_maps = self._bgp_policy_route_map_names(router_entry, 'import')
-        export_route_maps = self._bgp_policy_route_map_names(router_entry, 'export')
-        if import_route_maps or export_route_maps:
-            address_family = {'ipv4': {'unicast': {}}}
-            if import_route_maps:
-                address_family['ipv4']['unicast']['import_route_map'] = import_route_maps[0]
-            if export_route_maps:
-                address_family['ipv4']['unicast']['export_route_map'] = export_route_maps[0]
+        import_ipv4_route_maps = self._bgp_policy_route_map_names(router_entry, 'import', family='ipv4')
+        export_ipv4_route_maps = self._bgp_policy_route_map_names(router_entry, 'export', family='ipv4')
+        import_ipv6_route_maps = self._bgp_policy_route_map_names(router_entry, 'import', family='ipv6')
+        export_ipv6_route_maps = self._bgp_policy_route_map_names(router_entry, 'export', family='ipv6')
+        if import_ipv4_route_maps or export_ipv4_route_maps or import_ipv6_route_maps or export_ipv6_route_maps:
+            address_family = {}
+            if import_ipv4_route_maps or export_ipv4_route_maps:
+                address_family['ipv4'] = {'unicast': {}}
+                if import_ipv4_route_maps:
+                    address_family['ipv4']['unicast']['import_route_map'] = import_ipv4_route_maps[0]
+                if export_ipv4_route_maps:
+                    address_family['ipv4']['unicast']['export_route_map'] = export_ipv4_route_maps[0]
+            if import_ipv6_route_maps or export_ipv6_route_maps:
+                address_family['ipv6'] = {'unicast': {}}
+                if import_ipv6_route_maps:
+                    address_family['ipv6']['unicast']['import_route_map'] = import_ipv6_route_maps[0]
+                if export_ipv6_route_maps:
+                    address_family['ipv6']['unicast']['export_route_map'] = export_ipv6_route_maps[0]
             payload['address_family'] = address_family
 
         return payload
@@ -3381,6 +3461,10 @@ class XMLParser:
             return None
 
         payload = {'name': area_name}
+        authentication = self._child_text(area_entry, 'authentication')
+        if authentication:
+            payload['authentication'] = authentication
+
         area_type = area_entry.find('type')
         if area_type is not None:
             child_name = self._first_child_name(area_type)
@@ -3409,6 +3493,7 @@ class XMLParser:
             ('mtu-ignore', 'mtu_ignore'),
             ('priority', 'priority'),
             ('metric', 'metric'),
+            ('authentication', 'authentication'),
         ]:
             value = self._child_text(interface_entry, panos_name)
             if not value:
@@ -3441,11 +3526,13 @@ class XMLParser:
             entries.extend(router_entry.findall(path))
         return entries
 
-    def _bgp_policy_route_map_names(self, router_entry, direction):
-        return [
-            self._bgp_policy_route_map_name(router_entry, direction, rule_entry)
-            for rule_entry in self._bgp_policy_rule_entries(router_entry, direction)
-        ]
+    def _bgp_policy_route_map_names(self, router_entry, direction, family=None):
+        names = []
+        for rule_entry in self._bgp_policy_rule_entries(router_entry, direction):
+            if family and self._bgp_policy_rule_family(rule_entry) != family:
+                continue
+            names.append(self._bgp_policy_route_map_name(router_entry, direction, rule_entry))
+        return names
 
     def _bgp_policy_route_map_name(self, router_entry, direction, rule_entry):
         return self._sanitize_name(f"{router_entry.get('name')}-{direction}-{rule_entry.get('name')}-rm")
@@ -3478,6 +3565,15 @@ class XMLParser:
             if self._member_texts(rule_entry.find(path)):
                 return self._bgp_policy_path_access_list_name(router_entry, direction, rule_entry)
         return None
+
+    def _bgp_policy_rule_family(self, rule_entry):
+        for prefix in self._bgp_policy_rule_prefixes(rule_entry):
+            if ':' in prefix.get('prefix', ''):
+                return 'ipv6'
+        for path in ['match/ipv6-address-prefix', 'match/ipv6-nlri', 'match/ipv6-route-table']:
+            if rule_entry.find(path) is not None:
+                return 'ipv6'
+        return 'ipv4'
 
     def _bgp_redist_rule_entries(self, router_entry):
         entries = []
@@ -3523,8 +3619,11 @@ class XMLParser:
         prefixes = []
         for path in [
             'match/address-prefix',
+            'match/ipv6-address-prefix',
             'match/route-table',
+            'match/ipv6-route-table',
             'match/nlri',
+            'match/ipv6-nlri',
         ]:
             prefixes.extend(self._route_prefix_values(rule_entry.find(path)))
         return prefixes
@@ -3573,6 +3672,38 @@ class XMLParser:
                 rule[optional_key] = prefix[optional_key]
         return rule
 
+    def _convert_bgp_policy_match(self, match_entry):
+        if match_entry is None:
+            return None
+
+        payload = {}
+        scalar_fields = {
+            'metric': 'metric',
+            'local-preference': 'local_preference',
+            'local-preference-value': 'local_preference',
+            'origin': 'origin',
+            'peer': 'peer',
+            'interface': 'interface',
+            'tag': 'tag',
+        }
+        for panos_name, scm_name in scalar_fields.items():
+            value = self._first_text_or_member(match_entry.find(panos_name))
+            if not value:
+                continue
+            payload[scm_name] = int(value) if value.isdigit() else value
+
+        extended_communities = []
+        for path in ['extended-community', 'ext-community']:
+            extended_communities.extend(self._member_texts(match_entry.find(path)))
+        if extended_communities:
+            payload['extended_community'] = extended_communities
+
+        large_communities = self._member_texts(match_entry.find('large-community'))
+        if large_communities:
+            payload['large_community'] = large_communities
+
+        return payload or None
+
     def _convert_bgp_policy_set(self, set_entry):
         if set_entry is None:
             return None
@@ -3582,12 +3713,13 @@ class XMLParser:
             ('local-preference', 'local_preference'),
             ('weight', 'weight'),
             ('tag', 'tag'),
+            ('med', 'med'),
         ]:
             value = self._child_text(set_entry, panos_name)
             if value and value.isdigit():
                 payload[scm_name] = int(value)
 
-        metric = self._child_text(set_entry, 'metric')
+        metric = self._child_text(set_entry, 'metric') or self._child_text(set_entry, 'metric-value')
         if metric and metric.isdigit():
             payload['metric'] = {'action': 'set', 'value': int(metric)}
 
@@ -3595,9 +3727,54 @@ class XMLParser:
         if origin:
             payload['origin'] = origin
 
-        next_hop = self._child_text(set_entry, 'nexthop')
+        next_hop = self._child_text(set_entry, 'nexthop') or self._child_text(set_entry, 'next-hop')
         if next_hop:
-            payload['ipv4'] = {'next_hop': next_hop}
+            family = 'ipv6' if ':' in next_hop else 'ipv4'
+            payload[family] = {'next_hop': next_hop}
+
+        regular_communities = []
+        for path in ['community', 'regular-community']:
+            regular_communities.extend(self._member_texts(set_entry.find(path)))
+        if regular_communities:
+            payload['regular_community'] = regular_communities
+
+        extended_communities = []
+        for path in ['extended-community', 'ext-community']:
+            extended_communities.extend(self._member_texts(set_entry.find(path)))
+        if extended_communities:
+            payload['extended_community'] = extended_communities
+
+        large_communities = self._member_texts(set_entry.find('large-community'))
+        if large_communities:
+            payload['large_community'] = large_communities
+
+        as_path_prepend = []
+        for path in ['as-path-prepend', 'aspath-prepend']:
+            as_path_prepend.extend(self._member_texts(set_entry.find(path)))
+        if as_path_prepend:
+            payload['as_path_prepend'] = [
+                int(value) if value.isdigit() else value
+                for value in as_path_prepend
+            ]
+
+        as_path_exclude = []
+        for path in ['as-path-exclude', 'aspath-exclude']:
+            as_path_exclude.extend(self._member_texts(set_entry.find(path)))
+        if as_path_exclude:
+            payload['as_path_exclude'] = as_path_exclude
+
+        remove_communities = []
+        for path in ['remove-community', 'remove-regular-community']:
+            remove_communities.extend(self._member_texts(set_entry.find(path)))
+            value = self._child_text(set_entry, path)
+            if value:
+                remove_communities.append(value)
+        if remove_communities:
+            payload['remove_regular_community'] = remove_communities
+
+        overwrite_community = self._child_text(set_entry, 'overwrite-community')
+        if overwrite_community:
+            payload['overwrite_regular_community'] = overwrite_community.lower() == 'yes'
 
         return payload or None
 

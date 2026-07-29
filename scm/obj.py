@@ -87,6 +87,10 @@ class LoopbackInterface(PanApiHandler):
     _endpoint = "/config/network/v1/loopback-interfaces"
     _scope_in_payload = True
 
+class OSPFAuthProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/ospf-auth-profiles"
+    _scope_in_payload = True
+
 class LogicalRouter(PanApiHandler):
     _endpoint = "/config/network/v1/logical-routers"
     _scope_in_payload = True
