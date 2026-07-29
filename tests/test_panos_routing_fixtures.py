@@ -155,17 +155,62 @@ class PanosRoutingFixtureTests(unittest.TestCase):
                 },
                 {
                     "code": "unsupported-panos-routing-node",
+                    "path": "network.virtual-router.entry[unsupported-vr].protocol.bgp.dampening-profile.entry[default]",
+                },
+                {
+                    "code": "unsupported-panos-routing-node",
+                    "path": "network.virtual-router.entry[unsupported-vr].protocol.bgp.conditional-advertisement",
+                },
+                {
+                    "code": "unsupported-panos-routing-node",
+                    "path": "network.virtual-router.entry[unsupported-vr].protocol.bgp.routing-options.graceful-restart",
+                },
+                {
+                    "code": "unsupported-panos-routing-node",
+                    "path": "network.virtual-router.entry[unsupported-vr].protocol.bgp.redist-rules.entry[rip-to-bgp]",
+                },
+                {
+                    "code": "unsupported-panos-routing-node",
+                    "path": "network.virtual-router.entry[unsupported-vr].protocol.pim",
+                },
+                {
+                    "code": "unsupported-panos-routing-node",
+                    "path": "network.virtual-router.entry[unsupported-vr].protocol.multicast",
+                },
+                {
+                    "code": "unsupported-panos-routing-node",
                     "path": "network.virtual-router.entry[unsupported-vr].routing-table.ip.static-route.entry[qualified-route].nexthop.qualified-next-hop",
-                }
+                },
             ],
         )
 
         plan = build_plan(parsed, object_types=["LogicalRouter"])
 
-        self.assertEqual(plan.summary()["warnings"], 2)
+        self.assertEqual(plan.summary()["warnings"], 8)
         self.assertEqual(
             [warning.code for warning in plan.warnings],
-            ["unsupported-panos-routing-node", "unsupported-panos-routing-node"],
+            ["unsupported-panos-routing-node"] * 8,
+        )
+
+    def test_template_routing_layout_emits_parser_warning_for_local_mode(self):
+        parsed = XMLParser(
+            str(FIXTURE_DIR / "panorama_template_routing_layout.xml"),
+            "local",
+        ).parse_specific_types(["LogicalRouter"])
+
+        self.assertEqual(parsed["LogicalRouter"], [])
+        self.assertEqual(
+            parsed["_migration_warnings"],
+            [
+                {
+                    "object_type": "LogicalRouter",
+                    "name": "local",
+                    "path": "network.virtual-router",
+                    "code": "unsupported-panos-config-layout",
+                    "severity": "warning",
+                    "message": "PAN-OS virtual routers were found outside the local firewall network path; use a supported local running-config XML or add Panorama template parsing before migrating this file.",
+                }
+            ],
         )
 
 

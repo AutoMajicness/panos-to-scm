@@ -225,7 +225,19 @@ class XMLParser:
             return []
 
         warnings = []
-        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+        router_entries = self.root.findall('./devices/entry/network/virtual-router/entry')
+        if not router_entries and self.root.findall('.//network/virtual-router/entry'):
+            warnings.append(
+                self._migration_warning(
+                    "LogicalRouter",
+                    "local",
+                    "network.virtual-router",
+                    "unsupported-panos-config-layout",
+                    "PAN-OS virtual routers were found outside the local firewall network path; use a supported local running-config XML or add Panorama template parsing before migrating this file.",
+                )
+            )
+
+        for router_entry in router_entries:
             router_name = router_entry.get('name') or "unknown"
             if router_entry.find('ecmp') is not None:
                 warnings.append(
@@ -237,6 +249,31 @@ class XMLParser:
                         "PAN-OS ECMP settings are not migrated yet; review and recreate ECMP behavior in SCM if required.",
                     )
                 )
+
+            bgp = router_entry.find('protocol/bgp')
+            if bgp is not None:
+                warnings.extend(self._bgp_unsupported_warning_entries(router_name, bgp))
+
+            for path, message in [
+                (
+                    "protocol/pim",
+                    "PAN-OS PIM settings are not migrated yet; review multicast routing requirements in SCM.",
+                ),
+                (
+                    "protocol/multicast",
+                    "PAN-OS multicast routing settings are not migrated yet; review multicast routing requirements in SCM.",
+                ),
+            ]:
+                if router_entry.find(path) is not None:
+                    warnings.append(
+                        self._migration_warning(
+                            "LogicalRouter",
+                            router_name,
+                            f"network.virtual-router.entry[{router_name}].{path.replace('/', '.')}",
+                            "unsupported-panos-routing-node",
+                            message,
+                        )
+                    )
 
             for route_family, route_path in [
                 ("ip", "routing-table/ip/static-route/entry"),
@@ -254,6 +291,59 @@ class XMLParser:
                                 "PAN-OS qualified-next-hop static route data is not migrated because the target SCM static route field is not implemented in this tool yet.",
                             )
                         )
+        return warnings
+
+    def _bgp_unsupported_warning_entries(self, router_name, bgp):
+        warnings = []
+        for profile_entry in bgp.findall('dampening-profile/entry'):
+            profile_name = profile_entry.get('name') or "unnamed-dampening-profile"
+            warnings.append(
+                self._migration_warning(
+                    "LogicalRouter",
+                    router_name,
+                    f"network.virtual-router.entry[{router_name}].protocol.bgp.dampening-profile.entry[{profile_name}]",
+                    "unsupported-panos-routing-node",
+                    "PAN-OS BGP dampening profiles are not migrated yet; review BGP address-family behavior in SCM.",
+                )
+            )
+
+        for path in ['conditional-advertisement', 'conditional-advertise']:
+            if bgp.find(path) is not None:
+                warnings.append(
+                    self._migration_warning(
+                        "LogicalRouter",
+                        router_name,
+                        f"network.virtual-router.entry[{router_name}].protocol.bgp.{path}",
+                        "unsupported-panos-routing-node",
+                        "PAN-OS BGP conditional advertisement is not migrated yet; recreate conditional advertisement logic in SCM if required.",
+                    )
+                )
+
+        if bgp.find('routing-options/graceful-restart') is not None:
+            warnings.append(
+                self._migration_warning(
+                    "LogicalRouter",
+                    router_name,
+                    f"network.virtual-router.entry[{router_name}].protocol.bgp.routing-options.graceful-restart",
+                    "unsupported-panos-routing-node",
+                    "PAN-OS BGP graceful-restart routing options are not migrated yet; validate BGP restart behavior in SCM.",
+                )
+            )
+
+        for redist_entry in self._bgp_redist_rule_entries_from_bgp(bgp):
+            source_type = self._bgp_redist_source_type(redist_entry)
+            if source_type not in {'static', 'connected', 'ospf'}:
+                rule_name = redist_entry.get('name') or "unnamed-redist-rule"
+                warnings.append(
+                    self._migration_warning(
+                        "BgpRedistributionProfile",
+                        router_name,
+                        f"network.virtual-router.entry[{router_name}].protocol.bgp.redist-rules.entry[{rule_name}]",
+                        "unsupported-panos-routing-node",
+                        "PAN-OS BGP redistribution rule source type is not mapped to the current SCM redistribution profile conversion.",
+                    )
+                )
+
         return warnings
 
     @staticmethod
@@ -4344,13 +4434,18 @@ class XMLParser:
         return 'ipv4'
 
     def _bgp_redist_rule_entries(self, router_entry):
+        return self._bgp_redist_rule_entries_from_bgp(router_entry.find('protocol/bgp'))
+
+    def _bgp_redist_rule_entries_from_bgp(self, bgp):
         entries = []
+        if bgp is None:
+            return entries
         for path in [
-            'protocol/bgp/redist-rules/entry',
-            'protocol/bgp/redistribution-rule/entry',
-            'protocol/bgp/redist-profile/entry',
+            'redist-rules/entry',
+            'redistribution-rule/entry',
+            'redist-profile/entry',
         ]:
-            entries.extend(router_entry.findall(path))
+            entries.extend(bgp.findall(path))
         return entries
 
     def _bgp_redist_route_map_name(self, router_entry, redist_entry):

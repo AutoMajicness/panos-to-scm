@@ -29,13 +29,13 @@ class MainDryRunTests(unittest.TestCase):
             output = json.loads(output_path.read_text(encoding="utf-8"))
 
         self.assertEqual(report.summary()["LogicalRouter"], 1)
-        self.assertEqual(report.summary()["warnings"], 2)
+        self.assertEqual(report.summary()["warnings"], 8)
         self.assertEqual(output["summary"]["LogicalRouter"], 1)
-        self.assertEqual(output["summary"]["warnings"], 2)
+        self.assertEqual(output["summary"]["warnings"], 8)
         self.assertIn("LogicalRouter", output["objects"])
         self.assertEqual(
             [warning["code"] for warning in output["warnings"]],
-            ["unsupported-panos-routing-node", "unsupported-panos-routing-node"],
+            ["unsupported-panos-routing-node"] * 8,
         )
 
     def test_network_report_honors_selected_network_objects(self):

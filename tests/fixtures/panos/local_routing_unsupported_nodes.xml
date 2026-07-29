@@ -7,6 +7,34 @@
             <ecmp>
               <enable>yes</enable>
             </ecmp>
+            <protocol>
+              <bgp>
+                <dampening-profile>
+                  <entry name="default">
+                    <enable>yes</enable>
+                  </entry>
+                </dampening-profile>
+                <conditional-advertisement>
+                  <entry name="conditional-default" />
+                </conditional-advertisement>
+                <routing-options>
+                  <graceful-restart>
+                    <enable>yes</enable>
+                  </graceful-restart>
+                </routing-options>
+                <redist-rules>
+                  <entry name="rip-to-bgp">
+                    <type>rip</type>
+                  </entry>
+                </redist-rules>
+              </bgp>
+              <pim>
+                <enable>yes</enable>
+              </pim>
+              <multicast>
+                <enable>yes</enable>
+              </multicast>
+            </protocol>
             <routing-table>
               <ip>
                 <static-route>
