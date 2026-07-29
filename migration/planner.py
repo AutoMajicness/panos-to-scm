@@ -125,8 +125,11 @@ def build_plan(
     conflicts: list[Change] = []
     unsupported: list[Change] = []
     warnings: list[PlanWarning] = []
+    warnings.extend(_parser_warnings(parsed_data.get("_migration_warnings", [])))
 
     for object_type in selected_types:
+        if object_type == "_migration_warnings":
+            continue
         desired_entries = parsed_data.get(object_type, [])
         if not isinstance(desired_entries, list):
             unsupported.append(
@@ -269,6 +272,27 @@ def _serialize_warnings(warnings: list[PlanWarning]) -> list[dict[str, Any]]:
         warning.to_dict()
         for warning in sorted(warnings, key=lambda item: (item.object_type, item.name, item.path, item.code))
     ]
+
+
+def _parser_warnings(entries: Any) -> list[PlanWarning]:
+    if not isinstance(entries, list):
+        return []
+
+    warnings = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        warnings.append(
+            PlanWarning(
+                object_type=entry.get("object_type", ""),
+                name=entry.get("name", ""),
+                path=entry.get("path", ""),
+                code=entry.get("code", "parser-warning"),
+                severity=entry.get("severity", "warning"),
+                message=entry.get("message", ""),
+            )
+        )
+    return warnings
 
 
 def _schema_warnings_for_entry(object_type: str, name: str, desired: dict[str, Any]) -> list[PlanWarning]:

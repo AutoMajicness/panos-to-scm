@@ -168,7 +168,9 @@ PAN-OS local firewall XML stores routes under `network/virtual-router`; this too
 
 BGP import/export policy rules are converted into route-map objects and attached to migrated BGP peers under IPv4 or IPv6 unicast address-family data based on the matched prefix family. Route-map conversion includes prefix, access-list, community, AS-path, metric, local-preference, MED, next-hop, community, and AS-path set operations. Validate these payloads with `--dry-run` against real SCM current data before posting, because advanced routing schemas are strict and local PAN-OS XML can vary by PAN-OS release.
 
-Dry-run plans include a `warnings` section for schema-sensitive or inferred network payloads, including generated BGP filtering profiles, BGP address-family profiles, Logical Router BGP peer references, and static route option mappings. These warnings are non-blocking; use them as the review checklist before posting to SCM.
+Dry-run plans include a `warnings` section for schema-sensitive or inferred network payloads, including generated BGP filtering profiles, BGP address-family profiles, Logical Router BGP peer references, static route option mappings, and parser-reported unsupported PAN-OS routing nodes. These warnings are non-blocking; use them as the review checklist before posting to SCM. Parser warnings are emitted under `_migration_warnings` in parsed data and are carried into dry-run plans automatically.
+
+Sanitized local PAN-OS routing regression fixtures live under `tests/fixtures/panos/`. Add new fixtures there when validating XML variants from different PAN-OS releases, then cover the expected SCM payloads in `tests/test_panos_routing_fixtures.py`. Current parser warnings include PAN-OS virtual-router ECMP and static-route qualified-next-hop nodes, which are not migrated yet.
 
 Virtual-wire zone membership is parsed under security zones. Physical ethernet interfaces using virtual-wire mode are detected in the ethernet interface parser, but SCM currently exposes virtual-wire assignment differently than a standalone network object, so validate those dry-run payloads before posting.
 

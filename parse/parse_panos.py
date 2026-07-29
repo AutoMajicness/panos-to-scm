@@ -143,6 +143,7 @@ class XMLParser:
             'DNSSecurityProfile': self._parse_entries(self._dns_security_profiles_entries),
             'HipObject': self._parse_entries(self._hip_objects_entries),
             'HipProfile': self._parse_entries(self._hip_profiles_entries),
+            '_migration_warnings': self._migration_warning_entries(),
         }
 
     def parse_specific_types(self, object_types):
@@ -213,10 +214,58 @@ class XMLParser:
             else:
                 self.logger.warning(f"Unknown object type requested: {obj_type}")
 
+        parsed_data['_migration_warnings'] = self._migration_warning_entries()
         return parsed_data
 
     def _parse_entries(self, parse_function):
         return parse_function()
+
+    def _migration_warning_entries(self):
+        if self.config_type != 'local':
+            return []
+
+        warnings = []
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            router_name = router_entry.get('name') or "unknown"
+            if router_entry.find('ecmp') is not None:
+                warnings.append(
+                    self._migration_warning(
+                        "LogicalRouter",
+                        router_name,
+                        f"network.virtual-router.entry[{router_name}].ecmp",
+                        "unsupported-panos-routing-node",
+                        "PAN-OS ECMP settings are not migrated yet; review and recreate ECMP behavior in SCM if required.",
+                    )
+                )
+
+            for route_family, route_path in [
+                ("ip", "routing-table/ip/static-route/entry"),
+                ("ipv6", "routing-table/ipv6/static-route/entry"),
+            ]:
+                for route_entry in router_entry.findall(route_path):
+                    route_name = route_entry.get('name') or "unnamed-static-route"
+                    if route_entry.find('nexthop/qualified-next-hop') is not None:
+                        warnings.append(
+                            self._migration_warning(
+                                "LogicalRouter",
+                                router_name,
+                                f"network.virtual-router.entry[{router_name}].routing-table.{route_family}.static-route.entry[{route_name}].nexthop.qualified-next-hop",
+                                "unsupported-panos-routing-node",
+                                "PAN-OS qualified-next-hop static route data is not migrated because the target SCM static route field is not implemented in this tool yet.",
+                            )
+                        )
+        return warnings
+
+    @staticmethod
+    def _migration_warning(object_type, name, path, code, message, severity="warning"):
+        return {
+            "object_type": object_type,
+            "name": name,
+            "path": path,
+            "code": code,
+            "severity": severity,
+            "message": message,
+        }
 
     def _url_category_entries(self):
         # Example: You can refactor individual parse methods in a similar way
