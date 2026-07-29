@@ -51,6 +51,10 @@ class InterfaceManagementProfile(PanApiHandler):
     _endpoint = "/config/network/v1/interface-management-profiles"
     _scope_in_payload = True
 
+class ZoneProtectionProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/zone-protection-profiles"
+    _scope_in_payload = True
+
 class AggregateInterface(PanApiHandler):
     _endpoint = "/config/network/v1/aggregate-interfaces"
     _scope_in_payload = True

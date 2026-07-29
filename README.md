@@ -1,20 +1,8 @@
-## 📢 End of Life Announcement for PANOS-TO-SCM Script
-
-**Effective Date:** August 31, 2024
-
-The **PANOS-TO-SCM** script is being officially deprecated and will no longer be maintained or supported after August 31, 2024. Following this date, this repository will be archived and made available in a read-only state. No further updates, bug fixes, or security patches will be provided. 
-
-### What This Means for Users
-
-- **No Support or Updates:** After the EOL date, the script will not receive any further updates, including bug fixes, enhancements, or security patches.
-- **Read-Only Access:** The repository will remain accessible for reference purposes, but users are strongly advised against deploying it in production environments. Without ongoing maintenance, potential security vulnerabilities could emerge over time.
-- **Alternative Access for Palo Alto Networks Employees and Contractors:** A supported version of this tool will continue to be available internally for Palo Alto Networks employees and contractors. You can access it at [Palo Alto Networks Spring Portal](https://spring.paloaltonetworks.com/echickerin/scm_migrator).
-
-Thank you for your understanding and cooperation.
-
 ## panos-to-scm
-- **Migrate Panorama Device Group OR Local PANOS Firewall config into Strata Cloud Manager NGFW**
+- **Migrate local PAN-OS firewall config into Strata Cloud Manager NGFW**
+- **Migrate Panorama Device Group objects and policy into Strata Cloud Manager NGFW - legacy/in progress**
 - **Migrate Cisco ASA/Firepower running config into Strata Cloud Manager - In progress**
+- **Network stack migration currently targets local firewall XML only**
 
 ## Understand the following items before running
 - **This script is as is, at your own risk, review license**
@@ -35,6 +23,8 @@ python3 -m venv venv
 source venv/bin/activate
 pip3 install -r requirements.txt
 ```
+
+Python 3.10 or newer is required.
 
 ### Step 3: SCM and PANOS Credentials
 - **Common Services IAM account**
@@ -74,6 +64,24 @@ palo_api_token: xxxxxxxxxxxxxxxxxxxxxx
     - Ignore - Ignore the conflict and move on
 - Also handles rule ordering if something gets out of order(order determined by XML) which occurs in parallel processing
 
+### Recommended Local Firewall Workflow
+
+Use dry-run first. Network configuration should normally target a snippet, while objects and policies usually target a folder.
+
+```bash
+python3 main.py \
+  --parser panos \
+  --config-file running_config.xml \
+  --panos-config-type local \
+  --network-scope snippet:Network-Stack \
+  --object-scope folder:All \
+  --policy-scope folder:All \
+  --dry-run \
+  -o InterfaceManagementProfile,ZoneProtectionProfile,AggregateInterface,EthernetInterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,LogicalRouter,Zones
+```
+
+The legacy `--scope folder:All` option still works as a fallback for all categories. Prefer the category-specific flags when network snippets and policy folders are different.
+
 ### Command Line Options:
 - Check the "HELP" feature using `python main.py -h`
 - Run Specific Objects: `python main.py -o Tag,Address,AddressGroup`
@@ -84,6 +92,13 @@ palo_api_token: xxxxxxxxxxxxxxxxxxxxxx
 - Run NAT Rules Only: `python main.py -n`
 - Run All Objects, Security, App Override, Decryption and NAT Rules: `python main.py -a`
 - Default Behavior: Running `python main.py` without any options will run all objects only(no policies).
+- Set a default SCM destination scope: `--scope folder:All`
+- Set object/profile destination scope: `--object-scope folder:All`
+- Set policy destination scope: `--policy-scope folder:All`
+- Set network destination scope: `--network-scope snippet:Network-Stack`
+- Build an offline plan without SCM authentication: `--dry-run`
+- Write a full dry-run plan: `--plan-output /tmp/plan.json`
+- Provide current SCM data for offline comparisons: `--current-data current.json`
 
 ### Currently Supported PAN-OS Migration Features:
 
@@ -110,6 +125,23 @@ palo_api_token: xxxxxxxxxxxxxxxxxxxxxx
 - **NAT Rules**
 - **Application Override Rules**
 - **Decryption Policy Rules**
+
+### Currently Supported Local PAN-OS Network Migration Features:
+
+- **Interface Management Profiles**
+- **Zone Protection Profiles**
+- **Aggregate Ethernet Interfaces**
+- **Ethernet Interfaces**
+- **Layer 3 Subinterfaces**
+- **VLAN Interfaces**
+- **Tunnel Interfaces**
+- **Loopback Interfaces**
+- **Logical Routers with IPv4 Static Routes**
+- **Security Zones**
+
+Network features currently support local firewall XML only. Panorama templates and template stacks are not parsed yet.
+
+DHCP client mode is supported for Layer 3 ethernet interfaces and Layer 3 ethernet subinterfaces. Static IP mode remains supported for ethernet, aggregate, subinterface, VLAN, tunnel, and loopback interfaces.
 
 ## Cisco ASA/Firepower migration to SCM for PANOS
 - Currently ASA/Firepower we need the running-config. `more system:running-config` or from FTD/FMC export the config. Must be in familiar ASA format

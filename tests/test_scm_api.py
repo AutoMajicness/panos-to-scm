@@ -55,6 +55,10 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(obj.InterfaceManagementProfile.get_endpoint(), "/config/network/v1/interface-management-profiles")
         self.assertTrue(obj.InterfaceManagementProfile.uses_payload_scope())
 
+    def test_zone_protection_profile_endpoint_is_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.ZoneProtectionProfile.get_endpoint(), "/config/network/v1/zone-protection-profiles")
+        self.assertTrue(obj.ZoneProtectionProfile.uses_payload_scope())
+
     def test_aggregate_interface_endpoint_is_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.AggregateInterface.get_endpoint(), "/config/network/v1/aggregate-interfaces")
         self.assertTrue(obj.AggregateInterface.uses_payload_scope())
@@ -181,6 +185,31 @@ class ProcessorTests(unittest.TestCase):
                 "name": "allow-mgmt",
                 "ping": True,
                 "permitted_ip": ["192.0.2.0/24"],
+                "snippet": "Network-Stack",
+            },
+        )
+
+    def test_zone_protection_profile_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.ZoneProtectionProfile], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&snippet=Network-Stack",
+            [{"name": "internet-zpp", "description": "edge"}],
+            obj.ZoneProtectionProfile,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/network/v1/zone-protection-profiles",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {
+                "name": "internet-zpp",
+                "description": "edge",
                 "snippet": "Network-Stack",
             },
         )

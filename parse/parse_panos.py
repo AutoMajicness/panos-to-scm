@@ -110,6 +110,7 @@ class XMLParser:
             'nat_post_rules': self._parse_entries(self._nat_post_rules_entries),
             'Application': self._parse_entries(self._application_entries),
             'InterfaceManagementProfile': self._parse_entries(self._interface_management_profile_entries),
+            'ZoneProtectionProfile': self._parse_entries(self._zone_protection_profile_entries),
             'AggregateInterface': self._parse_entries(self._aggregate_interface_entries),
             'EthernetInterface': self._parse_entries(self._ethernet_interface_entries),
             'Layer3Subinterface': self._parse_entries(self._layer3_subinterface_entries),
@@ -153,6 +154,7 @@ class XMLParser:
             'nat_post_rules': self._nat_post_rules_entries,
             'Application': self._application_entries,
             'InterfaceManagementProfile': self._interface_management_profile_entries,
+            'ZoneProtectionProfile': self._zone_protection_profile_entries,
             'AggregateInterface': self._aggregate_interface_entries,
             'EthernetInterface': self._ethernet_interface_entries,
             'Layer3Subinterface': self._layer3_subinterface_entries,
@@ -1749,6 +1751,134 @@ class XMLParser:
         )
         return values
 
+    def _zone_protection_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Zone protection profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        for entry in self.root.findall('./devices/entry/network/profiles/zone-protection-profile/entry'):
+            payload = self._convert_zone_protection_profile(entry)
+            if payload:
+                profiles.append(payload)
+
+        return profiles
+
+    def _convert_zone_protection_profile(self, entry):
+        profile_name = entry.get('name')
+        if not profile_name:
+            return None
+
+        payload = {'name': profile_name}
+        description = self._child_text(entry, 'description')
+        if description:
+            payload['description'] = description
+
+        flood = self._convert_zone_protection_flood(entry.find('flood'))
+        if flood:
+            payload['flood'] = flood
+
+        reconnaissance = self._convert_zone_protection_reconnaissance(entry.find('scan'))
+        if reconnaissance:
+            payload['reconnaissance'] = reconnaissance
+
+        return payload
+
+    def _convert_zone_protection_flood(self, flood):
+        if flood is None:
+            return None
+
+        flood_payload = {}
+        for panos_name, scm_name in [
+            ('tcp-syn', 'tcp_syn'),
+            ('udp', 'udp'),
+            ('icmp', 'icmp'),
+            ('icmpv6', 'icmpv6'),
+            ('other-ip', 'other_ip'),
+        ]:
+            section = flood.find(panos_name)
+            if section is None:
+                continue
+            converted = self._convert_zone_protection_flood_section(section)
+            if converted:
+                flood_payload[scm_name] = converted
+
+        return flood_payload
+
+    def _convert_zone_protection_flood_section(self, section):
+        payload = {}
+        enabled = self._child_text(section, 'enable')
+        if enabled:
+            payload['enable'] = enabled.lower() == 'yes'
+
+        red = section.find('red')
+        if red is not None:
+            red_payload = self._int_child_map(
+                red,
+                {
+                    'alarm-rate': 'alarm_rate',
+                    'activate-rate': 'activate_rate',
+                    'maximal-rate': 'maximal_rate',
+                    'block-duration': 'block_duration',
+                },
+            )
+            if red_payload:
+                payload['red'] = red_payload
+
+        syn_cookies = section.find('syn-cookies')
+        if syn_cookies is not None:
+            syn_cookie_payload = self._int_child_map(
+                syn_cookies,
+                {
+                    'alarm-rate': 'alarm_rate',
+                    'activate-rate': 'activate_rate',
+                    'maximal-rate': 'maximal_rate',
+                },
+            )
+            if syn_cookie_payload:
+                payload['syn_cookies'] = syn_cookie_payload
+
+        return payload
+
+    def _convert_zone_protection_reconnaissance(self, scan):
+        if scan is None:
+            return None
+
+        reconnaissance = {}
+        for entry in scan.findall('entry'):
+            scan_name = entry.get('name')
+            if not scan_name:
+                continue
+
+            scan_payload = self._int_child_map(
+                entry,
+                {
+                    'interval': 'interval',
+                    'threshold': 'threshold',
+                },
+            )
+            action = self._first_child_name(entry.find('action'))
+            if action:
+                scan_payload['action'] = action
+            if scan_payload:
+                reconnaissance[scan_name.replace('-', '_')] = scan_payload
+
+        return reconnaissance
+
+    def _int_child_map(self, entry, field_map):
+        payload = {}
+        for panos_name, scm_name in field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value and value.isdigit():
+                payload[scm_name] = int(value)
+        return payload
+
+    @staticmethod
+    def _first_child_name(entry):
+        if entry is not None and list(entry):
+            return list(entry)[0].tag.replace('-', '_')
+        return None
+
     def _aggregate_interface_entries(self):
         if self.config_type != 'local':
             self.logger.warning("Aggregate interface migration currently supports local firewall XML only.")
@@ -1869,13 +1999,17 @@ class XMLParser:
     def _convert_ethernet_layer3(self, layer3):
         layer3_payload = {}
 
-        ip_entries = [
-            ip_entry.get('name')
-            for ip_entry in layer3.findall('ip/entry')
-            if ip_entry.get('name')
-        ]
-        if ip_entries:
-            layer3_payload['ip'] = [{'name': ip_address} for ip_address in ip_entries]
+        dhcp_client = self._convert_dhcp_client(layer3.find('dhcp-client'))
+        if dhcp_client:
+            layer3_payload['dhcp_client'] = dhcp_client
+        else:
+            ip_entries = [
+                ip_entry.get('name')
+                for ip_entry in layer3.findall('ip/entry')
+                if ip_entry.get('name')
+            ]
+            if ip_entries:
+                layer3_payload['ip'] = [{'name': ip_address} for ip_address in ip_entries]
 
         mtu = self._child_text(layer3, 'mtu')
         if mtu and mtu.isdigit():
@@ -1886,6 +2020,38 @@ class XMLParser:
             layer3_payload['interface_management_profile'] = management_profile
 
         return layer3_payload
+
+    def _convert_dhcp_client(self, dhcp_client):
+        if dhcp_client is None:
+            return None
+
+        payload = {}
+        boolean_fields = {
+            'enable': 'enable',
+            'create-default-route': 'create_default_route',
+        }
+        for panos_name, scm_name in boolean_fields.items():
+            value = self._child_text(dhcp_client, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes'
+
+        metric = self._child_text(dhcp_client, 'default-route-metric')
+        if metric and metric.isdigit():
+            payload['default_route_metric'] = int(metric)
+
+        send_hostname = dhcp_client.find('send-hostname')
+        if send_hostname is not None:
+            send_hostname_payload = {}
+            enabled = self._child_text(send_hostname, 'enable')
+            if enabled:
+                send_hostname_payload['enable'] = enabled.lower() == 'yes'
+            hostname = self._child_text(send_hostname, 'hostname')
+            if hostname:
+                send_hostname_payload['hostname'] = hostname
+            if send_hostname_payload:
+                payload['send_hostname'] = send_hostname_payload
+
+        return payload or None
 
     def _static_ip_entries(self, entry):
         ip_entries = [
@@ -1910,9 +2076,13 @@ class XMLParser:
         if mtu and mtu.isdigit():
             payload['mtu'] = int(mtu)
 
-        ip_entries = self._static_ip_entries(entry)
-        if ip_entries:
-            payload['ip'] = ip_entries
+        dhcp_client = self._convert_dhcp_client(entry.find('dhcp-client'))
+        if dhcp_client:
+            payload['dhcp_client'] = dhcp_client
+        else:
+            ip_entries = self._static_ip_entries(entry)
+            if ip_entries:
+                payload['ip'] = ip_entries
 
         return payload
 
