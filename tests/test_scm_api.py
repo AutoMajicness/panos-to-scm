@@ -51,6 +51,10 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(obj.Zones.get_endpoint(), "/config/network/v1/zones")
         self.assertTrue(obj.Zones.uses_payload_scope())
 
+    def test_interface_management_profile_endpoint_is_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.InterfaceManagementProfile.get_endpoint(), "/config/network/v1/interface-management-profiles")
+        self.assertTrue(obj.InterfaceManagementProfile.uses_payload_scope())
+
     def test_aggregate_interface_endpoint_is_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.AggregateInterface.get_endpoint(), "/config/network/v1/aggregate-interfaces")
         self.assertTrue(obj.AggregateInterface.uses_payload_scope())
@@ -153,6 +157,32 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(
             session.post_calls[0]["json"],
             {"name": "trust", "network": {"layer3": ["ethernet1/1"]}, "snippet": "Network-Stack"},
+        )
+
+    def test_interface_management_profile_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.InterfaceManagementProfile], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&snippet=Network-Stack",
+            [{"name": "allow-mgmt", "ping": True, "permitted_ip": ["192.0.2.0/24"]}],
+            obj.InterfaceManagementProfile,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/network/v1/interface-management-profiles",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {
+                "name": "allow-mgmt",
+                "ping": True,
+                "permitted_ip": ["192.0.2.0/24"],
+                "snippet": "Network-Stack",
+            },
         )
 
     def test_aggregate_interface_post_puts_scope_in_payload_not_url(self):

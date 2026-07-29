@@ -150,6 +150,7 @@ class MainDryRunTests(unittest.TestCase):
 
     def test_ethernet_interfaces_and_zones_can_share_network_scope(self):
         parsed_data = {
+            "InterfaceManagementProfile": [{"name": "allow-mgmt", "ping": True}],
             "AggregateInterface": [{"name": "$ae1", "default_value": "ae1", "layer3": {}}],
             "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1", "layer3": {}}],
             "Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}],
@@ -255,6 +256,7 @@ class MainDryRunTests(unittest.TestCase):
 
     def test_full_network_stack_can_share_network_scope(self):
         parsed_data = {
+            "InterfaceManagementProfile": [{"name": "allow-mgmt", "ping": True}],
             "AggregateInterface": [{"name": "$ae1", "default_value": "ae1", "layer3": {}}],
             "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1", "layer3": {}}],
             "Layer3Subinterface": [{"name": "ethernet1/1.100", "parent_interface": "ethernet1/1", "tag": 100}],
@@ -272,21 +274,40 @@ class MainDryRunTests(unittest.TestCase):
             with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
                 plan = main.main(
                     AppConfig(),
-                    run_objects="AggregateInterface,EthernetInterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,LogicalRouter,Zones",
+                    run_objects="InterfaceManagementProfile,AggregateInterface,EthernetInterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,LogicalRouter,Zones",
                     json_file=str(parsed_path),
                     dry_run=True,
                     network_scope="snippet:Network-Stack",
                 )
 
-        self.assertEqual(plan.summary()["creates"], 8)
+        self.assertEqual(plan.summary()["creates"], 9)
         self.assertEqual(
             [change.object_type for change in plan.creates],
             [
-                "AggregateInterface", "EthernetInterface", "Layer3Subinterface",
-                "VlanInterface", "TunnelInterface", "LoopbackInterface",
-                "LogicalRouter", "Zones"
+                "InterfaceManagementProfile", "AggregateInterface", "EthernetInterface",
+                "Layer3Subinterface", "VlanInterface", "TunnelInterface",
+                "LoopbackInterface", "LogicalRouter", "Zones"
             ],
         )
+
+    def test_interface_management_profiles_can_use_network_scope_for_dry_run(self):
+        parsed_data = {"InterfaceManagementProfile": [{"name": "allow-mgmt", "ping": True}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="InterfaceManagementProfile",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "InterfaceManagementProfile")
 
     def test_aggregate_interfaces_can_use_network_scope_for_dry_run(self):
         parsed_data = {"AggregateInterface": [{"name": "$ae1", "default_value": "ae1", "layer3": {}}]}

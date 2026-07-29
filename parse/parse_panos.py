@@ -109,6 +109,7 @@ class XMLParser:
             'nat_pre_rules': self._parse_entries(self._nat_pre_rules_entries),
             'nat_post_rules': self._parse_entries(self._nat_post_rules_entries),
             'Application': self._parse_entries(self._application_entries),
+            'InterfaceManagementProfile': self._parse_entries(self._interface_management_profile_entries),
             'AggregateInterface': self._parse_entries(self._aggregate_interface_entries),
             'EthernetInterface': self._parse_entries(self._ethernet_interface_entries),
             'Layer3Subinterface': self._parse_entries(self._layer3_subinterface_entries),
@@ -151,6 +152,7 @@ class XMLParser:
             'nat_pre_rules': self._nat_pre_rules_entries,
             'nat_post_rules': self._nat_post_rules_entries,
             'Application': self._application_entries,
+            'InterfaceManagementProfile': self._interface_management_profile_entries,
             'AggregateInterface': self._aggregate_interface_entries,
             'EthernetInterface': self._ethernet_interface_entries,
             'Layer3Subinterface': self._layer3_subinterface_entries,
@@ -1699,6 +1701,53 @@ class XMLParser:
             schedules.append(schedule_entry)
 
         return schedules
+
+    def _interface_management_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Interface management profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        for entry in self.root.findall('./devices/entry/network/profiles/interface-management-profile/entry'):
+            payload = self._convert_interface_management_profile(entry)
+            if payload:
+                profiles.append(payload)
+
+        return profiles
+
+    def _convert_interface_management_profile(self, entry):
+        profile_name = entry.get('name')
+        if not profile_name:
+            return None
+
+        payload = {'name': profile_name}
+        for service in ['ping', 'https', 'ssh', 'snmp', 'response-pages', 'userid-service']:
+            value = self._child_text(entry, service)
+            if value:
+                payload[service.replace('-', '_')] = value.lower() == 'yes'
+
+        permitted_ips = self._member_or_entry_names(entry.find('permitted-ip'))
+        if permitted_ips:
+            payload['permitted_ip'] = permitted_ips
+
+        return payload
+
+    @staticmethod
+    def _member_or_entry_names(parent):
+        if parent is None:
+            return []
+
+        values = [
+            child.text.strip()
+            for child in parent.findall('member')
+            if child.text and child.text.strip()
+        ]
+        values.extend(
+            child.get('name')
+            for child in parent.findall('entry')
+            if child.get('name')
+        )
+        return values
 
     def _aggregate_interface_entries(self):
         if self.config_type != 'local':

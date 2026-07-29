@@ -47,6 +47,10 @@ class Zones(PanApiHandler):
     _endpoint = "/config/network/v1/zones"
     _scope_in_payload = True
 
+class InterfaceManagementProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/interface-management-profiles"
+    _scope_in_payload = True
+
 class AggregateInterface(PanApiHandler):
     _endpoint = "/config/network/v1/aggregate-interfaces"
     _scope_in_payload = True
