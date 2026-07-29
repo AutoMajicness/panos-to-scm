@@ -59,6 +59,12 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(obj.Layer3Subinterface.get_endpoint(), "/config/network/v1/layer3-subinterfaces")
         self.assertTrue(obj.Layer3Subinterface.uses_payload_scope())
 
+    def test_vlan_and_tunnel_interface_endpoints_are_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.VlanInterface.get_endpoint(), "/config/network/v1/vlan-interfaces")
+        self.assertEqual(obj.TunnelInterface.get_endpoint(), "/config/network/v1/tunnel-interfaces")
+        self.assertTrue(obj.VlanInterface.uses_payload_scope())
+        self.assertTrue(obj.TunnelInterface.uses_payload_scope())
+
     def test_logical_router_endpoint_is_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.LogicalRouter.get_endpoint(), "/config/network/v1/logical-routers")
         self.assertTrue(obj.LogicalRouter.uses_payload_scope())
@@ -189,6 +195,58 @@ class ProcessorTests(unittest.TestCase):
                 "name": "ethernet1/1.100",
                 "parent_interface": "ethernet1/1",
                 "tag": 100,
+                "snippet": "Network-Stack",
+            },
+        )
+
+    def test_vlan_interface_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.VlanInterface], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&snippet=Network-Stack",
+            [{"name": "vlan.100", "vlan_tag": "100", "ip": [{"name": "10.100.0.1/24"}]}],
+            obj.VlanInterface,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/network/v1/vlan-interfaces",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {
+                "name": "vlan.100",
+                "vlan_tag": "100",
+                "ip": [{"name": "10.100.0.1/24"}],
+                "snippet": "Network-Stack",
+            },
+        )
+
+    def test_tunnel_interface_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.TunnelInterface], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&snippet=Network-Stack",
+            [{"name": "tunnel.1", "default_value": "tunnel.1", "ip": [{"name": "169.254.1.1/30"}]}],
+            obj.TunnelInterface,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/network/v1/tunnel-interfaces",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {
+                "name": "tunnel.1",
+                "default_value": "tunnel.1",
+                "ip": [{"name": "169.254.1.1/30"}],
                 "snippet": "Network-Stack",
             },
         )

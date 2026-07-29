@@ -255,6 +255,8 @@ class MainDryRunTests(unittest.TestCase):
         parsed_data = {
             "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1", "layer3": {}}],
             "Layer3Subinterface": [{"name": "ethernet1/1.100", "parent_interface": "ethernet1/1", "tag": 100}],
+            "VlanInterface": [{"name": "vlan.100", "vlan_tag": "100", "ip": [{"name": "10.100.0.1/24"}]}],
+            "TunnelInterface": [{"name": "tunnel.1", "default_value": "tunnel.1", "ip": [{"name": "169.254.1.1/30"}]}],
             "LogicalRouter": [{"name": "default", "routing_stack": "legacy", "vrf": [{"name": "default"}]}],
             "Zones": [{"name": "users", "network": {"layer3": ["ethernet1/1.100"]}}],
         }
@@ -266,17 +268,42 @@ class MainDryRunTests(unittest.TestCase):
             with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
                 plan = main.main(
                     AppConfig(),
-                    run_objects="EthernetInterface,Layer3Subinterface,LogicalRouter,Zones",
+                    run_objects="EthernetInterface,Layer3Subinterface,VlanInterface,TunnelInterface,LogicalRouter,Zones",
                     json_file=str(parsed_path),
                     dry_run=True,
                     network_scope="snippet:Network-Stack",
                 )
 
-        self.assertEqual(plan.summary()["creates"], 4)
+        self.assertEqual(plan.summary()["creates"], 6)
         self.assertEqual(
             [change.object_type for change in plan.creates],
-            ["EthernetInterface", "Layer3Subinterface", "LogicalRouter", "Zones"],
+            [
+                "EthernetInterface", "Layer3Subinterface", "VlanInterface",
+                "TunnelInterface", "LogicalRouter", "Zones"
+            ],
         )
+
+    def test_vlan_and_tunnel_interfaces_can_use_network_scope_for_dry_run(self):
+        parsed_data = {
+            "VlanInterface": [{"name": "vlan.100", "vlan_tag": "100"}],
+            "TunnelInterface": [{"name": "tunnel.1", "default_value": "tunnel.1"}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="VlanInterface,TunnelInterface",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 2)
+        self.assertEqual([change.object_type for change in plan.creates], ["VlanInterface", "TunnelInterface"])
 
     def test_object_dry_run_falls_back_to_default_scope(self):
         parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}

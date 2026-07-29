@@ -111,6 +111,8 @@ class XMLParser:
             'Application': self._parse_entries(self._application_entries),
             'EthernetInterface': self._parse_entries(self._ethernet_interface_entries),
             'Layer3Subinterface': self._parse_entries(self._layer3_subinterface_entries),
+            'VlanInterface': self._parse_entries(self._vlan_interface_entries),
+            'TunnelInterface': self._parse_entries(self._tunnel_interface_entries),
             'LogicalRouter': self._parse_entries(self._logical_router_entries),
             'Zones': self._parse_entries(self._zones),
             'DecryptionProfile': self._parse_entries(self._decryption_profiles_entries),
@@ -149,6 +151,8 @@ class XMLParser:
             'Application': self._application_entries,
             'EthernetInterface': self._ethernet_interface_entries,
             'Layer3Subinterface': self._layer3_subinterface_entries,
+            'VlanInterface': self._vlan_interface_entries,
+            'TunnelInterface': self._tunnel_interface_entries,
             'LogicalRouter': self._logical_router_entries,
             'Zones': self._zones,
             'DecryptionProfile': self._decryption_profiles_entries,
@@ -1768,6 +1772,35 @@ class XMLParser:
 
         return layer3_payload
 
+    def _static_ip_entries(self, entry):
+        ip_entries = [
+            ip_entry.get('name')
+            for ip_entry in entry.findall('ip/entry')
+            if ip_entry.get('name')
+        ]
+        return [{'name': ip_address} for ip_address in ip_entries]
+
+    def _apply_common_l3_interface_fields(self, payload, entry):
+        field_map = {
+            'comment': 'comment',
+            'interface-management-profile': 'interface_management_profile',
+            'netflow-profile': 'netflow_profile',
+        }
+        for panos_name, scm_name in field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        mtu = self._child_text(entry, 'mtu')
+        if mtu and mtu.isdigit():
+            payload['mtu'] = int(mtu)
+
+        ip_entries = self._static_ip_entries(entry)
+        if ip_entries:
+            payload['ip'] = ip_entries
+
+        return payload
+
     def _layer3_subinterface_entries(self):
         if self.config_type != 'local':
             self.logger.warning("Layer 3 subinterface migration currently supports local firewall XML only.")
@@ -1800,29 +1833,57 @@ class XMLParser:
         if tag and tag.isdigit():
             payload['tag'] = int(tag)
 
-        field_map = {
-            'comment': 'comment',
-            'netflow-profile': 'netflow_profile',
-            'interface-management-profile': 'interface_management_profile',
+        return self._apply_common_l3_interface_fields(payload, entry)
+
+    def _vlan_interface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("VLAN interface migration currently supports local firewall XML only.")
+            return []
+
+        interfaces = []
+        for entry in self.root.findall('./devices/entry/network/interface/vlan/units/entry'):
+            payload = self._convert_vlan_interface(entry)
+            if payload:
+                interfaces.append(payload)
+
+        return interfaces
+
+    def _convert_vlan_interface(self, entry):
+        interface_name = entry.get('name')
+        if not interface_name:
+            return None
+
+        payload = {'name': interface_name}
+        vlan_tag = self._child_text(entry, 'tag')
+        if vlan_tag:
+            payload['vlan_tag'] = vlan_tag
+
+        return self._apply_common_l3_interface_fields(payload, entry)
+
+    def _tunnel_interface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Tunnel interface migration currently supports local firewall XML only.")
+            return []
+
+        interfaces = []
+        for entry in self.root.findall('./devices/entry/network/interface/tunnel/units/entry'):
+            payload = self._convert_tunnel_interface(entry)
+            if payload:
+                interfaces.append(payload)
+
+        return interfaces
+
+    def _convert_tunnel_interface(self, entry):
+        interface_name = entry.get('name')
+        if not interface_name:
+            return None
+
+        payload = {
+            'name': interface_name,
+            'default_value': interface_name,
         }
-        for panos_name, scm_name in field_map.items():
-            value = self._child_text(entry, panos_name)
-            if value:
-                payload[scm_name] = value
 
-        mtu = self._child_text(entry, 'mtu')
-        if mtu and mtu.isdigit():
-            payload['mtu'] = int(mtu)
-
-        ip_entries = [
-            ip_entry.get('name')
-            for ip_entry in entry.findall('ip/entry')
-            if ip_entry.get('name')
-        ]
-        if ip_entries:
-            payload['ip'] = [{'name': ip_address} for ip_address in ip_entries]
-
-        return payload
+        return self._apply_common_l3_interface_fields(payload, entry)
 
     def _logical_router_entries(self):
         if self.config_type != 'local':
