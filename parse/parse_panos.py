@@ -120,6 +120,7 @@ class XMLParser:
             'TunnelInterface': self._parse_entries(self._tunnel_interface_entries),
             'LoopbackInterface': self._parse_entries(self._loopback_interface_entries),
             'OSPFAuthProfile': self._parse_entries(self._ospf_auth_profile_entries),
+            'BgpAuthProfile': self._parse_entries(self._bgp_auth_profile_entries),
             'LogicalRouter': self._parse_entries(self._logical_router_entries),
             'RoutePrefixList': self._parse_entries(self._route_prefix_list_entries),
             'RouteAccessList': self._parse_entries(self._route_access_list_entries),
@@ -179,6 +180,7 @@ class XMLParser:
             'TunnelInterface': self._tunnel_interface_entries,
             'LoopbackInterface': self._loopback_interface_entries,
             'OSPFAuthProfile': self._ospf_auth_profile_entries,
+            'BgpAuthProfile': self._bgp_auth_profile_entries,
             'LogicalRouter': self._logical_router_entries,
             'RoutePrefixList': self._route_prefix_list_entries,
             'RouteAccessList': self._route_access_list_entries,
@@ -3083,6 +3085,47 @@ class XMLParser:
 
         return payload if len(payload) > 1 else None
 
+    def _bgp_auth_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("BGP auth profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            bgp = router_entry.find('protocol/bgp')
+            if bgp is None:
+                continue
+            for profile_entry in self._bgp_auth_profile_config_entries(bgp):
+                profile = self._convert_bgp_auth_profile(profile_entry)
+                if not profile or profile['name'] in seen_names:
+                    continue
+                seen_names.add(profile['name'])
+                profiles.append(profile)
+
+        return profiles
+
+    def _bgp_auth_profile_config_entries(self, bgp):
+        entries = []
+        for path in ['auth-profile/entry', 'auth-profiles/entry', 'authentication-profile/entry', 'authentication-profiles/entry']:
+            entries.extend(bgp.findall(path))
+        return entries
+
+    def _convert_bgp_auth_profile(self, profile_entry):
+        profile_name = profile_entry.get('name')
+        if not profile_name:
+            return None
+
+        secret = (
+            self._child_text(profile_entry, 'secret')
+            or self._child_text(profile_entry, 'password')
+            or self._child_text(profile_entry, 'key')
+        )
+        if not secret:
+            return None
+
+        return {'name': profile_name, 'secret': secret}
+
     def _route_prefix_list_entries(self):
         if self.config_type != 'local':
             self.logger.warning("Route prefix list migration currently supports local firewall XML only.")
@@ -3368,10 +3411,16 @@ class XMLParser:
         for panos_name, scm_name in [
             ('enable', 'enable'),
             ('type', 'type'),
+            ('auth-profile', 'authentication_profile'),
+            ('authentication-profile', 'authentication_profile'),
         ]:
             value = self._child_text(group_entry, panos_name)
             if value:
                 payload[scm_name] = value.lower() == 'yes' if panos_name == 'enable' else value
+
+        timers = self._convert_bgp_timers(group_entry.find('timers'))
+        if timers:
+            payload['timers'] = timers
 
         peers = []
         for peer_entry in group_entry.findall('peer/entry'):
@@ -3395,10 +3444,24 @@ class XMLParser:
             ('local-address/interface', 'local_interface'),
             ('local-address/ip', 'local_address'),
             ('peer-address/ip', 'peer_address'),
+            ('auth-profile', 'authentication_profile'),
+            ('authentication-profile', 'authentication_profile'),
         ]:
             value = self._child_text(peer_entry, panos_name)
             if value:
                 payload[scm_name] = value.lower() == 'yes' if panos_name == 'enable' else value
+
+        timers = self._convert_bgp_timers(peer_entry.find('timers'))
+        if timers:
+            payload['timers'] = timers
+
+        multihop = self._convert_bgp_multihop(peer_entry.find('multihop'))
+        if multihop:
+            payload['multihop'] = multihop
+
+        connection_options = self._convert_bgp_connection_options(peer_entry.find('connection-options'))
+        if connection_options:
+            payload['connection_options'] = connection_options
 
         import_ipv4_route_maps = self._bgp_policy_route_map_names(router_entry, 'import', family='ipv4')
         export_ipv4_route_maps = self._bgp_policy_route_map_names(router_entry, 'export', family='ipv4')
@@ -3421,6 +3484,57 @@ class XMLParser:
             payload['address_family'] = address_family
 
         return payload
+
+    def _convert_bgp_timers(self, timers):
+        if timers is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('keep-alive-interval', 'keep_alive_interval'),
+            ('hold-time', 'hold_time'),
+            ('open-delay-time', 'open_delay_time'),
+            ('idle-hold-time', 'idle_hold_time'),
+            ('min-route-advertisement-interval', 'min_route_advertisement_interval'),
+        ]:
+            value = self._child_text(timers, panos_name)
+            if value and value.isdigit():
+                payload[scm_name] = int(value)
+        return payload or None
+
+    def _convert_bgp_multihop(self, multihop):
+        if multihop is None:
+            return None
+
+        payload = {}
+        enable = self._child_text(multihop, 'enable')
+        if enable:
+            payload['enable'] = enable.lower() == 'yes'
+
+        ttl = self._child_text(multihop, 'ttl')
+        if ttl and ttl.isdigit():
+            payload['ttl'] = int(ttl)
+
+        return payload or None
+
+    def _convert_bgp_connection_options(self, connection_options):
+        if connection_options is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('incoming-bgp-connection', 'incoming_bgp_connection'),
+            ('outgoing-bgp-connection', 'outgoing_bgp_connection'),
+        ]:
+            value = self._child_text(connection_options, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes' if value.lower() in {'yes', 'no'} else value
+
+        source_port = self._child_text(connection_options, 'local-port')
+        if source_port and source_port.isdigit():
+            payload['local_port'] = int(source_port)
+
+        return payload or None
 
     def _convert_ospf(self, ospf):
         if ospf is None:
@@ -3445,6 +3559,14 @@ class XMLParser:
                 areas.append(area)
         if areas:
             payload['area'] = areas
+
+        export_rules = self._convert_ospf_export_rules(ospf)
+        if export_rules:
+            payload['export_rules'] = export_rules
+
+        redistribution_profile = self._ospf_redistribution_profile_name(ospf)
+        if redistribution_profile:
+            payload['redistribution_profile'] = redistribution_profile
 
         return payload or None
 
@@ -3480,6 +3602,53 @@ class XMLParser:
             payload['interface'] = interfaces
 
         return payload
+
+    def _convert_ospf_export_rules(self, ospf):
+        export_rules = []
+        for rule_entry in self._ospf_export_rule_entries(ospf):
+            rule = self._convert_ospf_export_rule(rule_entry)
+            if rule:
+                export_rules.append(rule)
+        return export_rules
+
+    def _ospf_export_rule_entries(self, ospf):
+        entries = []
+        for path in ['export-rules/entry', 'export-rule/entry', 'redist-rules/entry', 'redist-rule/entry']:
+            entries.extend(ospf.findall(path))
+        return entries
+
+    def _convert_ospf_export_rule(self, rule_entry):
+        rule_name = rule_entry.get('name')
+        if not rule_name:
+            return None
+
+        payload = {'name': rule_name}
+        new_path_type = (
+            self._child_text(rule_entry, 'new-path-type')
+            or self._child_text(rule_entry, 'path-type')
+            or self._child_text(rule_entry, 'type')
+        )
+        if new_path_type:
+            payload['new_path_type'] = new_path_type
+
+        new_tag = self._child_text(rule_entry, 'new-tag') or self._child_text(rule_entry, 'tag')
+        if new_tag:
+            payload['new_tag'] = new_tag
+
+        metric = self._child_text(rule_entry, 'metric')
+        if metric and metric.isdigit():
+            payload['metric'] = int(metric)
+
+        return payload
+
+    def _ospf_redistribution_profile_name(self, ospf):
+        explicit = (
+            self._child_text(ospf, 'redistribution-profile')
+            or self._child_text(ospf, 'redist-profile')
+        )
+        if explicit:
+            return explicit
+        return None
 
     def _convert_ospf_interface(self, interface_entry):
         interface_name = interface_entry.get('name')

@@ -97,6 +97,10 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(obj.OSPFAuthProfile.get_endpoint(), "/config/network/v1/ospf-auth-profiles")
         self.assertTrue(obj.OSPFAuthProfile.uses_payload_scope())
 
+    def test_bgp_auth_profile_endpoint_is_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.BgpAuthProfile.get_endpoint(), "/config/network/v1/bgp-auth-profiles")
+        self.assertTrue(obj.BgpAuthProfile.uses_payload_scope())
+
     def test_route_filter_endpoints_are_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.RoutePrefixList.get_endpoint(), "/config/network/v1/route-prefix-lists")
         self.assertEqual(obj.RouteAccessList.get_endpoint(), "/config/network/v1/route-access-lists")
@@ -544,6 +548,11 @@ class ProcessorTests(unittest.TestCase):
                 obj.OSPFAuthProfile,
                 "/config/network/v1/ospf-auth-profiles",
                 {"name": "ospf-simple", "password": "ospf-secret"},
+            ),
+            (
+                obj.BgpAuthProfile,
+                "/config/network/v1/bgp-auth-profiles",
+                {"name": "bgp-md5", "secret": "bgp-secret"},
             ),
             (
                 obj.RouteAccessList,

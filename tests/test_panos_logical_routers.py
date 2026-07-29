@@ -20,13 +20,24 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                 <enable>yes</enable>
                 <router-id>192.0.2.1</router-id>
                 <local-as>65001</local-as>
+                <auth-profile>
+                  <entry name="bgp-md5">
+                    <secret>bgp-secret</secret>
+                  </entry>
+                </auth-profile>
                 <peer-group>
                   <entry name="upstream">
                     <enable>yes</enable>
+                    <auth-profile>bgp-md5</auth-profile>
+                    <timers>
+                      <keep-alive-interval>30</keep-alive-interval>
+                      <hold-time>90</hold-time>
+                    </timers>
                     <peer>
                       <entry name="peer-a">
                         <enable>yes</enable>
                         <peer-as>65002</peer-as>
+                        <auth-profile>bgp-md5</auth-profile>
                         <local-address>
                           <interface>ethernet1/1</interface>
                           <ip>192.0.2.1/24</ip>
@@ -34,6 +45,20 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                         <peer-address>
                           <ip>192.0.2.2</ip>
                         </peer-address>
+                        <timers>
+                          <keep-alive-interval>20</keep-alive-interval>
+                          <hold-time>60</hold-time>
+                          <min-route-advertisement-interval>5</min-route-advertisement-interval>
+                        </timers>
+                        <multihop>
+                          <enable>yes</enable>
+                          <ttl>2</ttl>
+                        </multihop>
+                        <connection-options>
+                          <incoming-bgp-connection>yes</incoming-bgp-connection>
+                          <outgoing-bgp-connection>yes</outgoing-bgp-connection>
+                          <local-port>179</local-port>
+                        </connection-options>
                       </entry>
                     </peer>
                   </entry>
@@ -135,6 +160,7 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
               <ospf>
                 <enable>yes</enable>
                 <router-id>192.0.2.1</router-id>
+                <redistribution-profile>ospf-redist-local</redistribution-profile>
                 <auth-profile>
                   <entry name="ospf-simple">
                     <password>ospf-secret</password>
@@ -169,6 +195,13 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                     </interface>
                   </entry>
                 </area>
+                <export-rules>
+                  <entry name="connected-to-ospf">
+                    <new-path-type>ext-2</new-path-type>
+                    <new-tag>100</new-tag>
+                    <metric>20</metric>
+                  </entry>
+                </export-rules>
               </ospf>
               <ospfv3>
                 <enable>yes</enable>
@@ -284,14 +317,34 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                     {
                                         "name": "upstream",
                                         "enable": True,
+                                        "authentication_profile": "bgp-md5",
+                                        "timers": {
+                                            "keep_alive_interval": 30,
+                                            "hold_time": 90,
+                                        },
                                         "peer": [
                                             {
                                                 "name": "peer-a",
                                                 "enable": True,
                                                 "peer_as": "65002",
+                                                "authentication_profile": "bgp-md5",
                                                 "local_interface": "ethernet1/1",
                                                 "local_address": "192.0.2.1/24",
                                                 "peer_address": "192.0.2.2",
+                                                "timers": {
+                                                    "keep_alive_interval": 20,
+                                                    "hold_time": 60,
+                                                    "min_route_advertisement_interval": 5,
+                                                },
+                                                "multihop": {
+                                                    "enable": True,
+                                                    "ttl": 2,
+                                                },
+                                                "connection_options": {
+                                                    "incoming_bgp_connection": True,
+                                                    "outgoing_bgp_connection": True,
+                                                    "local_port": 179,
+                                                },
                                                 "address_family": {
                                                     "ipv4": {
                                                         "unicast": {
@@ -314,6 +367,15 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                             "ospf": {
                                 "enable": True,
                                 "router_id": "192.0.2.1",
+                                "export_rules": [
+                                    {
+                                        "name": "connected-to-ospf",
+                                        "new_path_type": "ext-2",
+                                        "new_tag": "100",
+                                        "metric": 20,
+                                    }
+                                ],
+                                "redistribution_profile": "ospf-redist-local",
                                 "area": [
                                     {
                                         "name": "0.0.0.0",
@@ -421,6 +483,7 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
             parsed = XMLParser(str(xml_path), "local").parse_specific_types(
                 [
                     "OSPFAuthProfile",
+                    "BgpAuthProfile",
                     "RoutePrefixList",
                     "RouteAccessList",
                     "RouteCommunityList",
@@ -447,6 +510,15 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                         }
                     ],
                 },
+            ],
+        )
+        self.assertEqual(
+            parsed["BgpAuthProfile"],
+            [
+                {
+                    "name": "bgp-md5",
+                    "secret": "bgp-secret",
+                }
             ],
         )
         self.assertEqual(
