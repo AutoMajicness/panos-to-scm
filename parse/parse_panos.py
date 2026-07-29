@@ -110,6 +110,7 @@ class XMLParser:
             'nat_post_rules': self._parse_entries(self._nat_post_rules_entries),
             'Application': self._parse_entries(self._application_entries),
             'EthernetInterface': self._parse_entries(self._ethernet_interface_entries),
+            'Layer3Subinterface': self._parse_entries(self._layer3_subinterface_entries),
             'Zones': self._parse_entries(self._zones),
             'DecryptionProfile': self._parse_entries(self._decryption_profiles_entries),
             'decryption_pre_rules': self._parse_entries(self._decryption_pre_rules_entries),
@@ -146,6 +147,7 @@ class XMLParser:
             'nat_post_rules': self._nat_post_rules_entries,
             'Application': self._application_entries,
             'EthernetInterface': self._ethernet_interface_entries,
+            'Layer3Subinterface': self._layer3_subinterface_entries,
             'Zones': self._zones,
             'DecryptionProfile': self._decryption_profiles_entries,
             'decryption_pre_rules': self._decryption_pre_rules_entries,
@@ -1763,6 +1765,62 @@ class XMLParser:
             layer3_payload['interface_management_profile'] = management_profile
 
         return layer3_payload
+
+    def _layer3_subinterface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Layer 3 subinterface migration currently supports local firewall XML only.")
+            return []
+
+        subinterfaces = []
+        for parent_entry in self.root.findall('./devices/entry/network/interface/ethernet/entry'):
+            parent_name = parent_entry.get('name')
+            if not parent_name:
+                continue
+
+            for subinterface_entry in parent_entry.findall('layer3/units/entry'):
+                payload = self._convert_layer3_subinterface(parent_name, subinterface_entry)
+                if payload:
+                    subinterfaces.append(payload)
+
+        return subinterfaces
+
+    def _convert_layer3_subinterface(self, parent_name, entry):
+        subinterface_name = entry.get('name')
+        if not subinterface_name:
+            return None
+
+        payload = {
+            'name': subinterface_name,
+            'parent_interface': parent_name,
+        }
+
+        tag = self._child_text(entry, 'tag')
+        if tag and tag.isdigit():
+            payload['tag'] = int(tag)
+
+        field_map = {
+            'comment': 'comment',
+            'netflow-profile': 'netflow_profile',
+            'interface-management-profile': 'interface_management_profile',
+        }
+        for panos_name, scm_name in field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        mtu = self._child_text(entry, 'mtu')
+        if mtu and mtu.isdigit():
+            payload['mtu'] = int(mtu)
+
+        ip_entries = [
+            ip_entry.get('name')
+            for ip_entry in entry.findall('ip/entry')
+            if ip_entry.get('name')
+        ]
+        if ip_entries:
+            payload['ip'] = [{'name': ip_address} for ip_address in ip_entries]
+
+        return payload
 
     @staticmethod
     def _child_text(entry, path):
