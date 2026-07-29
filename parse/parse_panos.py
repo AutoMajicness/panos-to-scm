@@ -2426,13 +2426,13 @@ class XMLParser:
 
         logical_routers = []
         for entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
-            payload = self._convert_virtual_router(entry)
+            payload = self._convert_panos_virtual_router_to_logical_router(entry)
             if payload:
                 logical_routers.append(payload)
 
         return logical_routers
 
-    def _convert_virtual_router(self, entry):
+    def _convert_panos_virtual_router_to_logical_router(self, entry):
         router_name = entry.get('name')
         if not router_name:
             return None
@@ -2467,7 +2467,7 @@ class XMLParser:
 
         return {
             'name': router_name,
-            'routing_stack': 'legacy',
+            'routing_stack': 'advanced',
             'vrf': [vrf],
         }
 
@@ -2501,7 +2501,7 @@ class XMLParser:
 
         bfd_profile = self._child_text(entry, 'bfd/profile')
         if bfd_profile:
-            route['bfd_profile'] = bfd_profile
+            route['bfd'] = {'profile': bfd_profile}
 
         path_monitor = self._convert_static_route_path_monitor(entry.find('path-monitor'))
         if path_monitor:

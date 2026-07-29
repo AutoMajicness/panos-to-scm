@@ -449,7 +449,7 @@ class ProcessorTests(unittest.TestCase):
 
         manager.configure.post_entries(
             "&snippet=Network-Stack",
-            [{"name": "default", "routing_stack": "legacy", "vrf": [{"name": "default"}]}],
+            [{"name": "default", "routing_stack": "advanced", "vrf": [{"name": "default"}]}],
             obj.LogicalRouter,
             extra_query_params="",
         )
@@ -462,7 +462,7 @@ class ProcessorTests(unittest.TestCase):
             session.post_calls[0]["json"],
             {
                 "name": "default",
-                "routing_stack": "legacy",
+                "routing_stack": "advanced",
                 "vrf": [{"name": "default"}],
                 "snippet": "Network-Stack",
             },

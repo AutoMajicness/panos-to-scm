@@ -240,7 +240,7 @@ class MainDryRunTests(unittest.TestCase):
             "LogicalRouter": [
                 {
                     "name": "default",
-                    "routing_stack": "legacy",
+                    "routing_stack": "advanced",
                     "vrf": [{"name": "default", "interface": ["ethernet1/1"]}],
                 }
             ]
@@ -280,7 +280,7 @@ class MainDryRunTests(unittest.TestCase):
             "VlanInterface": [{"name": "vlan.100", "vlan_tag": "100", "ip": [{"name": "10.100.0.1/24"}]}],
             "TunnelInterface": [{"name": "tunnel.1", "default_value": "tunnel.1", "ip": [{"name": "169.254.1.1/30"}]}],
             "LoopbackInterface": [{"name": "loopback.1", "ip": ["10.255.0.1/32"]}],
-            "LogicalRouter": [{"name": "default", "routing_stack": "legacy", "vrf": [{"name": "default"}]}],
+            "LogicalRouter": [{"name": "default", "routing_stack": "advanced", "vrf": [{"name": "default"}]}],
             "IKECryptoProfile": [{"name": "ike-crypto-a", "hash": ["sha256"], "encryption": ["aes-256-cbc"], "dh_group": ["group14"]}],
             "IPsecCryptoProfile": [{"name": "ipsec-crypto-a", "esp": {"encryption": ["aes-256-gcm"]}}],
             "IKEGateway": [{"name": "vpn-gw-a", "protocol": {"ikev2": {"ike_crypto_profile": "ike-crypto-a"}}}],

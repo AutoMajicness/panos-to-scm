@@ -138,7 +138,7 @@ The legacy `--scope folder:All` option still works as a fallback for all categor
 - **VLAN Interfaces**
 - **Tunnel Interfaces**
 - **Loopback Interfaces**
-- **Logical Routers with IPv4 Static Routes**
+- **Logical Routers with IPv4/IPv6 Static Routes**
 - **IKE Crypto Profiles**
 - **IPsec Crypto Profiles**
 - **IKE Gateways**
@@ -150,7 +150,7 @@ Network features currently support local firewall XML only. Panorama templates a
 
 DHCP client mode is supported for Layer 3 ethernet interfaces and Layer 3 ethernet subinterfaces. Static IP mode remains supported for ethernet, aggregate, subinterface, VLAN, tunnel, and loopback interfaces.
 
-DHCP interface migration covers common local firewall DHCP server and relay interface settings. Logical router migration includes IPv4/IPv6 static routes, BFD profile references, and static route path-monitor data.
+PAN-OS local firewall XML stores routes under `network/virtual-router`; this tool maps those source entries into SCM Logical Routers with `routing_stack` set to `advanced` for ARE-enabled firewalls. DHCP interface migration covers common local firewall DHCP server and relay interface settings. Logical router migration includes IPv4/IPv6 static routes, BFD profile references, and static route path-monitor data.
 
 Virtual-wire zone membership is parsed under security zones. Physical ethernet interfaces using virtual-wire mode are detected in the ethernet interface parser, but SCM currently exposes virtual-wire assignment differently than a standalone network object, so validate those dry-run payloads before posting.
 

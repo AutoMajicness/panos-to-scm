@@ -75,7 +75,7 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
 
 
 class PanosLogicalRouterParserTests(unittest.TestCase):
-    def test_local_virtual_routers_are_normalized_as_logical_routers(self):
+    def test_local_panos_virtual_router_entries_are_mapped_to_scm_logical_routers(self):
         with tempfile.TemporaryDirectory() as directory:
             xml_path = Path(directory) / "running.xml"
             xml_path.write_text(LOCAL_LOGICAL_ROUTER_XML, encoding="utf-8")
@@ -87,7 +87,7 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
             [
                 {
                     "name": "default",
-                    "routing_stack": "legacy",
+                    "routing_stack": "advanced",
                     "vrf": [
                         {
                             "name": "default",
@@ -107,7 +107,7 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                             "name": "discard-rfc1918",
                                             "destination": "10.0.0.0/8",
                                             "nexthop": {"discard": {}},
-                                            "bfd_profile": "default",
+                                            "bfd": {"profile": "default"},
                                             "path_monitor": {
                                                 "enable": True,
                                                 "failure_condition": "any",
