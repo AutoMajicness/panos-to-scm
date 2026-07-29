@@ -235,13 +235,37 @@ def write_plan_output(plan, plan_output, label):
     logger.info(f"{label} written to {plan_output}")
 
 
-def validation_blocker_count(plan):
-    return len(plan.conflicts) + len(plan.unsupported)
+def parse_warning_codes(warning_codes):
+    if not warning_codes:
+        return set()
+    return {
+        warning_code.strip()
+        for warning_code in warning_codes.split(',')
+        if warning_code.strip()
+    }
 
 
-def validation_summary(plan):
+def warning_blocker_count(plan, warnings_as_errors=False, warning_codes=None):
+    if not warnings_as_errors:
+        return 0
+    warning_codes = warning_codes or set()
+    if not warning_codes:
+        return len(plan.warnings)
+    return sum(1 for warning in plan.warnings if warning.code in warning_codes)
+
+
+def validation_blocker_count(plan, warnings_as_errors=False, warning_codes=None):
+    return (
+        len(plan.conflicts)
+        + len(plan.unsupported)
+        + warning_blocker_count(plan, warnings_as_errors, warning_codes)
+    )
+
+
+def validation_summary(plan, warnings_as_errors=False, warning_codes=None):
     summary = plan.summary()
-    summary["blockers"] = validation_blocker_count(plan)
+    summary["warning_blockers"] = warning_blocker_count(plan, warnings_as_errors, warning_codes)
+    summary["blockers"] = validation_blocker_count(plan, warnings_as_errors, warning_codes)
     return summary
 
 def main(
@@ -255,6 +279,8 @@ def main(
     json_file="",
     dry_run=False,
     validate_only=False,
+    warnings_as_errors=False,
+    warning_codes="",
     network_report=False,
     conflict_policy="fail",
     plan_output="",
@@ -375,6 +401,7 @@ def main(
 
         if validate_only:
             current_data = load_current_data(current_data_file)
+            warning_code_filter = parse_warning_codes(warning_codes)
             selected_type_names = selected_type_names_for_plan(
                 parsed_data,
                 selected_obj_types,
@@ -391,7 +418,11 @@ def main(
                 conflict_policy=conflict_policy,
             )
             write_plan_output(plan, plan_output, "Validation plan")
-            summary = validation_summary(plan)
+            summary = validation_summary(
+                plan,
+                warnings_as_errors=warnings_as_errors,
+                warning_codes=warning_code_filter,
+            )
             logger.info(f"Validation summary: {json.dumps(summary, sort_keys=True)}")
             print(json.dumps(summary, indent=2, sort_keys=True))
             if summary["blockers"]:
@@ -507,6 +538,8 @@ if __name__ == "__main__":
     parser.add_argument('--device-group', action='store', default="", help="Panorama device-group name when using panorama/device-group")
     parser.add_argument('--dry-run', action='store_true', help="Build a local migration plan without authenticating to SCM or writing changes")
     parser.add_argument('--validate-only', action='store_true', help="Run parser/planner validation without SCM authentication or scope prompts; exits 1 on conflicts or unsupported entries")
+    parser.add_argument('--warnings-as-errors', action='store_true', help="In validate-only mode, promote warnings to blockers and exit 1 when matching warnings exist")
+    parser.add_argument('--warning-codes', action='store', default="", help="Comma-separated warning codes to promote with --warnings-as-errors. Defaults to all warnings")
     parser.add_argument('--network-report', action='store_true', help="Emit parsed network payloads and migration warnings without SCM comparison or authentication")
     parser.add_argument('--conflict-policy', choices=['fail', 'replace', 'ignore'], default='fail', help="How dry-run planning handles changed existing objects")
     parser.add_argument('--plan-output', action='store', default="", help="Write full dry-run or validation migration plan JSON to this path")
@@ -515,4 +548,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config = parser_config if args.dry_run or args.validate_only or args.network_report else ConfigurationManager().app_config
     
-    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, validate_only=args.validate_only, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)
+    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, validate_only=args.validate_only, warnings_as_errors=args.warnings_as_errors, warning_codes=args.warning_codes, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)

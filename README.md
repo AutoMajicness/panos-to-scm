@@ -96,6 +96,18 @@ python3 main.py \
 
 `--validate-only` prints the same planner summary plus a `blockers` count. It exits with status `1` when conflicts or unsupported parsed entries are present, and keeps schema-sensitive or missing-reference findings as warnings.
 
+To fail validation on warnings, add `--warnings-as-errors`. To promote only specific warning classes, combine it with `--warning-codes`, for example:
+
+```bash
+python3 main.py \
+  --parser panos \
+  --config-file running_config.xml \
+  --panos-config-type local \
+  --validate-only \
+  --warnings-as-errors \
+  --warning-codes missing-network-reference,unsupported-panos-routing-node
+```
+
 For a network-only offline report that does not require SCM scope/current-data comparison:
 
 ```bash
@@ -123,6 +135,8 @@ python3 main.py \
 - Set network destination scope: `--network-scope snippet:Network-Stack`
 - Build an offline plan without SCM authentication: `--dry-run`
 - Run local parser/planner validation without SCM authentication or scope prompts: `--validate-only`
+- Promote validate-only warnings to blockers: `--warnings-as-errors`
+- Restrict promoted warnings by code: `--warning-codes missing-network-reference,unsupported-panos-routing-node`
 - Emit parsed network payloads and warnings without SCM comparison: `--network-report`
 - Write a full dry-run plan: `--plan-output /tmp/plan.json`
 - Write a full network report: `--report-output /tmp/network-report.json`
