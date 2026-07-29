@@ -77,7 +77,7 @@ python3 main.py \
   --object-scope folder:All \
   --policy-scope folder:All \
   --dry-run \
-  -o InterfaceManagementProfile,ZoneProtectionProfile,AggregateInterface,EthernetInterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,LogicalRouter,Zones
+  -o InterfaceManagementProfile,ZoneProtectionProfile,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,Zones
 ```
 
 The legacy `--scope folder:All` option still works as a fallback for all categories. Prefer the category-specific flags when network snippets and policy folders are different.
@@ -132,16 +132,23 @@ The legacy `--scope folder:All` option still works as a fallback for all categor
 - **Zone Protection Profiles**
 - **Aggregate Ethernet Interfaces**
 - **Ethernet Interfaces**
+- **Layer 2 Subinterfaces**
 - **Layer 3 Subinterfaces**
 - **VLAN Interfaces**
 - **Tunnel Interfaces**
 - **Loopback Interfaces**
 - **Logical Routers with IPv4 Static Routes**
+- **IKE Crypto Profiles**
+- **IPsec Crypto Profiles**
+- **IKE Gateways**
+- **IPsec Tunnels**
 - **Security Zones**
 
 Network features currently support local firewall XML only. Panorama templates and template stacks are not parsed yet.
 
 DHCP client mode is supported for Layer 3 ethernet interfaces and Layer 3 ethernet subinterfaces. Static IP mode remains supported for ethernet, aggregate, subinterface, VLAN, tunnel, and loopback interfaces.
+
+Virtual-wire zone membership is parsed under security zones. Physical ethernet interfaces using virtual-wire mode are detected in the ethernet interface parser, but SCM currently exposes virtual-wire assignment differently than a standalone network object, so validate those dry-run payloads before posting.
 
 ## Cisco ASA/Firepower migration to SCM for PANOS
 - Currently ASA/Firepower we need the running-config. `more system:running-config` or from FTD/FMC export the config. Must be in familiar ASA format

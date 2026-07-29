@@ -63,6 +63,10 @@ class EthernetInterface(PanApiHandler):
     _endpoint = "/config/network/v1/ethernet-interfaces"
     _scope_in_payload = True
 
+class Layer2Subinterface(PanApiHandler):
+    _endpoint = "/config/network/v1/layer2-subinterfaces"
+    _scope_in_payload = True
+
 class Layer3Subinterface(PanApiHandler):
     _endpoint = "/config/network/v1/layer3-subinterfaces"
     _scope_in_payload = True
@@ -81,6 +85,22 @@ class LoopbackInterface(PanApiHandler):
 
 class LogicalRouter(PanApiHandler):
     _endpoint = "/config/network/v1/logical-routers"
+    _scope_in_payload = True
+
+class IKECryptoProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/ike-crypto-profiles"
+    _scope_in_payload = True
+
+class IPsecCryptoProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/ipsec-crypto-profiles"
+    _scope_in_payload = True
+
+class IKEGateway(PanApiHandler):
+    _endpoint = "/config/network/v1/ike-gateways"
+    _scope_in_payload = True
+
+class IPsecTunnel(PanApiHandler):
+    _endpoint = "/config/network/v1/ipsec-tunnels"
     _scope_in_payload = True
 
 class Address(PanApiHandler):

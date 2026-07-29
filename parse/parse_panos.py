@@ -113,11 +113,16 @@ class XMLParser:
             'ZoneProtectionProfile': self._parse_entries(self._zone_protection_profile_entries),
             'AggregateInterface': self._parse_entries(self._aggregate_interface_entries),
             'EthernetInterface': self._parse_entries(self._ethernet_interface_entries),
+            'Layer2Subinterface': self._parse_entries(self._layer2_subinterface_entries),
             'Layer3Subinterface': self._parse_entries(self._layer3_subinterface_entries),
             'VlanInterface': self._parse_entries(self._vlan_interface_entries),
             'TunnelInterface': self._parse_entries(self._tunnel_interface_entries),
             'LoopbackInterface': self._parse_entries(self._loopback_interface_entries),
             'LogicalRouter': self._parse_entries(self._logical_router_entries),
+            'IKECryptoProfile': self._parse_entries(self._ike_crypto_profile_entries),
+            'IPsecCryptoProfile': self._parse_entries(self._ipsec_crypto_profile_entries),
+            'IKEGateway': self._parse_entries(self._ike_gateway_entries),
+            'IPsecTunnel': self._parse_entries(self._ipsec_tunnel_entries),
             'Zones': self._parse_entries(self._zones),
             'DecryptionProfile': self._parse_entries(self._decryption_profiles_entries),
             'decryption_pre_rules': self._parse_entries(self._decryption_pre_rules_entries),
@@ -157,11 +162,16 @@ class XMLParser:
             'ZoneProtectionProfile': self._zone_protection_profile_entries,
             'AggregateInterface': self._aggregate_interface_entries,
             'EthernetInterface': self._ethernet_interface_entries,
+            'Layer2Subinterface': self._layer2_subinterface_entries,
             'Layer3Subinterface': self._layer3_subinterface_entries,
             'VlanInterface': self._vlan_interface_entries,
             'TunnelInterface': self._tunnel_interface_entries,
             'LoopbackInterface': self._loopback_interface_entries,
             'LogicalRouter': self._logical_router_entries,
+            'IKECryptoProfile': self._ike_crypto_profile_entries,
+            'IPsecCryptoProfile': self._ipsec_crypto_profile_entries,
+            'IKEGateway': self._ike_gateway_entries,
+            'IPsecTunnel': self._ipsec_tunnel_entries,
             'Zones': self._zones,
             'DecryptionProfile': self._decryption_profiles_entries,
             'decryption_pre_rules': self._decryption_pre_rules_entries,
@@ -1989,6 +1999,10 @@ class XMLParser:
             payload['layer2'] = {}
             return payload
 
+        if entry.find('virtual-wire') is not None or entry.find('virtual-wire-interfaces') is not None:
+            payload['virtual_wire'] = {}
+            return payload
+
         if entry.find('tap') is not None:
             payload['tap'] = {}
             return payload
@@ -2085,6 +2099,52 @@ class XMLParser:
                 payload['ip'] = ip_entries
 
         return payload
+
+    def _apply_common_l2_interface_fields(self, payload, entry):
+        field_map = {
+            'comment': 'comment',
+            'netflow-profile': 'netflow_profile',
+        }
+        for panos_name, scm_name in field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        return payload
+
+    def _layer2_subinterface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Layer 2 subinterface migration currently supports local firewall XML only.")
+            return []
+
+        subinterfaces = []
+        for parent_entry in self.root.findall('./devices/entry/network/interface/ethernet/entry'):
+            parent_name = parent_entry.get('name')
+            if not parent_name:
+                continue
+
+            for subinterface_entry in parent_entry.findall('layer2/units/entry'):
+                payload = self._convert_layer2_subinterface(parent_name, subinterface_entry)
+                if payload:
+                    subinterfaces.append(payload)
+
+        return subinterfaces
+
+    def _convert_layer2_subinterface(self, parent_name, entry):
+        subinterface_name = entry.get('name')
+        if not subinterface_name:
+            return None
+
+        payload = {
+            'name': subinterface_name,
+            'parent_interface': parent_name,
+        }
+
+        tag = self._child_text(entry, 'tag')
+        if tag and tag.isdigit():
+            payload['tag'] = int(tag)
+
+        return self._apply_common_l2_interface_fields(payload, entry)
 
     def _layer3_subinterface_entries(self):
         if self.config_type != 'local':
@@ -2306,6 +2366,366 @@ class XMLParser:
                 return {empty_field: {}}
 
         return None
+
+    def _ike_crypto_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("IKE crypto profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        for entry in self.root.findall('./devices/entry/network/ike/crypto-profiles/ike-crypto-profiles/entry'):
+            payload = self._convert_ike_crypto_profile(entry)
+            if payload:
+                profiles.append(payload)
+
+        return profiles
+
+    def _convert_ike_crypto_profile(self, entry):
+        profile_name = entry.get('name')
+        if not profile_name:
+            return None
+
+        payload = {'name': profile_name}
+        for panos_name, scm_name in [
+            ('hash', 'hash'),
+            ('encryption', 'encryption'),
+            ('dh-group', 'dh_group'),
+        ]:
+            values = self._member_texts(entry.find(panos_name))
+            if values:
+                payload[scm_name] = values
+
+        lifetime = self._convert_lifetime(entry.find('lifetime'))
+        if lifetime:
+            payload['lifetime'] = lifetime
+
+        authentication_multiple = self._child_text(entry, 'authentication-multiple')
+        if authentication_multiple and authentication_multiple.isdigit():
+            payload['authentication_multiple'] = int(authentication_multiple)
+
+        return payload
+
+    def _ipsec_crypto_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("IPsec crypto profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        for entry in self.root.findall('./devices/entry/network/ike/crypto-profiles/ipsec-crypto-profiles/entry'):
+            payload = self._convert_ipsec_crypto_profile(entry)
+            if payload:
+                profiles.append(payload)
+
+        return profiles
+
+    def _convert_ipsec_crypto_profile(self, entry):
+        profile_name = entry.get('name')
+        if not profile_name:
+            return None
+
+        payload = {'name': profile_name}
+        esp = entry.find('esp')
+        if esp is not None:
+            esp_payload = {}
+            encryption = self._member_texts(esp.find('encryption'))
+            if encryption:
+                esp_payload['encryption'] = encryption
+            authentication = self._member_texts(esp.find('authentication'))
+            if authentication:
+                esp_payload['authentication'] = authentication
+            if esp_payload:
+                payload['esp'] = esp_payload
+
+        dh_group = self._first_text_or_member(entry.find('dh-group'))
+        if dh_group:
+            payload['dh_group'] = dh_group
+
+        lifetime = self._convert_lifetime(entry.find('lifetime'))
+        if lifetime:
+            payload['lifetime'] = lifetime
+
+        return payload
+
+    def _ike_gateway_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("IKE gateway migration currently supports local firewall XML only.")
+            return []
+
+        gateways = []
+        for entry in self.root.findall('./devices/entry/network/ike/gateway/entry'):
+            payload = self._convert_ike_gateway(entry)
+            if payload:
+                gateways.append(payload)
+
+        return gateways
+
+    def _convert_ike_gateway(self, entry):
+        gateway_name = entry.get('name')
+        if not gateway_name:
+            return None
+
+        payload = {'name': gateway_name}
+
+        protocol = self._convert_ike_gateway_protocol(entry.find('protocol'))
+        if protocol:
+            payload['protocol'] = protocol
+
+        local_address = self._convert_named_text_fields(
+            entry.find('local-address'),
+            {
+                'interface': 'interface',
+                'ip': 'ip',
+                'floating-ip': 'floating_ip',
+            },
+        )
+        if local_address:
+            payload['local_address'] = local_address
+
+        peer_address = self._convert_named_text_fields(
+            entry.find('peer-address'),
+            {
+                'ip': 'ip',
+                'fqdn': 'fqdn',
+                'dynamic': 'dynamic',
+            },
+        )
+        if peer_address:
+            payload['peer_address'] = peer_address
+
+        authentication = self._convert_ike_gateway_authentication(entry.find('authentication'))
+        if authentication:
+            payload['authentication'] = authentication
+
+        return payload
+
+    def _convert_ike_gateway_protocol(self, protocol):
+        if protocol is None:
+            return None
+
+        payload = {}
+        version = self._child_text(protocol, 'version')
+        if version:
+            payload['version'] = version
+
+        for version_name in ['ikev1', 'ikev2']:
+            version_element = protocol.find(version_name)
+            if version_element is None:
+                continue
+            version_payload = {}
+            crypto_profile = self._child_text(version_element, 'ike-crypto-profile')
+            if crypto_profile:
+                version_payload['ike_crypto_profile'] = crypto_profile
+            dpd = self._convert_dpd(version_element.find('dpd'))
+            if dpd:
+                version_payload['dpd'] = dpd
+            if version_payload:
+                payload[version_name] = version_payload
+
+        return payload or None
+
+    def _convert_dpd(self, dpd):
+        if dpd is None:
+            return None
+
+        payload = {}
+        enable = self._child_text(dpd, 'enable')
+        if enable:
+            payload['enable'] = enable.lower() == 'yes'
+
+        interval = self._child_text(dpd, 'interval')
+        if interval and interval.isdigit():
+            payload['interval'] = int(interval)
+
+        retry = self._child_text(dpd, 'retry')
+        if retry and retry.isdigit():
+            payload['retry'] = int(retry)
+
+        return payload or None
+
+    def _convert_ike_gateway_authentication(self, authentication):
+        if authentication is None:
+            return None
+
+        psk = authentication.find('pre-shared-key')
+        if psk is not None:
+            key = self._child_text(psk, 'key')
+            return {'pre_shared_key': {'key': key}} if key else {'pre_shared_key': {}}
+
+        certificate = authentication.find('certificate')
+        if certificate is not None:
+            certificate_profile = self._child_text(certificate, 'certificate-profile')
+            return {'certificate': {'certificate_profile': certificate_profile}} if certificate_profile else {'certificate': {}}
+
+        return None
+
+    def _ipsec_tunnel_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("IPsec tunnel migration currently supports local firewall XML only.")
+            return []
+
+        tunnels = []
+        for entry in self.root.findall('./devices/entry/network/tunnel/ipsec/entry'):
+            payload = self._convert_ipsec_tunnel(entry)
+            if payload:
+                tunnels.append(payload)
+
+        return tunnels
+
+    def _convert_ipsec_tunnel(self, entry):
+        tunnel_name = entry.get('name')
+        if not tunnel_name:
+            return None
+
+        payload = {'name': tunnel_name}
+        tunnel_interface = self._child_text(entry, 'tunnel-interface')
+        if tunnel_interface:
+            payload['tunnel_interface'] = tunnel_interface
+
+        auto_key = self._convert_ipsec_auto_key(entry.find('auto-key'))
+        if auto_key:
+            payload['auto_key'] = auto_key
+
+        for panos_name, scm_name in [
+            ('anti-replay', 'anti_replay'),
+            ('copy-tos', 'copy_tos'),
+            ('enable-gre-encapsulation', 'enable_gre_encapsulation'),
+        ]:
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes'
+
+        tunnel_monitor = self._convert_tunnel_monitor(entry.find('tunnel-monitor'))
+        if tunnel_monitor:
+            payload['tunnel_monitor'] = tunnel_monitor
+
+        return payload
+
+    def _convert_ipsec_auto_key(self, auto_key):
+        if auto_key is None:
+            return None
+
+        payload = {}
+        gateways = self._entry_names_or_member_texts(auto_key.find('ike-gateway'))
+        if gateways:
+            payload['ike_gateway'] = [{'name': gateway} for gateway in gateways]
+
+        crypto_profile = self._child_text(auto_key, 'ipsec-crypto-profile')
+        if crypto_profile:
+            payload['ipsec_crypto_profile'] = crypto_profile
+
+        proxy_ids = []
+        for proxy_id_entry in auto_key.findall('proxy-id/entry'):
+            proxy_id = self._convert_proxy_id(proxy_id_entry)
+            if proxy_id:
+                proxy_ids.append(proxy_id)
+        if proxy_ids:
+            payload['proxy_id'] = proxy_ids
+
+        return payload or None
+
+    def _convert_proxy_id(self, entry):
+        proxy_name = entry.get('name')
+        if not proxy_name:
+            return None
+
+        payload = {'name': proxy_name}
+        for panos_name, scm_name in [
+            ('local', 'local'),
+            ('remote', 'remote'),
+        ]:
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        protocol = entry.find('protocol')
+        if protocol is not None:
+            protocol_payload = {}
+            number = self._child_text(protocol, 'number')
+            if number and number.isdigit():
+                protocol_payload['number'] = int(number)
+            for protocol_name in ['any', 'tcp', 'udp']:
+                if protocol.find(protocol_name) is not None:
+                    protocol_payload[protocol_name] = {}
+                    break
+            if protocol_payload:
+                payload['protocol'] = protocol_payload
+
+        return payload
+
+    def _convert_tunnel_monitor(self, tunnel_monitor):
+        if tunnel_monitor is None:
+            return None
+
+        payload = {}
+        enable = self._child_text(tunnel_monitor, 'enable')
+        if enable:
+            payload['enable'] = enable.lower() == 'yes'
+
+        destination_ip = self._child_text(tunnel_monitor, 'destination-ip')
+        if destination_ip:
+            payload['destination_ip'] = destination_ip
+
+        proxy_id = self._child_text(tunnel_monitor, 'proxy-id')
+        if proxy_id:
+            payload['proxy_id'] = proxy_id
+
+        return payload or None
+
+    def _convert_lifetime(self, lifetime):
+        if lifetime is None:
+            return None
+
+        for unit in ['seconds', 'minutes', 'hours', 'days']:
+            value = self._child_text(lifetime, unit)
+            if value and value.isdigit():
+                return {unit: int(value)}
+
+        return None
+
+    def _convert_named_text_fields(self, entry, field_map):
+        if entry is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        return payload or None
+
+    @staticmethod
+    def _member_texts(entry):
+        if entry is None:
+            return []
+
+        return [
+            member.text.strip()
+            for member in entry.findall('member')
+            if member.text and member.text.strip()
+        ]
+
+    def _first_text_or_member(self, entry):
+        if entry is None:
+            return None
+
+        if entry.text and entry.text.strip():
+            return entry.text.strip()
+
+        members = self._member_texts(entry)
+        return members[0] if members else None
+
+    def _entry_names_or_member_texts(self, entry):
+        if entry is None:
+            return []
+
+        names = [
+            child.get('name')
+            for child in entry.findall('entry')
+            if child.get('name')
+        ]
+        names.extend(self._member_texts(entry))
+        return names
 
     @staticmethod
     def _child_text(entry, path):

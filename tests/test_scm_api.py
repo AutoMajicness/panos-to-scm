@@ -71,6 +71,10 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(obj.Layer3Subinterface.get_endpoint(), "/config/network/v1/layer3-subinterfaces")
         self.assertTrue(obj.Layer3Subinterface.uses_payload_scope())
 
+    def test_layer2_subinterface_endpoint_is_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.Layer2Subinterface.get_endpoint(), "/config/network/v1/layer2-subinterfaces")
+        self.assertTrue(obj.Layer2Subinterface.uses_payload_scope())
+
     def test_vlan_and_tunnel_interface_endpoints_are_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.VlanInterface.get_endpoint(), "/config/network/v1/vlan-interfaces")
         self.assertEqual(obj.TunnelInterface.get_endpoint(), "/config/network/v1/tunnel-interfaces")
@@ -84,6 +88,16 @@ class EndpointRegistryTests(unittest.TestCase):
     def test_logical_router_endpoint_is_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.LogicalRouter.get_endpoint(), "/config/network/v1/logical-routers")
         self.assertTrue(obj.LogicalRouter.uses_payload_scope())
+
+    def test_vpn_object_endpoints_are_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.IKECryptoProfile.get_endpoint(), "/config/network/v1/ike-crypto-profiles")
+        self.assertEqual(obj.IPsecCryptoProfile.get_endpoint(), "/config/network/v1/ipsec-crypto-profiles")
+        self.assertEqual(obj.IKEGateway.get_endpoint(), "/config/network/v1/ike-gateways")
+        self.assertEqual(obj.IPsecTunnel.get_endpoint(), "/config/network/v1/ipsec-tunnels")
+        self.assertTrue(obj.IKECryptoProfile.uses_payload_scope())
+        self.assertTrue(obj.IPsecCryptoProfile.uses_payload_scope())
+        self.assertTrue(obj.IKEGateway.uses_payload_scope())
+        self.assertTrue(obj.IPsecTunnel.uses_payload_scope())
 
 
 class PanApiHandlerTests(unittest.TestCase):
@@ -292,6 +306,32 @@ class ProcessorTests(unittest.TestCase):
             },
         )
 
+    def test_layer2_subinterface_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.Layer2Subinterface], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&snippet=Network-Stack",
+            [{"name": "ethernet1/6.200", "parent_interface": "ethernet1/6", "tag": 200}],
+            obj.Layer2Subinterface,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/network/v1/layer2-subinterfaces",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {
+                "name": "ethernet1/6.200",
+                "parent_interface": "ethernet1/6",
+                "tag": 200,
+                "snippet": "Network-Stack",
+            },
+        )
+
     def test_vlan_interface_post_puts_scope_in_payload_not_url(self):
         session = FakeSession()
         handler = PanApiHandler(session)
@@ -391,6 +431,44 @@ class ProcessorTests(unittest.TestCase):
                 "name": "default",
                 "routing_stack": "legacy",
                 "vrf": [{"name": "default"}],
+                "snippet": "Network-Stack",
+            },
+        )
+
+    def test_vpn_object_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.IPsecTunnel], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&snippet=Network-Stack",
+            [
+                {
+                    "name": "vpn-tunnel-a",
+                    "tunnel_interface": "tunnel.1",
+                    "auto_key": {
+                        "ike_gateway": [{"name": "vpn-gw-a"}],
+                        "ipsec_crypto_profile": "ipsec-crypto-a",
+                    },
+                }
+            ],
+            obj.IPsecTunnel,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/network/v1/ipsec-tunnels",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {
+                "name": "vpn-tunnel-a",
+                "tunnel_interface": "tunnel.1",
+                "auto_key": {
+                    "ike_gateway": [{"name": "vpn-gw-a"}],
+                    "ipsec_crypto_profile": "ipsec-crypto-a",
+                },
                 "snippet": "Network-Stack",
             },
         )

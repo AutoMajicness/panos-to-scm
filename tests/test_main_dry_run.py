@@ -273,11 +273,16 @@ class MainDryRunTests(unittest.TestCase):
                     "layer3": {"dhcp_client": {"enable": True}},
                 }
             ],
+            "Layer2Subinterface": [{"name": "ethernet1/6.200", "parent_interface": "ethernet1/6", "tag": 200}],
             "Layer3Subinterface": [{"name": "ethernet1/1.100", "parent_interface": "ethernet1/1", "tag": 100}],
             "VlanInterface": [{"name": "vlan.100", "vlan_tag": "100", "ip": [{"name": "10.100.0.1/24"}]}],
             "TunnelInterface": [{"name": "tunnel.1", "default_value": "tunnel.1", "ip": [{"name": "169.254.1.1/30"}]}],
             "LoopbackInterface": [{"name": "loopback.1", "ip": ["10.255.0.1/32"]}],
             "LogicalRouter": [{"name": "default", "routing_stack": "legacy", "vrf": [{"name": "default"}]}],
+            "IKECryptoProfile": [{"name": "ike-crypto-a", "hash": ["sha256"], "encryption": ["aes-256-cbc"], "dh_group": ["group14"]}],
+            "IPsecCryptoProfile": [{"name": "ipsec-crypto-a", "esp": {"encryption": ["aes-256-gcm"]}}],
+            "IKEGateway": [{"name": "vpn-gw-a", "protocol": {"ikev2": {"ike_crypto_profile": "ike-crypto-a"}}}],
+            "IPsecTunnel": [{"name": "vpn-tunnel-a", "tunnel_interface": "tunnel.1"}],
             "Zones": [{"name": "users", "network": {"layer3": ["ethernet1/1.100"]}}],
         }
 
@@ -288,19 +293,20 @@ class MainDryRunTests(unittest.TestCase):
             with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
                 plan = main.main(
                     AppConfig(),
-                    run_objects="InterfaceManagementProfile,ZoneProtectionProfile,AggregateInterface,EthernetInterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,LogicalRouter,Zones",
+                    run_objects="InterfaceManagementProfile,ZoneProtectionProfile,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,Zones",
                     json_file=str(parsed_path),
                     dry_run=True,
                     network_scope="snippet:Network-Stack",
                 )
 
-        self.assertEqual(plan.summary()["creates"], 10)
+        self.assertEqual(plan.summary()["creates"], 15)
         self.assertEqual(
             [change.object_type for change in plan.creates],
             [
                 "InterfaceManagementProfile", "ZoneProtectionProfile", "AggregateInterface",
-                "EthernetInterface", "Layer3Subinterface", "VlanInterface",
-                "TunnelInterface", "LoopbackInterface", "LogicalRouter", "Zones"
+                "EthernetInterface", "Layer2Subinterface", "Layer3Subinterface",
+                "VlanInterface", "TunnelInterface", "LoopbackInterface", "LogicalRouter",
+                "IKECryptoProfile", "IPsecCryptoProfile", "IKEGateway", "IPsecTunnel", "Zones"
             ],
         )
 
@@ -383,6 +389,25 @@ class MainDryRunTests(unittest.TestCase):
         self.assertEqual(plan.summary()["creates"], 2)
         self.assertEqual([change.object_type for change in plan.creates], ["VlanInterface", "TunnelInterface"])
 
+    def test_layer2_subinterfaces_can_use_network_scope_for_dry_run(self):
+        parsed_data = {"Layer2Subinterface": [{"name": "ethernet1/6.200", "parent_interface": "ethernet1/6", "tag": 200}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="Layer2Subinterface",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "Layer2Subinterface")
+
     def test_loopback_interfaces_can_use_network_scope_for_dry_run(self):
         parsed_data = {"LoopbackInterface": [{"name": "loopback.1", "ip": ["10.255.0.1/32"]}]}
 
@@ -401,6 +426,33 @@ class MainDryRunTests(unittest.TestCase):
 
         self.assertEqual(plan.summary()["creates"], 1)
         self.assertEqual(plan.creates[0].object_type, "LoopbackInterface")
+
+    def test_vpn_objects_can_use_network_scope_for_dry_run(self):
+        parsed_data = {
+            "IKECryptoProfile": [{"name": "ike-crypto-a", "hash": ["sha256"], "encryption": ["aes-256-cbc"], "dh_group": ["group14"]}],
+            "IPsecCryptoProfile": [{"name": "ipsec-crypto-a", "esp": {"encryption": ["aes-256-gcm"]}}],
+            "IKEGateway": [{"name": "vpn-gw-a", "protocol": {"ikev2": {"ike_crypto_profile": "ike-crypto-a"}}}],
+            "IPsecTunnel": [{"name": "vpn-tunnel-a", "tunnel_interface": "tunnel.1"}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 4)
+        self.assertEqual(
+            [change.object_type for change in plan.creates],
+            ["IKECryptoProfile", "IPsecCryptoProfile", "IKEGateway", "IPsecTunnel"],
+        )
 
     def test_object_dry_run_falls_back_to_default_scope(self):
         parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}

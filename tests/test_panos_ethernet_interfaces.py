@@ -34,6 +34,9 @@ LOCAL_ETHERNET_XML = """<config>
             <entry name="ethernet1/4">
               <aggregate-group>ae1</aggregate-group>
             </entry>
+            <entry name="ethernet1/6">
+              <virtual-wire />
+            </entry>
             <entry name="ethernet1/5">
               <comment>Unsupported empty interface</comment>
             </entry>
@@ -77,6 +80,7 @@ class PanosEthernetInterfaceParserTests(unittest.TestCase):
                 {"name": "$ethernet1-2", "default_value": "ethernet1/2", "layer2": {}},
                 {"name": "$ethernet1-3", "default_value": "ethernet1/3", "tap": {}},
                 {"name": "$ethernet1-4", "default_value": "ethernet1/4", "aggregate_group": "ae1"},
+                {"name": "$ethernet1-6", "default_value": "ethernet1/6", "virtual_wire": {}},
             ],
         )
         self.assertIn("ethernet1/5", logs.output[0])
