@@ -47,6 +47,14 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertTrue(obj.Address.uses_payload_scope())
         self.assertTrue(obj.ServiceGroup.uses_payload_scope())
 
+    def test_zones_endpoint_is_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.Zones.get_endpoint(), "/config/network/v1/zones")
+        self.assertTrue(obj.Zones.uses_payload_scope())
+
+    def test_ethernet_interface_endpoint_is_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.EthernetInterface.get_endpoint(), "/config/network/v1/ethernet-interfaces")
+        self.assertTrue(obj.EthernetInterface.uses_payload_scope())
+
 
 class PanApiHandlerTests(unittest.TestCase):
     def test_get_uses_strata_base_url_and_query_params(self):
@@ -103,6 +111,53 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(objects, [{"name": "addr", "folder": "All"}])
         self.assertEqual(session.get_calls[0]["params"]["folder"], "All")
         self.assertNotIn("folder", session.get_calls[0]["url"])
+
+    def test_zone_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.Zones], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&snippet=Network-Stack",
+            [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}],
+            obj.Zones,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/network/v1/zones",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {"name": "trust", "network": {"layer3": ["ethernet1/1"]}, "snippet": "Network-Stack"},
+        )
+
+    def test_ethernet_interface_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.EthernetInterface], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&snippet=Network-Stack",
+            [{"name": "$ethernet1-1", "default_value": "ethernet1/1", "layer3": {"ip": [{"name": "203.0.113.1/24"}]}}],
+            obj.EthernetInterface,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/network/v1/ethernet-interfaces",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {
+                "name": "$ethernet1-1",
+                "default_value": "ethernet1/1",
+                "layer3": {"ip": [{"name": "203.0.113.1/24"}]},
+                "snippet": "Network-Stack",
+            },
+        )
 
     def test_analyze_results_counts_modern_statuses(self):
         processor = Processor(None, 1, obj, None)

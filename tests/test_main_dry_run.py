@@ -83,6 +83,129 @@ class MainDryRunTests(unittest.TestCase):
 
         self.assertEqual(plan.summary()["creates"], 1)
 
+    def test_zones_can_be_selected_for_dry_run(self):
+        parsed_data = {"Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="Zones",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    scope="folder:All",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "Zones")
+
+    def test_zones_can_use_network_scope_without_default_scope(self):
+        parsed_data = {"Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="Zones",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "Zones")
+
+    def test_ethernet_interfaces_can_use_network_scope_for_dry_run(self):
+        parsed_data = {
+            "EthernetInterface": [
+                {
+                    "name": "$ethernet1-1",
+                    "default_value": "ethernet1/1",
+                    "layer3": {"ip": [{"name": "203.0.113.1/24"}]},
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="EthernetInterface",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "EthernetInterface")
+
+    def test_ethernet_interfaces_and_zones_can_share_network_scope(self):
+        parsed_data = {
+            "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1", "layer3": {}}],
+            "Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="EthernetInterface,Zones",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 2)
+        self.assertEqual([change.object_type for change in plan.creates], ["EthernetInterface", "Zones"])
+
+    def test_object_dry_run_falls_back_to_default_scope(self):
+        parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="Address",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    scope="folder:All",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+
+    def test_network_dry_run_requires_network_or_default_scope(self):
+        parsed_data = {"Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("builtins.input") as input_mock:
+                with self.assertRaises(SystemExit):
+                    main.main(
+                        AppConfig(),
+                        run_objects="Zones",
+                        json_file=str(parsed_path),
+                        dry_run=True,
+                    )
+
+        input_mock.assert_not_called()
+
     def test_cisco_parser_can_be_selected_without_detection_prompt(self):
         cisco_config = "\n".join(
             [

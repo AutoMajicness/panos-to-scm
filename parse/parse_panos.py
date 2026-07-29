@@ -109,6 +109,7 @@ class XMLParser:
             'nat_pre_rules': self._parse_entries(self._nat_pre_rules_entries),
             'nat_post_rules': self._parse_entries(self._nat_post_rules_entries),
             'Application': self._parse_entries(self._application_entries),
+            'EthernetInterface': self._parse_entries(self._ethernet_interface_entries),
             'Zones': self._parse_entries(self._zones),
             'DecryptionProfile': self._parse_entries(self._decryption_profiles_entries),
             'decryption_pre_rules': self._parse_entries(self._decryption_pre_rules_entries),
@@ -144,6 +145,7 @@ class XMLParser:
             'nat_pre_rules': self._nat_pre_rules_entries,
             'nat_post_rules': self._nat_post_rules_entries,
             'Application': self._application_entries,
+            'EthernetInterface': self._ethernet_interface_entries,
             'Zones': self._zones,
             'DecryptionProfile': self._decryption_profiles_entries,
             'decryption_pre_rules': self._decryption_pre_rules_entries,
@@ -1686,33 +1688,130 @@ class XMLParser:
 
         return schedules
 
+    def _ethernet_interface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Ethernet interface migration currently supports local firewall XML only.")
+            return []
+
+        interfaces = []
+        for entry in self.root.findall('./devices/entry/network/interface/ethernet/entry'):
+            payload = self._convert_ethernet_interface(entry)
+            if payload:
+                interfaces.append(payload)
+
+        return interfaces
+
+    def _convert_ethernet_interface(self, entry):
+        physical_name = entry.get('name')
+        if not physical_name:
+            return None
+
+        payload = {
+            'name': f"${self._sanitize_name(physical_name)}",
+            'default_value': physical_name,
+        }
+
+        field_map = {
+            'comment': 'comment',
+            'link-speed': 'link_speed',
+            'link-duplex': 'link_duplex',
+            'link-state': 'link_state',
+        }
+        for panos_name, scm_name in field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        aggregate_group = self._child_text(entry, 'aggregate-group')
+        if aggregate_group:
+            payload['aggregate_group'] = aggregate_group
+            return payload
+
+        layer3 = entry.find('layer3')
+        if layer3 is not None:
+            payload['layer3'] = self._convert_ethernet_layer3(layer3)
+            return payload
+
+        if entry.find('layer2') is not None:
+            payload['layer2'] = {}
+            return payload
+
+        if entry.find('tap') is not None:
+            payload['tap'] = {}
+            return payload
+
+        self.logger.warning(f"Skipping ethernet interface '{physical_name}' because it has no supported mode.")
+        return None
+
+    def _convert_ethernet_layer3(self, layer3):
+        layer3_payload = {}
+
+        ip_entries = [
+            ip_entry.get('name')
+            for ip_entry in layer3.findall('ip/entry')
+            if ip_entry.get('name')
+        ]
+        if ip_entries:
+            layer3_payload['ip'] = [{'name': ip_address} for ip_address in ip_entries]
+
+        mtu = self._child_text(layer3, 'mtu')
+        if mtu and mtu.isdigit():
+            layer3_payload['mtu'] = int(mtu)
+
+        management_profile = self._child_text(layer3, 'interface-management-profile')
+        if management_profile:
+            layer3_payload['interface_management_profile'] = management_profile
+
+        return layer3_payload
+
+    @staticmethod
+    def _child_text(entry, path):
+        child = entry.find(path)
+        if child is not None and child.text:
+            return child.text.strip()
+        return None
+
     def _zones(self):
-        tree = ET.parse(self.file_path)
-        root = tree.getroot()
+        if self.config_type != 'local':
+            self.logger.warning("Zone migration currently supports local firewall/vsys XML only.")
+            return []
 
         zone_entries = []
+        layer_map = {
+            'layer3': 'layer3',
+            'layer2': 'layer2',
+            'v-wire': 'virtual_wire',
+            'tap': 'tap',
+        }
 
-        for zone_entry in root.findall('../devices/entry/vsys/entry/zone/entry'):
+        for zone_entry in self.root.findall('./devices/entry/vsys/entry/zone/entry'):
             zone_name = zone_entry.get('name')
-            zone_protection_profile = zone_entry.find('.//zone-protection-profile')
+            if not zone_name:
+                continue
 
             network_data = {}
+            for panos_layer, scm_layer in layer_map.items():
+                layer_element = zone_entry.find(f'network/{panos_layer}')
+                if layer_element is None:
+                    continue
 
-            for layer in ['layer3', 'layer2', 'v-wire']:
-                layer_element = zone_entry.find(f'.//{layer}')
-                if layer_element is not None:
-                    interfaces = [member.text for member in layer_element.findall('member')]
-                    network_data[layer] = {'member': interfaces}
+                interfaces = [
+                    member.text.strip()
+                    for member in layer_element.findall('member')
+                    if member.text and member.text.strip()
+                ]
+                if interfaces:
+                    network_data[scm_layer] = interfaces
 
-            entry_data = {
-                '@name': zone_name,
-                'network': network_data
-            }
+            zone_protection_profile = zone_entry.find('network/zone-protection-profile')
+            if zone_protection_profile is not None and zone_protection_profile.text:
+                network_data['zone_protection_profile'] = zone_protection_profile.text.strip()
 
-            if zone_protection_profile is not None:
-                entry_data['network']['zone-protection-profile'] = zone_protection_profile.text
+            zone_payload = {'name': zone_name}
+            if network_data:
+                zone_payload['network'] = network_data
 
-            zone_entries.append({'entry': entry_data})
+            zone_entries.append(zone_payload)
 
         return zone_entries
 

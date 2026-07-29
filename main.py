@@ -57,6 +57,72 @@ def require_scope(scope_arg, interactive, prompt_label):
     raise CliError("Missing required --scope. Use a value like --scope folder:All")
 
 
+def require_effective_scope(scope_arg, fallback_scope_arg, interactive, prompt_label, scope_flag, example_scope='folder:All'):
+    if scope_arg:
+        return scope_param_from_cli(scope_arg)
+    if fallback_scope_arg:
+        return scope_param_from_cli(fallback_scope_arg)
+    if interactive:
+        return prompt_for_scope(prompt_label)
+    raise CliError(f"Missing required {scope_flag} or --scope. Use a value like {scope_flag} {example_scope}")
+
+
+def get_network_obj_types(config):
+    return getattr(config, 'network_obj_types', [])
+
+
+def get_supported_obj_types(config):
+    return config.obj_types + get_network_obj_types(config)
+
+
+def split_selected_obj_types(config, run_objects_list):
+    supported_obj_types = get_supported_obj_types(config)
+    selected_obj_types = [obj_type for obj_type in supported_obj_types if obj_type.__name__ in run_objects_list] if run_objects_list else supported_obj_types
+    network_type_names = {obj_type.__name__ for obj_type in get_network_obj_types(config)}
+    regular_obj_types = [obj_type for obj_type in selected_obj_types if obj_type.__name__ not in network_type_names]
+    network_obj_types = [obj_type for obj_type in selected_obj_types if obj_type.__name__ in network_type_names]
+    return regular_obj_types, network_obj_types
+
+
+def resolve_category_scopes(
+    scope,
+    object_scope,
+    policy_scope,
+    network_scope,
+    interactive,
+    needs_object_scope,
+    needs_policy_scope,
+    needs_network_scope,
+):
+    scopes = {}
+    if needs_object_scope:
+        scopes['object'] = require_effective_scope(
+            object_scope,
+            scope,
+            interactive,
+            'Enter the object {scope_type} name (Use "All" for "Global"): ',
+            '--object-scope',
+        )
+    if needs_policy_scope:
+        scopes['policy'] = require_effective_scope(
+            policy_scope,
+            scope,
+            interactive,
+            'Enter the policy {scope_type} name (Use "All" for "Global"): ',
+            '--policy-scope',
+        )
+    if needs_network_scope:
+        scopes['network'] = require_effective_scope(
+            network_scope,
+            scope,
+            interactive,
+            'Enter the network {scope_type} name (Use "All" for "Global"): ',
+            '--network-scope',
+            'snippet:Network-Stack',
+        )
+    return scopes
+
+
 def infer_panos_config_type(file_path):
     root = ET.parse(file_path).getroot()
     if root.find('.//devices/entry/device-group') is not None:
@@ -116,13 +182,10 @@ def initialize_api_session():
 def setup_scm_object_manager(session, obj_types, sec_obj, nat_obj, scope_param):
     return SCMObjectManager(session, scope_param, obj, obj_types, sec_obj, nat_obj)
 
-def run_selected_objects(parsed_data, scm_obj_manager, scope_param, device_group_name, run_objects_list):
-    selected_obj_types = [obj for obj in config.obj_types if obj.__name__ in run_objects_list]
-    
+def process_obj_types(api_session, selected_obj_types, parsed_data, scope_param, device_group_name, config):
     if not selected_obj_types:
-        logger.warning(f"No valid objects found to run for {run_objects_list}")
         return
-    
+    scm_obj_manager = setup_scm_object_manager(api_session, selected_obj_types, config.sec_obj, config.nat_obj, scope_param)
     scm_obj_manager.process_objects(parsed_data, scope_param, device_group_name, max_workers=6, limit=config.limit)
 
 def main(
@@ -141,6 +204,9 @@ def main(
     parser_type=None,
     config_file="",
     scope="",
+    object_scope="",
+    policy_scope="",
+    network_scope="",
     fetch_panos_config=False,
     interactive=False,
     panos_config_type="",
@@ -160,11 +226,6 @@ def main(
             json_file = config_file
 
         if json_file != "":
-            scope_param = require_scope(
-                scope,
-                interactive,
-                'Enter the {scope_type} name (Use "All" for "Global", "Shared" for "Prisma Access"): ',
-            )
             config_type = 'local'
             device_group_name = None
             try:
@@ -188,18 +249,13 @@ def main(
             if config_type == 'panos':
                 parser = XMLParser(file_path, config_type)
                 if interactive and not scope and not panos_config_type:
-                    scope_param, config_type, device_group_name = parser.parse_config_and_set_scope(file_path)
+                    fallback_scope_param, config_type, device_group_name = parser.parse_config_and_set_scope(file_path)
+                    scope = fallback_scope_param.replace('&', '').replace('=', ':', 1)
                 else:
-                    scope_param = require_scope(
-                        scope,
-                        interactive,
-                        'Enter the {scope_type} name (Use "All" for "Global"): ',
-                    )
                     config_type = panos_config_type or infer_panos_config_type(file_path)
                     if config_type == 'panorama/device-group' and not device_group_name:
                         raise CliError("--device-group is required with --panos-config-type panorama/device-group")
-                scope_type, scope_value = scope_param.replace('&', '').split('=')
-                logger.info(f'Current SCM {scope_type}: {scope_value}, PANOS: {config_type}, Device Group: {device_group_name}')
+                logger.info(f'PANOS: {config_type}, Device Group: {device_group_name}')
                 parser.config_type = config_type
                 parser.device_group_name = device_group_name
                 if run_objects:
@@ -212,18 +268,35 @@ def main(
                 parser = CiscoParser(file_path)
                 parser.parse()
                 parsed_data = parser.get_parsed_data()
-                scope_param = require_scope(
-                    scope,
-                    interactive,
-                    'What {scope_type} is Cisco config going into? Case Sensitive: ',
-                )
                 device_group_name = None
                 run_objects_list = run_objects.split(',') if run_objects else []
 
             logger.debug(f"Parse Data: {json.dumps(parsed_data,indent=4)}")
             logger.debug(f"Parsed data keys: {list(parsed_data.keys())}")
 
-        selected_obj_types = [obj for obj in config.obj_types if obj.__name__ in run_objects_list] if run_objects else config.obj_types
+        selected_regular_obj_types, selected_network_obj_types = split_selected_obj_types(config, run_objects_list)
+        selected_obj_types = selected_regular_obj_types + selected_network_obj_types
+        if run_objects and not selected_obj_types:
+            logger.warning(f"No valid objects found to run for {run_objects_list}")
+
+        has_rule_flag = any([run_security, run_app_override, run_decrypt_rules, run_nat])
+        needs_object_scope = bool(selected_regular_obj_types) and (bool(run_objects) or not has_rule_flag)
+        needs_network_scope = bool(selected_network_obj_types) and (bool(run_objects) or not has_rule_flag)
+        needs_policy_scope = run_all or run_security or run_app_override or run_decrypt_rules or run_nat
+        if run_all:
+            needs_object_scope = bool(selected_regular_obj_types)
+            needs_network_scope = bool(selected_network_obj_types)
+
+        scopes = resolve_category_scopes(
+            scope,
+            object_scope,
+            policy_scope,
+            network_scope,
+            interactive,
+            needs_object_scope,
+            needs_policy_scope,
+            needs_network_scope,
+        )
 
         if dry_run:
             current_data = {}
@@ -268,29 +341,36 @@ def main(
         from scm import PanApiHandler
 
         api_session = PanApiHandler(initialize_api_session())
-        scm_obj_manager = setup_scm_object_manager(api_session, selected_obj_types, config.sec_obj, config.nat_obj, scope_param)
 
         if run_all:
-            scm_obj_manager.process_objects(parsed_data, scope_param, device_group_name, max_workers=6, limit=config.limit)
-            scm_obj_manager.process_rules(config.sec_obj, parsed_data, file_path, limit=config.limit, rule_type='security')
-            scm_obj_manager.process_rules(config.app_override_obj, parsed_data, file_path, limit=config.limit, rule_type='application-override')
-            scm_obj_manager.process_rules(config.decryption_rule_obj, parsed_data, file_path, limit=config.limit, rule_type='decryption')
-            scm_obj_manager.configure.set_max_workers(1)  # Set max workers to 1 for NAT rules
-            scm_obj_manager.process_rules(config.nat_obj, parsed_data, file_path, limit=config.limit, rule_type='nat')
+            process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config)
+            process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config)
+            policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'])
+            policy_manager.process_rules(config.sec_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='security')
+            policy_manager.process_rules(config.app_override_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='application-override')
+            policy_manager.process_rules(config.decryption_rule_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='decryption')
+            policy_manager.configure.set_max_workers(1)  # Set max workers to 1 for NAT rules
+            policy_manager.process_rules(config.nat_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='nat')
         elif run_objects:
-            run_selected_objects(parsed_data, scm_obj_manager, scope_param, device_group_name, run_objects_list)
+            process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config)
+            process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config)
         else:
             if run_security:
-                scm_obj_manager.process_rules(config.sec_obj, parsed_data, file_path, limit=config.limit, rule_type='security')
+                policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'])
+                policy_manager.process_rules(config.sec_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='security')
             elif run_app_override:
-                scm_obj_manager.process_rules(config.app_override_obj, parsed_data, file_path, limit=config.limit, rule_type='application-override')
+                policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'])
+                policy_manager.process_rules(config.app_override_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='application-override')
             elif run_decrypt_rules:
-                scm_obj_manager.process_rules(config.decryption_rule_obj, parsed_data, file_path, limit=config.limit, rule_type='decryption')
+                policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'])
+                policy_manager.process_rules(config.decryption_rule_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='decryption')
             elif run_nat:
-                scm_obj_manager.configure.set_max_workers(1)  # Set max workers to 1 for NAT rules
-                scm_obj_manager.process_rules(config.nat_obj, parsed_data, file_path, limit=config.limit, rule_type='nat')
+                policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'])
+                policy_manager.configure.set_max_workers(1)  # Set max workers to 1 for NAT rules
+                policy_manager.process_rules(config.nat_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='nat')
             else:
-                scm_obj_manager.process_objects(parsed_data, scope_param, device_group_name, max_workers=6, limit=config.limit)
+                process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config)
+                process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config)
 
         end_time = time.time()
         logger.info(f"Script execution time: {end_time - start_time:.2f} seconds")
@@ -311,7 +391,7 @@ if __name__ == "__main__":
     begin_time = time.time()
     parser_config = AppConfig()
 
-    obj_type_names = [obj.__name__ for obj in parser_config.obj_types]
+    obj_type_names = [obj.__name__ for obj in get_supported_obj_types(parser_config)]
     obj_type_help = "Specify the objects to run, separated by commas. Supported objects: " + ", ".join(obj_type_names)
     
     parser = argparse.ArgumentParser(description="Run specific objects or policies in the project")
@@ -325,6 +405,9 @@ if __name__ == "__main__":
     parser.add_argument('--parser', choices=['panos', 'cisco'], default=None, help="Configuration parser to use")
     parser.add_argument('--config-file', action='store', default="", help="Configuration source file for PAN-OS XML or Cisco config")
     parser.add_argument('--scope', action='store', default="", help="SCM scope in the format folder:All, snippet:Shared, or device:name")
+    parser.add_argument('--object-scope', action='store', default="", help="SCM scope for objects and profiles. Falls back to --scope.")
+    parser.add_argument('--policy-scope', action='store', default="", help="SCM scope for policy and NAT rulebases. Falls back to --scope.")
+    parser.add_argument('--network-scope', action='store', default="", help="SCM scope for network stack objects such as zones. Falls back to --scope.")
     parser.add_argument('--fetch-panos-config', action='store_true', help="Retrieve running PAN-OS config before parsing")
     parser.add_argument('--interactive', action='store_true', help="Allow legacy prompts for missing CLI values")
     parser.add_argument('--panos-config-type', choices=['local', 'panorama/shared', 'panorama/device-group'], default="", help="PAN-OS XML scope type for non-interactive parsing")
@@ -336,4 +419,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config = parser_config if args.dry_run else ConfigurationManager().app_config
     
-    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, conflict_policy=args.conflict_policy, plan_output=args.plan_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)
+    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, conflict_policy=args.conflict_policy, plan_output=args.plan_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)
