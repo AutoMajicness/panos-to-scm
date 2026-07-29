@@ -61,6 +61,35 @@
               </protocol>
             </entry>
           </service>
+          <application>
+            <entry name="custom-web-app">
+              <category>business-systems</category>
+              <subcategory>web</subcategory>
+              <technology>browser-based</technology>
+              <risk>2</risk>
+              <defaults>
+                <port>
+                  <member>tcp/8443</member>
+                </port>
+              </defaults>
+            </entry>
+          </application>
+          <schedule>
+            <entry name="business-hours">
+              <schedule-type>
+                <recurring>
+                  <weekly>
+                    <monday>
+                      <member>08:00-17:00</member>
+                    </monday>
+                    <tuesday>
+                      <member>08:00-17:00</member>
+                    </tuesday>
+                  </weekly>
+                </recurring>
+              </schedule-type>
+            </entry>
+          </schedule>
           <profile-group>
             <entry name="strict-profiles">
               <virus>
@@ -107,10 +136,32 @@
                       <member>strict-profiles</member>
                     </group>
                   </profile-setting>
+                  <schedule>business-hours</schedule>
                   <action>allow</action>
                 </entry>
               </rules>
             </security>
+            <application-override>
+              <rules>
+                <entry name="custom-web-override">
+                  <from>
+                    <member>trust</member>
+                  </from>
+                  <to>
+                    <member>untrust</member>
+                  </to>
+                  <source>
+                    <member>users-net</member>
+                  </source>
+                  <destination>
+                    <member>web-public</member>
+                  </destination>
+                  <protocol>tcp</protocol>
+                  <port>8443</port>
+                  <application>custom-web-app</application>
+                </entry>
+              </rules>
+            </application-override>
             <nat>
               <rules>
                 <entry name="dnat-web">

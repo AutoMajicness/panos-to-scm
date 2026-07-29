@@ -94,6 +94,7 @@ class MigrationPlan:
         return {
             "summary": self.summary(),
             "warning_summary": _warning_summary(self.warnings),
+            "remediation": _remediation_report(self.warnings),
             "posting_preview": self.posting_preview(),
             "creates": _serialize_changes(self.creates),
             "updates": _serialize_changes(self.updates),
@@ -131,6 +132,7 @@ class NetworkReport:
         return {
             "summary": self.summary(),
             "warning_summary": _warning_summary(self.warnings),
+            "remediation": _remediation_report(self.warnings),
             "objects": self.objects,
             "warnings": _serialize_warnings(self.warnings),
         }
@@ -362,6 +364,76 @@ def _warning_summary(warnings: list[PlanWarning]) -> dict[str, dict[str, Any]]:
         }
         for code, data in sorted(summary.items())
     }
+
+
+def _remediation_report(warnings: list[PlanWarning]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for warning in sorted(warnings, key=lambda item: (item.code, item.object_type, item.name, item.path)):
+        code_group = grouped.setdefault(
+            warning.code,
+            {
+                "code": warning.code,
+                "count": 0,
+                "action": _remediation_action(warning.code),
+                "object_types": {},
+                "examples": [],
+            },
+        )
+        code_group["count"] += 1
+        object_types = code_group["object_types"]
+        object_types[warning.object_type] = object_types.get(warning.object_type, 0) + 1
+        if len(code_group["examples"]) < 5:
+            code_group["examples"].append(
+                {
+                    "object_type": warning.object_type,
+                    "name": warning.name,
+                    "path": warning.path,
+                    "message": warning.message,
+                }
+            )
+
+    return [
+        {
+            "code": code,
+            "count": data["count"],
+            "action": data["action"],
+            "object_types": dict(sorted(data["object_types"].items())),
+            "examples": data["examples"],
+        }
+        for code, data in sorted(grouped.items())
+    ]
+
+
+def _remediation_action(code: str) -> str:
+    actions = {
+        "missing-network-reference": (
+            "Include the referenced network object type in the migration, add it to --current-data, "
+            "or create it in the target SCM snippet before posting."
+        ),
+        "missing-policy-reference": (
+            "Include referenced policy dependency objects such as zones, addresses, services, "
+            "applications, schedules, profile groups, or decryption profiles, or provide them in --current-data."
+        ),
+        "unsupported-panos-routing-node": (
+            "Review the source PAN-OS routing node and manually model the unsupported behavior in SCM Logical Router/ARE."
+        ),
+        "unsupported-panos-config-layout": (
+            "Parse this XML with the matching --panos-config-type or extract the local firewall configuration before migration."
+        ),
+        "logical-router-static-route-option": (
+            "Validate generated Logical Router static route options against the current SCM schema before posting."
+        ),
+        "logical-router-bgp-reference": (
+            "Validate generated Logical Router BGP profile and route-map references against current SCM data before posting."
+        ),
+        "generated-bgp-filtering-profile": (
+            "Review generated BGP filtering profiles from PAN-OS import/export policy before posting."
+        ),
+        "bgp-address-family-profile": (
+            "Validate BGP address-family profile payloads against the current SCM schema before posting."
+        ),
+    }
+    return actions.get(code, "Review the warning examples and validate the generated payload before posting.")
 
 
 def _posting_batches(changes: list[Change]) -> list[dict[str, Any]]:
@@ -679,6 +751,15 @@ def _network_reference_targets(object_type: str, path: str, key: str) -> tuple[s
             return ("Address", "AddressGroup")
         if key == "service":
             return ("Service", "ServiceGroup")
+        if key == "application" and object_type in {"app_override_pre_rules", "app_override_post_rules"}:
+            return ("Application", "ApplicationGroup")
+        if key == "schedule" and object_type in {
+            "security_pre_rules",
+            "security_post_rules",
+            "decryption_pre_rules",
+            "decryption_post_rules",
+        }:
+            return ("Schedule",)
         if key == "group" and path.endswith("profile_setting.group"):
             return ("ProfileGroup",)
         if key == "profile" and object_type in {"decryption_pre_rules", "decryption_post_rules"}:

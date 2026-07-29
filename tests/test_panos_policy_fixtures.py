@@ -13,11 +13,14 @@ class PanosPolicyFixtureTests(unittest.TestCase):
         fixture_path = FIXTURE_DIR / "local_policy_reference_variants.xml"
         object_types = [
             "Address",
+            "Application",
             "EthernetInterface",
             "Service",
             "ProfileGroup",
             "DecryptionProfile",
+            "Schedule",
             "Zones",
+            "app_override_pre_rules",
             "security_pre_rules",
             "nat_pre_rules",
             "decryption_pre_rules",
@@ -26,12 +29,16 @@ class PanosPolicyFixtureTests(unittest.TestCase):
         parsed = XMLParser(str(fixture_path), "local").parse_specific_types(object_types)
 
         self.assertEqual({entry["name"] for entry in parsed["Address"]}, {"users-net", "web-public", "web-private"})
+        self.assertEqual(parsed["Application"][0]["name"], "custom-web-app")
         self.assertEqual({entry["default_value"] for entry in parsed["EthernetInterface"]}, {"ethernet1/1", "ethernet1/2"})
         self.assertEqual(parsed["Service"][0]["name"], "tcp-443")
+        self.assertEqual(parsed["Schedule"][0]["name"], "business-hours")
         self.assertEqual({entry["name"] for entry in parsed["Zones"]}, {"trust", "untrust"})
         self.assertEqual(parsed["ProfileGroup"][0]["name"], "strict-profiles")
         self.assertEqual(parsed["DecryptionProfile"][0]["name"], "decrypt-forward")
         self.assertEqual(parsed["security_pre_rules"][0]["profile_setting"], {"group": ["strict-profiles"]})
+        self.assertEqual(parsed["security_pre_rules"][0]["schedule"], "business-hours")
+        self.assertEqual(parsed["app_override_pre_rules"][0]["application"], "custom-web-app")
         self.assertEqual(parsed["nat_pre_rules"][0]["destination_translation"]["translated_address"], "web-private")
         self.assertEqual(parsed["decryption_pre_rules"][0]["profile"], "decrypt-forward")
 
@@ -46,16 +53,19 @@ class PanosPolicyFixtureTests(unittest.TestCase):
         fixture_path = FIXTURE_DIR / "local_policy_reference_variants.xml"
         object_types = [
             "Address",
+            "Application",
             "EthernetInterface",
             "Service",
             "ProfileGroup",
             "DecryptionProfile",
+            "Schedule",
             "Zones",
+            "app_override_pre_rules",
             "security_pre_rules",
             "nat_pre_rules",
             "decryption_pre_rules",
         ]
-        policy_types = ["security_pre_rules", "nat_pre_rules", "decryption_pre_rules"]
+        policy_types = ["app_override_pre_rules", "security_pre_rules", "nat_pre_rules", "decryption_pre_rules"]
 
         parsed = XMLParser(str(fixture_path), "local").parse_specific_types(object_types)
         plan = build_plan(parsed, object_types=policy_types)
@@ -73,8 +83,10 @@ class PanosPolicyFixtureTests(unittest.TestCase):
                 "web-public",
                 "web-private",
                 "tcp-443",
+                "custom-web-app",
                 "strict-profiles",
                 "decrypt-forward",
+                "business-hours",
             },
         )
 

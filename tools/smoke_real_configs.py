@@ -86,6 +86,7 @@ def smoke_one_config(
                 warning_codes=warning_codes,
             ),
             "warning_summary": plan_dict["warning_summary"],
+            "remediation": plan_dict["remediation"],
             "warning_codes": sorted({warning.code for warning in plan.warnings}),
         }
     except Exception as err:

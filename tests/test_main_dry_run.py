@@ -59,6 +59,60 @@ class MainDryRunTests(unittest.TestCase):
             },
         )
 
+    def test_snapshot_policy_dependencies_includes_object_and_network_dependencies(self):
+        class SnapshotSession:
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                endpoint_name = url.rstrip("?").rstrip("/").split("/")[-1]
+                payload = {"data": [{"name": f"tenant-{endpoint_name}"}]}
+
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return payload
+
+                return Response()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "policy-dependencies.json"
+
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch.object(main, "initialize_api_session", return_value=SnapshotSession()),
+            ):
+                snapshot = main.main(
+                    AppConfig(),
+                    snapshot_current_data=True,
+                    snapshot_policy_dependencies=True,
+                    snapshot_output=str(output_path),
+                    object_scope="folder:All",
+                    network_scope="snippet:Network-Stack",
+                )
+
+            output = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(snapshot, output)
+        self.assertEqual(
+            set(output),
+            {
+                "Address",
+                "AddressGroup",
+                "Application",
+                "ApplicationGroup",
+                "DecryptionProfile",
+                "ProfileGroup",
+                "Schedule",
+                "Service",
+                "ServiceGroup",
+                "Zones",
+            },
+        )
+
     def test_network_report_writes_payloads_and_warnings_without_scope(self):
         fixture_path = Path(__file__).parent / "fixtures" / "panos" / "local_routing_unsupported_nodes.xml"
 
@@ -85,6 +139,36 @@ class MainDryRunTests(unittest.TestCase):
         warning_codes = [warning["code"] for warning in output["warnings"]]
         self.assertEqual(warning_codes.count("unsupported-panos-routing-node"), 8)
         self.assertEqual(warning_codes.count("missing-network-reference"), 1)
+
+    def test_validate_only_writes_remediation_output(self):
+        parsed_data = {
+            "Zones": [
+                {
+                    "name": "trust",
+                    "network": {"layer3": ["ethernet1/2"]},
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            remediation_path = Path(directory) / "remediation.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                main.main(
+                    AppConfig(),
+                    run_objects="Zones",
+                    json_file=str(parsed_path),
+                    validate_only=True,
+                    remediation_output=str(remediation_path),
+                )
+
+            remediation = json.loads(remediation_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(remediation[0]["code"], "missing-network-reference")
+        self.assertEqual(remediation[0]["object_types"], {"Zones": 1})
+        self.assertIn("Include the referenced network object type", remediation[0]["action"])
 
     def test_network_report_honors_selected_network_objects(self):
         parsed_data = {
@@ -517,6 +601,7 @@ class MainDryRunTests(unittest.TestCase):
         current_data = {
             "addresses": {"data": [{"name": "users-net"}, {"name": "web-public"}]},
             "services": {"data": [{"name": "tcp-443"}]},
+            "schedules": {"data": [{"name": "business-hours"}]},
             "data": [
                 {"object_type": "Zones", "name": "trust"},
                 {"object_type": "Zones", "name": "untrust"},

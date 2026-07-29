@@ -36,6 +36,12 @@ CURRENT_DATA_KEY_ALIASES = {
     "servicegroups": "ServiceGroup",
     "service-group": "ServiceGroup",
     "service-groups": "ServiceGroup",
+    "application": "Application",
+    "applications": "Application",
+    "applicationgroup": "ApplicationGroup",
+    "applicationgroups": "ApplicationGroup",
+    "application-group": "ApplicationGroup",
+    "application-groups": "ApplicationGroup",
     "profilegroup": "ProfileGroup",
     "profilegroups": "ProfileGroup",
     "profile-group": "ProfileGroup",
@@ -46,7 +52,22 @@ CURRENT_DATA_KEY_ALIASES = {
     "decryption-profiles": "DecryptionProfile",
     "zone": "Zones",
     "zones": "Zones",
+    "schedule": "Schedule",
+    "schedules": "Schedule",
 }
+
+POLICY_DEPENDENCY_OBJECT_TYPE_NAMES = [
+    "Address",
+    "AddressGroup",
+    "Application",
+    "ApplicationGroup",
+    "DecryptionProfile",
+    "ProfileGroup",
+    "Schedule",
+    "Service",
+    "ServiceGroup",
+    "Zones",
+]
 
 
 class CliError(Exception):
@@ -360,6 +381,12 @@ def write_plan_output(plan, plan_output, label):
     logger.info(f"{label} written to {plan_output}")
 
 
+def write_remediation_output(report_source, remediation_output, label):
+    if not remediation_output:
+        return
+    write_json_file(remediation_output, report_source.to_dict()["remediation"], label)
+
+
 def write_json_file(output_path, payload, label):
     if not output_path:
         raise CliError(f"{label} output path is required")
@@ -490,6 +517,7 @@ def main(
     validate_only=False,
     snapshot_current_data=False,
     snapshot_output="",
+    snapshot_policy_dependencies=False,
     post_objects=False,
     post_policy=False,
     post_network=False,
@@ -500,6 +528,7 @@ def main(
     conflict_policy="fail",
     plan_output="",
     report_output="",
+    remediation_output="",
     current_data_file="",
     parser_type=None,
     config_file="",
@@ -526,6 +555,12 @@ def main(
             logger.info(f'Running specific objects: {run_objects_list}')
         else:
             run_objects_list = []  # Initialize as empty list
+
+        if snapshot_policy_dependencies:
+            dependency_names = set(POLICY_DEPENDENCY_OBJECT_TYPE_NAMES)
+            run_objects_list = list(dict.fromkeys(run_objects_list + POLICY_DEPENDENCY_OBJECT_TYPE_NAMES))
+            run_objects = ",".join(run_objects_list)
+            logger.info(f"Including policy dependency snapshot object types: {sorted(dependency_names)}")
 
         selected_regular_obj_types, selected_network_obj_types = split_selected_obj_types(config, run_objects_list)
         selected_obj_types = selected_regular_obj_types + selected_network_obj_types
@@ -671,6 +706,7 @@ def main(
                     logger.error(f"Error while writing network report json file {err}")
                     sys.exit(1)
                 logger.info(f"Network migration report written to {report_output}")
+            write_remediation_output(report, remediation_output, "Network remediation report")
             logger.info(f"Network migration report summary: {json.dumps(report.summary(), sort_keys=True)}")
             print(json.dumps(report.summary(), indent=2, sort_keys=True))
             return report
@@ -694,6 +730,7 @@ def main(
                 conflict_policy=conflict_policy,
             )
             write_plan_output(plan, plan_output, "Validation plan")
+            write_remediation_output(plan, remediation_output, "Validation remediation report")
             summary = validation_summary(
                 plan,
                 warnings_as_errors=warnings_as_errors,
@@ -735,6 +772,7 @@ def main(
                 conflict_policy=conflict_policy,
             )
             write_plan_output(plan, plan_output, "Dry-run migration plan")
+            write_remediation_output(plan, remediation_output, "Dry-run remediation report")
             logger.info(f"Dry-run migration plan summary: {json.dumps(plan.summary(), sort_keys=True)}")
             print(json.dumps(plan.summary(), indent=2, sort_keys=True))
             return plan
@@ -879,6 +917,7 @@ if __name__ == "__main__":
     parser.add_argument('--validate-only', action='store_true', help="Run parser/planner validation without SCM authentication or scope prompts; exits 1 on conflicts or unsupported entries")
     parser.add_argument('--snapshot-current-data', action='store_true', help="Fetch current SCM objects into --current-data compatible JSON and exit")
     parser.add_argument('--snapshot-output', action='store', default="", help="Write --snapshot-current-data JSON to this path")
+    parser.add_argument('--snapshot-policy-dependencies', action='store_true', help="With --snapshot-current-data, include common policy dependency object types")
     parser.add_argument('--post-objects', action='store_true', help="Allow live object/profile posting after validation blockers are checked")
     parser.add_argument('--post-policy', action='store_true', help="Allow live policy/NAT posting after validation blockers are checked")
     parser.add_argument('--post-network', action='store_true', help="Allow live network object posting after validation blockers are checked")
@@ -889,8 +928,9 @@ if __name__ == "__main__":
     parser.add_argument('--conflict-policy', choices=['fail', 'replace', 'ignore'], default='fail', help="How dry-run planning handles changed existing objects")
     parser.add_argument('--plan-output', action='store', default="", help="Write full dry-run or validation migration plan JSON to this path")
     parser.add_argument('--report-output', action='store', default="", help="Write full network report JSON to this path")
+    parser.add_argument('--remediation-output', action='store', default="", help="Write grouped warning remediation JSON without full payloads")
     parser.add_argument('--current-data', action='store', default="", help="Offline current SCM data JSON for dry-run or validation comparison")
     args = parser.parse_args()
     config = parser_config if args.dry_run or args.validate_only or args.network_report else ConfigurationManager().app_config
     
-    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, validate_only=args.validate_only, snapshot_current_data=args.snapshot_current_data, snapshot_output=args.snapshot_output, post_objects=args.post_objects, post_policy=args.post_policy, post_network=args.post_network, warnings_as_errors=args.warnings_as_errors, warning_codes=args.warning_codes, strict_local_firewall=args.strict_local_firewall, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)
+    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, validate_only=args.validate_only, snapshot_current_data=args.snapshot_current_data, snapshot_output=args.snapshot_output, snapshot_policy_dependencies=args.snapshot_policy_dependencies, post_objects=args.post_objects, post_policy=args.post_policy, post_network=args.post_network, warnings_as_errors=args.warnings_as_errors, warning_codes=args.warning_codes, strict_local_firewall=args.strict_local_firewall, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, remediation_output=args.remediation_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)

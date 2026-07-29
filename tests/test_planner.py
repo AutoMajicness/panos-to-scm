@@ -86,6 +86,7 @@ class BuildPlanTests(unittest.TestCase):
             [
                 "summary",
                 "warning_summary",
+                "remediation",
                 "posting_preview",
                 "creates",
                 "updates",
@@ -529,6 +530,17 @@ class BuildPlanTests(unittest.TestCase):
                     "destination": ["web-dst"],
                     "service": ["tcp-443"],
                     "profile_setting": {"group": ["strict-profiles"]},
+                    "schedule": "business-hours",
+                }
+            ],
+            "app_override_pre_rules": [
+                {
+                    "name": "custom-app-override",
+                    "from": ["trust"],
+                    "to": ["untrust"],
+                    "source": ["users-net"],
+                    "destination": ["web-dst"],
+                    "application": "custom-web-app",
                 }
             ],
             "decryption_pre_rules": [
@@ -557,7 +569,12 @@ class BuildPlanTests(unittest.TestCase):
 
         plan = build_plan(
             parsed_data,
-            object_types=["security_pre_rules", "decryption_pre_rules", "nat_pre_rules"],
+            object_types=[
+                "app_override_pre_rules",
+                "security_pre_rules",
+                "decryption_pre_rules",
+                "nat_pre_rules",
+            ],
         )
         missing = [warning for warning in plan.warnings if warning.code == "missing-policy-reference"]
 
@@ -573,10 +590,33 @@ class BuildPlanTests(unittest.TestCase):
                 "web-dst",
                 "tcp-443",
                 "strict-profiles",
+                "business-hours",
+                "custom-web-app",
                 "forward-proxy-profile",
                 "inside-web",
             },
         )
+
+    def test_plan_to_dict_includes_remediation_report(self):
+        parsed_data = {
+            "app_override_pre_rules": [
+                {
+                    "name": "custom-app-override",
+                    "from": ["trust"],
+                    "to": ["untrust"],
+                    "source": ["users-net"],
+                    "destination": ["web-dst"],
+                    "application": "custom-web-app",
+                }
+            ]
+        }
+
+        remediation = build_plan(parsed_data, object_types=["app_override_pre_rules"]).to_dict()["remediation"]
+
+        self.assertEqual(len(remediation), 1)
+        self.assertEqual(remediation[0]["code"], "missing-policy-reference")
+        self.assertEqual(remediation[0]["object_types"], {"app_override_pre_rules": 5})
+        self.assertEqual(len(remediation[0]["examples"]), 5)
 
     def test_build_plan_uses_current_data_for_policy_reference_validation(self):
         parsed_data = {

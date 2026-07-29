@@ -25,6 +25,7 @@ class SmokeRealConfigsTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["validation_summary"]["warnings"], 0)
         self.assertIn("security_pre_rules", result["parsed_object_counts"])
+        self.assertEqual(result["remediation"], [])
         self.assertNotIn("creates", result)
         self.assertNotIn("warnings", result)
 
