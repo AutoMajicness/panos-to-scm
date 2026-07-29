@@ -368,6 +368,73 @@ class MainDryRunTests(unittest.TestCase):
 
         self.assertEqual(exit_context.exception.code, 1)
 
+    def test_strict_local_firewall_blocks_recommended_warning_codes(self):
+        parsed_data = {
+            "Zones": [
+                {
+                    "name": "trust",
+                    "network": {"layer3": ["ethernet1/2"]},
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_objects="Zones",
+                        json_file=str(parsed_path),
+                        validate_only=True,
+                        strict_local_firewall=True,
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_strict_local_firewall_keeps_schema_review_warnings_advisory(self):
+        parsed_data = {
+            "LogicalRouter": [
+                {
+                    "name": "default",
+                    "routing_stack": "advanced",
+                    "vrf": [
+                        {
+                            "name": "default",
+                            "routing_table": {
+                                "ip": {
+                                    "static_route": [
+                                        {
+                                            "name": "default-route",
+                                            "destination": "0.0.0.0/0",
+                                            "route_table": {"unicast": {}},
+                                        }
+                                    ]
+                                }
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="LogicalRouter",
+                    json_file=str(parsed_path),
+                    validate_only=True,
+                    strict_local_firewall=True,
+                )
+
+        self.assertEqual(plan.summary()["warnings"], 1)
+
     def test_config_file_json_source_works_for_dry_run(self):
         parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
 

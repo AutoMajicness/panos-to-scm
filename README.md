@@ -94,7 +94,7 @@ python3 main.py \
   -o InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,OSPFAuthProfile,BgpAuthProfile,BgpAddressFamilyProfile,BgpFilteringProfile,RoutePrefixList,RouteAccessList,RouteCommunityList,RoutePathAccessList,BgpRouteMap,BgpRouteMapRedistribution,BgpRedistributionProfile,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,PbfRule,Zones
 ```
 
-`--validate-only` prints the same planner summary plus a `blockers` count. It exits with status `1` when conflicts or unsupported parsed entries are present, and keeps schema-sensitive or missing-reference findings as warnings.
+`--validate-only` prints the same planner summary plus a `blockers` count. It exits with status `1` when conflicts or unsupported parsed entries are present, and keeps schema-sensitive or missing-reference findings as warnings. Use `--strict-local-firewall` for local firewall imports to automatically promote missing network references, missing policy references, unsupported routing nodes, and unsupported local/Panorama layout warnings to validation blockers.
 
 To fail validation on warnings, add `--warnings-as-errors`. To promote only specific warning classes, combine it with `--warning-codes`, for example:
 
@@ -104,8 +104,7 @@ python3 main.py \
   --config-file running_config.xml \
   --panos-config-type local \
   --validate-only \
-  --warnings-as-errors \
-  --warning-codes missing-network-reference,unsupported-panos-routing-node
+  --strict-local-firewall
 ```
 
 For a network-only offline report that does not require SCM scope/current-data comparison:
@@ -141,6 +140,7 @@ python3 main.py \
 - Allow guarded live network object posting: `--post-network`
 - Promote validate-only warnings to blockers: `--warnings-as-errors`
 - Restrict promoted warnings by code: `--warning-codes missing-network-reference,unsupported-panos-routing-node`
+- Promote recommended local firewall migration warnings to blockers: `--strict-local-firewall`
 - Emit parsed network payloads and warnings without SCM comparison: `--network-report`
 - Write a full dry-run plan: `--plan-output /tmp/plan.json`
 - Write a full network report: `--report-output /tmp/network-report.json`
@@ -192,8 +192,7 @@ python3 main.py \
   --panos-config-type local \
   --validate-only \
   --current-data /tmp/current-network.json \
-  --warnings-as-errors \
-  --warning-codes missing-network-reference,missing-policy-reference,unsupported-panos-routing-node \
+  --strict-local-firewall \
   -o InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,Zones,LogicalRouter
 
 # 3. Post only after validation is clean.
@@ -203,8 +202,7 @@ python3 main.py \
   --panos-config-type local \
   --network-scope snippet:Network-Stack \
   --current-data /tmp/current-network.json \
-  --warnings-as-errors \
-  --warning-codes missing-network-reference,unsupported-panos-routing-node \
+  --strict-local-firewall \
   --post-network \
   -o InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,Zones,LogicalRouter
 ```
@@ -278,9 +276,9 @@ Network object posting is dependency ordered even when `-o` is supplied out of o
 
 BGP import/export policy rules are converted into route-map objects and attached to migrated BGP peers under IPv4 or IPv6 unicast address-family data based on the matched prefix family. Route-map conversion includes prefix, access-list, community, AS-path, metric, local-preference, MED, next-hop, community, and AS-path set operations. Validate these payloads with `--dry-run` against real SCM current data before posting, because advanced routing schemas are strict and local PAN-OS XML can vary by PAN-OS release.
 
-Dry-run plans include a `warnings` section for schema-sensitive or inferred network payloads, including generated BGP filtering profiles, BGP address-family profiles, Logical Router BGP peer references, static route option mappings, missing generated route-map/profile/list/VPN/interface references, missing security/NAT/decryption policy references, and parser-reported unsupported PAN-OS routing nodes. Reference validation checks selected generated payloads against both parsed output and optional `--current-data`, which helps catch dependencies that were not selected with `-o` or that do not already exist in the target SCM tenant. Physical Ethernet references are matched against both SCM payload `name` values and `default_value` interface names, because generated Ethernet payload names use the SCM `$ethernet...` format while zones/routes reference PAN-OS interface names like `ethernet1/1`. These warnings are non-blocking; use them as the review checklist before posting to SCM. Parser warnings are emitted under `_migration_warnings` in parsed data and are carried into dry-run plans automatically.
+Dry-run plans include `warning_summary` counts grouped by warning code and object type plus a detailed `warnings` section for schema-sensitive or inferred network payloads, including generated BGP filtering profiles, BGP address-family profiles, Logical Router BGP peer references, static route option mappings, missing generated route-map/profile/list/VPN/interface references, missing security/NAT/decryption policy references, and parser-reported unsupported PAN-OS routing nodes. Reference validation checks selected generated payloads against both parsed output and optional `--current-data`, which helps catch dependencies that were not selected with `-o` or that do not already exist in the target SCM tenant. Physical Ethernet references are matched against both SCM payload `name` values and `default_value` interface names, because generated Ethernet payload names use the SCM `$ethernet...` format while zones/routes reference PAN-OS interface names like `ethernet1/1`. These warnings are non-blocking unless promoted with `--warnings-as-errors`, `--warning-codes`, or `--strict-local-firewall`; use them as the review checklist before posting to SCM. Parser warnings are emitted under `_migration_warnings` in parsed data and are carried into dry-run plans automatically.
 
-Sanitized local PAN-OS routing regression fixtures live under `tests/fixtures/panos/`. Add new fixtures there when validating XML variants from different PAN-OS releases, then cover the expected SCM payloads in `tests/test_panos_routing_fixtures.py`. The fixture set includes focused BGP/OSPF/static-route variants plus a compact real-world edge-stack pattern with L3 interfaces, L3 subinterfaces, DHCP server/relay, tunnel interfaces, VPN objects, zones, and static route path monitoring. Current parser warnings include PAN-OS virtual-router ECMP, BGP dampening, BGP conditional advertisement, BGP graceful-restart routing options, unmapped BGP redistribution sources, multicast/PIM routing, static-route qualified-next-hop nodes, and Panorama template-style virtual-router layouts parsed in local mode.
+Sanitized local PAN-OS regression fixtures live under `tests/fixtures/panos/`. Add new fixtures there when validating XML variants from different PAN-OS releases, then cover the expected SCM payloads in focused test modules such as `tests/test_panos_routing_fixtures.py` and `tests/test_panos_policy_fixtures.py`. The fixture set includes focused BGP/OSPF/static-route variants, security/NAT/decryption policy reference variants, and a compact real-world edge-stack pattern with L3 interfaces, L3 subinterfaces, DHCP server/relay, tunnel interfaces, VPN objects, zones, and static route path monitoring. Current parser warnings include PAN-OS virtual-router ECMP, BGP dampening, BGP conditional advertisement, BGP graceful-restart routing options, unmapped BGP redistribution sources, multicast/PIM routing, static-route qualified-next-hop nodes, and Panorama template-style virtual-router layouts parsed in local mode.
 
 Virtual-wire zone membership is parsed under security zones. Physical ethernet interfaces using virtual-wire mode are detected in the ethernet interface parser, but SCM currently exposes virtual-wire assignment differently than a standalone network object, so validate those dry-run payloads before posting.
 

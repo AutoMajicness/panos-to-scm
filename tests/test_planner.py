@@ -83,10 +83,70 @@ class BuildPlanTests(unittest.TestCase):
 
         self.assertEqual(
             list(report.keys()),
-            ["summary", "posting_preview", "creates", "updates", "skips", "conflicts", "unsupported", "warnings"],
+            [
+                "summary",
+                "warning_summary",
+                "posting_preview",
+                "creates",
+                "updates",
+                "skips",
+                "conflicts",
+                "unsupported",
+                "warnings",
+            ],
         )
         self.assertEqual([item["name"] for item in report["creates"]], ["a-first", "z-last"])
         self.assertEqual(report["creates"][0]["action"], "create")
+
+    def test_plan_to_dict_groups_warnings_by_code_and_object_type(self):
+        parsed_data = {
+            "BgpFilteringProfile": [
+                {
+                    "name": "default-ipv4-bgp-filtering",
+                    "ipv4": {"unicast": {"route_maps": {"inbound": "missing-rm"}}},
+                }
+            ],
+            "LogicalRouter": [
+                {
+                    "name": "default",
+                    "vrf": [
+                        {
+                            "name": "default",
+                            "routing_table": {
+                                "ip": {
+                                    "static_route": [
+                                        {
+                                            "name": "static-a",
+                                            "route_table": {"no_install": {}},
+                                        }
+                                    ]
+                                }
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        report = build_plan(parsed_data).to_dict()
+
+        self.assertEqual(
+            report["warning_summary"],
+            {
+                "generated-bgp-filtering-profile": {
+                    "count": 1,
+                    "object_types": {"BgpFilteringProfile": 1},
+                },
+                "logical-router-static-route-option": {
+                    "count": 1,
+                    "object_types": {"LogicalRouter": 1},
+                },
+                "missing-network-reference": {
+                    "count": 1,
+                    "object_types": {"BgpFilteringProfile": 1},
+                },
+            },
+        )
 
     def test_plan_to_dict_contains_dependency_ordered_posting_preview(self):
         parsed_data = {
@@ -628,6 +688,19 @@ class BuildPlanTests(unittest.TestCase):
         self.assertEqual(report.objects, {"LogicalRouter": parsed_data["LogicalRouter"]})
         self.assertEqual(report.summary()["LogicalRouter"], 1)
         self.assertEqual(report.summary()["warnings"], 2)
+        self.assertEqual(
+            report.to_dict()["warning_summary"],
+            {
+                "logical-router-static-route-option": {
+                    "count": 1,
+                    "object_types": {"LogicalRouter": 1},
+                },
+                "unsupported-panos-routing-node": {
+                    "count": 1,
+                    "object_types": {"LogicalRouter": 1},
+                },
+            },
+        )
         self.assertEqual(
             [warning.code for warning in report.warnings],
             ["unsupported-panos-routing-node", "logical-router-static-route-option"],

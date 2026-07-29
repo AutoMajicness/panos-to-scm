@@ -1,0 +1,171 @@
+<config>
+  <devices>
+    <entry name="localhost.localdomain">
+      <network>
+        <interface>
+          <ethernet>
+            <entry name="ethernet1/1">
+              <comment>Untrust</comment>
+              <layer3>
+                <ip>
+                  <entry name="198.51.100.1/29" />
+                </ip>
+              </layer3>
+            </entry>
+            <entry name="ethernet1/2">
+              <comment>Trust</comment>
+              <layer3>
+                <ip>
+                  <entry name="10.10.10.1/24" />
+                </ip>
+              </layer3>
+            </entry>
+          </ethernet>
+        </interface>
+      </network>
+      <vsys>
+        <entry name="vsys1">
+          <zone>
+            <entry name="trust">
+              <network>
+                <layer3>
+                  <member>ethernet1/2</member>
+                </layer3>
+              </network>
+            </entry>
+            <entry name="untrust">
+              <network>
+                <layer3>
+                  <member>ethernet1/1</member>
+                </layer3>
+              </network>
+            </entry>
+          </zone>
+          <address>
+            <entry name="users-net">
+              <ip-netmask>10.10.10.0/24</ip-netmask>
+            </entry>
+            <entry name="web-public">
+              <ip-netmask>203.0.113.10/32</ip-netmask>
+            </entry>
+            <entry name="web-private">
+              <ip-netmask>192.0.2.10/32</ip-netmask>
+            </entry>
+          </address>
+          <service>
+            <entry name="tcp-443">
+              <protocol>
+                <tcp>
+                  <port>443</port>
+                </tcp>
+              </protocol>
+            </entry>
+          </service>
+          <profile-group>
+            <entry name="strict-profiles">
+              <virus>
+                <member>default</member>
+              </virus>
+            </entry>
+          </profile-group>
+          <profiles>
+            <decryption>
+              <entry name="decrypt-forward">
+                <ssl-forward-proxy>
+                  <block-expired-certificate>yes</block-expired-certificate>
+                </ssl-forward-proxy>
+              </entry>
+            </decryption>
+          </profiles>
+          <rulebase>
+            <security>
+              <rules>
+                <entry name="allow-web">
+                  <from>
+                    <member>trust</member>
+                  </from>
+                  <to>
+                    <member>untrust</member>
+                  </to>
+                  <source>
+                    <member>users-net</member>
+                  </source>
+                  <destination>
+                    <member>web-public</member>
+                  </destination>
+                  <application>
+                    <member>ssl</member>
+                  </application>
+                  <service>
+                    <member>tcp-443</member>
+                  </service>
+                  <category>
+                    <member>any</member>
+                  </category>
+                  <profile-setting>
+                    <group>
+                      <member>strict-profiles</member>
+                    </group>
+                  </profile-setting>
+                  <action>allow</action>
+                </entry>
+              </rules>
+            </security>
+            <nat>
+              <rules>
+                <entry name="dnat-web">
+                  <from>
+                    <member>untrust</member>
+                  </from>
+                  <to>
+                    <member>untrust</member>
+                  </to>
+                  <source>
+                    <member>any</member>
+                  </source>
+                  <destination>
+                    <member>web-public</member>
+                  </destination>
+                  <service>tcp-443</service>
+                  <destination-translation>
+                    <translated-address>web-private</translated-address>
+                    <translated-port>443</translated-port>
+                  </destination-translation>
+                </entry>
+              </rules>
+            </nat>
+            <decryption>
+              <rules>
+                <entry name="decrypt-web">
+                  <from>
+                    <member>trust</member>
+                  </from>
+                  <to>
+                    <member>untrust</member>
+                  </to>
+                  <source>
+                    <member>users-net</member>
+                  </source>
+                  <destination>
+                    <member>web-public</member>
+                  </destination>
+                  <service>
+                    <member>tcp-443</member>
+                  </service>
+                  <category>
+                    <member>any</member>
+                  </category>
+                  <type>
+                    <ssl-forward-proxy />
+                  </type>
+                  <profile>decrypt-forward</profile>
+                  <action>decrypt</action>
+                </entry>
+              </rules>
+            </decryption>
+          </rulebase>
+        </entry>
+      </vsys>
+    </entry>
+  </devices>
+</config>

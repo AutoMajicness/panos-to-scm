@@ -16,6 +16,14 @@ import xml.etree.ElementTree as ET
 logger = logging.getLogger(__name__)
 
 
+STRICT_LOCAL_FIREWALL_WARNING_CODES = {
+    "missing-network-reference",
+    "missing-policy-reference",
+    "unsupported-panos-config-layout",
+    "unsupported-panos-routing-node",
+}
+
+
 class CliError(Exception):
     """Raised for invalid non-interactive CLI usage."""
 
@@ -273,6 +281,14 @@ def parse_warning_codes(warning_codes):
     }
 
 
+def strict_local_firewall_warning_settings(warnings_as_errors=False, warning_codes="", strict_local_firewall=False):
+    warning_code_filter = parse_warning_codes(warning_codes)
+    if strict_local_firewall:
+        warning_code_filter.update(STRICT_LOCAL_FIREWALL_WARNING_CODES)
+        warnings_as_errors = True
+    return warnings_as_errors, warning_code_filter
+
+
 def warning_blocker_count(plan, warnings_as_errors=False, warning_codes=None):
     if not warnings_as_errors:
         return 0
@@ -362,6 +378,7 @@ def main(
     post_network=False,
     warnings_as_errors=False,
     warning_codes="",
+    strict_local_firewall=False,
     network_report=False,
     conflict_policy="fail",
     plan_output="",
@@ -381,6 +398,11 @@ def main(
     try:
         start_time = time.time()
         logger.info(f"Script started at {time.ctime(start_time)}")
+        warnings_as_errors, warning_code_filter = strict_local_firewall_warning_settings(
+            warnings_as_errors,
+            warning_codes,
+            strict_local_firewall,
+        )
 
         if run_objects:
             run_objects_list = run_objects.split(',')
@@ -529,7 +551,6 @@ def main(
 
         if validate_only:
             current_data = load_current_data(current_data_file)
-            warning_code_filter = parse_warning_codes(warning_codes)
             selected_type_names = selected_type_names_for_plan(
                 parsed_data,
                 selected_obj_types,
@@ -591,7 +612,6 @@ def main(
             return plan
 
         current_data = None
-        warning_code_filter = None
 
         if selected_regular_obj_types:
             if not post_objects:
@@ -600,7 +620,6 @@ def main(
                     "or add --post-objects to acknowledge live SCM object changes."
                 )
             current_data = load_current_data(current_data_file)
-            warning_code_filter = parse_warning_codes(warning_codes)
             validate_post_plan(
                 parsed_data,
                 current_data,
@@ -619,8 +638,6 @@ def main(
                 )
             if current_data is None:
                 current_data = load_current_data(current_data_file)
-            if warning_code_filter is None:
-                warning_code_filter = parse_warning_codes(warning_codes)
             validate_post_plan(
                 parsed_data,
                 current_data,
@@ -645,8 +662,6 @@ def main(
                 )
             if current_data is None:
                 current_data = load_current_data(current_data_file)
-            if warning_code_filter is None:
-                warning_code_filter = parse_warning_codes(warning_codes)
             network_type_names = [obj_type.__name__ for obj_type in selected_network_obj_types]
             validate_post_plan(
                 parsed_data,
@@ -741,6 +756,7 @@ if __name__ == "__main__":
     parser.add_argument('--post-network', action='store_true', help="Allow live network object posting after validation blockers are checked")
     parser.add_argument('--warnings-as-errors', action='store_true', help="In validate-only mode, promote warnings to blockers and exit 1 when matching warnings exist")
     parser.add_argument('--warning-codes', action='store', default="", help="Comma-separated warning codes to promote with --warnings-as-errors. Defaults to all warnings")
+    parser.add_argument('--strict-local-firewall', action='store_true', help="Promote recommended local firewall migration warnings to blockers")
     parser.add_argument('--network-report', action='store_true', help="Emit parsed network payloads and migration warnings without SCM comparison or authentication")
     parser.add_argument('--conflict-policy', choices=['fail', 'replace', 'ignore'], default='fail', help="How dry-run planning handles changed existing objects")
     parser.add_argument('--plan-output', action='store', default="", help="Write full dry-run or validation migration plan JSON to this path")
@@ -749,4 +765,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config = parser_config if args.dry_run or args.validate_only or args.network_report else ConfigurationManager().app_config
     
-    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, validate_only=args.validate_only, snapshot_current_data=args.snapshot_current_data, snapshot_output=args.snapshot_output, post_objects=args.post_objects, post_policy=args.post_policy, post_network=args.post_network, warnings_as_errors=args.warnings_as_errors, warning_codes=args.warning_codes, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)
+    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, validate_only=args.validate_only, snapshot_current_data=args.snapshot_current_data, snapshot_output=args.snapshot_output, post_objects=args.post_objects, post_policy=args.post_policy, post_network=args.post_network, warnings_as_errors=args.warnings_as_errors, warning_codes=args.warning_codes, strict_local_firewall=args.strict_local_firewall, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)

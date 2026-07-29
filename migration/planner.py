@@ -93,6 +93,7 @@ class MigrationPlan:
     def to_dict(self) -> dict[str, Any]:
         return {
             "summary": self.summary(),
+            "warning_summary": _warning_summary(self.warnings),
             "posting_preview": self.posting_preview(),
             "creates": _serialize_changes(self.creates),
             "updates": _serialize_changes(self.updates),
@@ -129,6 +130,7 @@ class NetworkReport:
     def to_dict(self) -> dict[str, Any]:
         return {
             "summary": self.summary(),
+            "warning_summary": _warning_summary(self.warnings),
             "objects": self.objects,
             "warnings": _serialize_warnings(self.warnings),
         }
@@ -337,6 +339,29 @@ def _serialize_warnings(warnings: list[PlanWarning]) -> list[dict[str, Any]]:
         warning.to_dict()
         for warning in sorted(warnings, key=lambda item: (item.object_type, item.name, item.path, item.code))
     ]
+
+
+def _warning_summary(warnings: list[PlanWarning]) -> dict[str, dict[str, Any]]:
+    summary: dict[str, dict[str, Any]] = {}
+    for warning in warnings:
+        code_summary = summary.setdefault(
+            warning.code,
+            {
+                "count": 0,
+                "object_types": {},
+            },
+        )
+        code_summary["count"] += 1
+        object_types = code_summary["object_types"]
+        object_types[warning.object_type] = object_types.get(warning.object_type, 0) + 1
+
+    return {
+        code: {
+            "count": data["count"],
+            "object_types": dict(sorted(data["object_types"].items())),
+        }
+        for code, data in sorted(summary.items())
+    }
 
 
 def _posting_batches(changes: list[Change]) -> list[dict[str, Any]]:
