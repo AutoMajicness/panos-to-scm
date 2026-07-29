@@ -116,6 +116,66 @@ class MainDryRunTests(unittest.TestCase):
 
         input_mock.assert_not_called()
 
+    def test_validate_only_does_not_require_scope(self):
+        parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="Address",
+                    json_file=str(parsed_path),
+                    validate_only=True,
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.summary()["conflicts"], 0)
+        self.assertEqual(plan.summary()["unsupported"], 0)
+
+    def test_validate_only_uses_current_data_for_conflict_detection(self):
+        parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
+        current_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10", "folder": "All"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            parsed_path = directory_path / "parsed.json"
+            current_path = directory_path / "current.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+            current_path.write_text(json.dumps(current_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="Address",
+                    json_file=str(parsed_path),
+                    validate_only=True,
+                    current_data_file=str(current_path),
+                )
+
+        self.assertEqual(plan.summary()["skips"], 1)
+        self.assertEqual(plan.summary()["conflicts"], 0)
+
+    def test_validate_only_exits_nonzero_on_blockers(self):
+        parsed_data = {"Address": [{"fqdn": "missing-name.example"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_objects="Address",
+                        json_file=str(parsed_path),
+                        validate_only=True,
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
     def test_config_file_json_source_works_for_dry_run(self):
         parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
 

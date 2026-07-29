@@ -188,6 +188,62 @@ def process_obj_types(api_session, selected_obj_types, parsed_data, scope_param,
     scm_obj_manager = setup_scm_object_manager(api_session, selected_obj_types, config.sec_obj, config.nat_obj, scope_param)
     scm_obj_manager.process_objects(parsed_data, scope_param, device_group_name, max_workers=6, limit=config.limit)
 
+
+def selected_type_names_for_plan(
+    parsed_data,
+    selected_obj_types,
+    run_all=False,
+    run_security=False,
+    run_app_override=False,
+    run_decrypt_rules=False,
+    run_nat=False,
+):
+    if run_all:
+        return list(parsed_data.keys())
+    if run_security:
+        return ['security_pre_rules', 'security_post_rules']
+    if run_app_override:
+        return ['app_override_pre_rules', 'app_override_post_rules']
+    if run_decrypt_rules:
+        return ['decryption_pre_rules', 'decryption_post_rules']
+    if run_nat:
+        return ['nat_pre_rules', 'nat_post_rules']
+    return [obj_type.__name__ for obj_type in selected_obj_types]
+
+
+def load_current_data(current_data_file):
+    if not current_data_file:
+        return {}
+    try:
+        with open(current_data_file, 'r') as file:
+            return json.load(file)
+    except Exception as err:
+        logger.error(f"Error while loading current data json file {err}")
+        sys.exit(1)
+
+
+def write_plan_output(plan, plan_output, label):
+    if not plan_output:
+        return
+    try:
+        with open(plan_output, 'w') as file:
+            json.dump(plan.to_dict(), file, indent=2, sort_keys=True)
+            file.write('\n')
+    except Exception as err:
+        logger.error(f"Error while writing plan output json file {err}")
+        sys.exit(1)
+    logger.info(f"{label} written to {plan_output}")
+
+
+def validation_blocker_count(plan):
+    return len(plan.conflicts) + len(plan.unsupported)
+
+
+def validation_summary(plan):
+    summary = plan.summary()
+    summary["blockers"] = validation_blocker_count(plan)
+    return summary
+
 def main(
     config,
     run_objects=None,
@@ -198,6 +254,7 @@ def main(
     run_all=False,
     json_file="",
     dry_run=False,
+    validate_only=False,
     network_report=False,
     conflict_policy="fail",
     plan_output="",
@@ -316,6 +373,31 @@ def main(
             print(json.dumps(report.summary(), indent=2, sort_keys=True))
             return report
 
+        if validate_only:
+            current_data = load_current_data(current_data_file)
+            selected_type_names = selected_type_names_for_plan(
+                parsed_data,
+                selected_obj_types,
+                run_all=run_all,
+                run_security=run_security,
+                run_app_override=run_app_override,
+                run_decrypt_rules=run_decrypt_rules,
+                run_nat=run_nat,
+            )
+            plan = build_plan(
+                parsed_data,
+                current_data=current_data,
+                object_types=selected_type_names,
+                conflict_policy=conflict_policy,
+            )
+            write_plan_output(plan, plan_output, "Validation plan")
+            summary = validation_summary(plan)
+            logger.info(f"Validation summary: {json.dumps(summary, sort_keys=True)}")
+            print(json.dumps(summary, indent=2, sort_keys=True))
+            if summary["blockers"]:
+                sys.exit(1)
+            return plan
+
         scopes = resolve_category_scopes(
             scope,
             object_scope,
@@ -328,41 +410,23 @@ def main(
         )
 
         if dry_run:
-            current_data = {}
-            if current_data_file:
-                try:
-                    with open(current_data_file, 'r') as file:
-                        current_data = json.load(file)
-                except Exception as err:
-                    logger.error(f"Error while loading current data json file {err}")
-                    sys.exit(1)
-
-            selected_type_names = [obj_type.__name__ for obj_type in selected_obj_types]
-            if run_all:
-                selected_type_names = list(parsed_data.keys())
-            elif run_security:
-                selected_type_names = ['security_pre_rules', 'security_post_rules']
-            elif run_app_override:
-                selected_type_names = ['app_override_pre_rules', 'app_override_post_rules']
-            elif run_decrypt_rules:
-                selected_type_names = ['decryption_pre_rules', 'decryption_post_rules']
-            elif run_nat:
-                selected_type_names = ['nat_pre_rules', 'nat_post_rules']
+            current_data = load_current_data(current_data_file)
+            selected_type_names = selected_type_names_for_plan(
+                parsed_data,
+                selected_obj_types,
+                run_all=run_all,
+                run_security=run_security,
+                run_app_override=run_app_override,
+                run_decrypt_rules=run_decrypt_rules,
+                run_nat=run_nat,
+            )
             plan = build_plan(
                 parsed_data,
                 current_data=current_data,
                 object_types=selected_type_names,
                 conflict_policy=conflict_policy,
             )
-            if plan_output:
-                try:
-                    with open(plan_output, 'w') as file:
-                        json.dump(plan.to_dict(), file, indent=2, sort_keys=True)
-                        file.write('\n')
-                except Exception as err:
-                    logger.error(f"Error while writing plan output json file {err}")
-                    sys.exit(1)
-                logger.info(f"Dry-run migration plan written to {plan_output}")
+            write_plan_output(plan, plan_output, "Dry-run migration plan")
             logger.info(f"Dry-run migration plan summary: {json.dumps(plan.summary(), sort_keys=True)}")
             print(json.dumps(plan.summary(), indent=2, sort_keys=True))
             return plan
@@ -442,12 +506,13 @@ if __name__ == "__main__":
     parser.add_argument('--panos-config-type', choices=['local', 'panorama/shared', 'panorama/device-group'], default="", help="PAN-OS XML scope type for non-interactive parsing")
     parser.add_argument('--device-group', action='store', default="", help="Panorama device-group name when using panorama/device-group")
     parser.add_argument('--dry-run', action='store_true', help="Build a local migration plan without authenticating to SCM or writing changes")
+    parser.add_argument('--validate-only', action='store_true', help="Run parser/planner validation without SCM authentication or scope prompts; exits 1 on conflicts or unsupported entries")
     parser.add_argument('--network-report', action='store_true', help="Emit parsed network payloads and migration warnings without SCM comparison or authentication")
     parser.add_argument('--conflict-policy', choices=['fail', 'replace', 'ignore'], default='fail', help="How dry-run planning handles changed existing objects")
-    parser.add_argument('--plan-output', action='store', default="", help="Write full dry-run migration plan JSON to this path")
+    parser.add_argument('--plan-output', action='store', default="", help="Write full dry-run or validation migration plan JSON to this path")
     parser.add_argument('--report-output', action='store', default="", help="Write full network report JSON to this path")
-    parser.add_argument('--current-data', action='store', default="", help="Offline current SCM data JSON for dry-run comparison")
+    parser.add_argument('--current-data', action='store', default="", help="Offline current SCM data JSON for dry-run or validation comparison")
     args = parser.parse_args()
-    config = parser_config if args.dry_run or args.network_report else ConfigurationManager().app_config
+    config = parser_config if args.dry_run or args.validate_only or args.network_report else ConfigurationManager().app_config
     
-    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)
+    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, validate_only=args.validate_only, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)

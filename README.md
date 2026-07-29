@@ -82,6 +82,20 @@ python3 main.py \
 
 The legacy `--scope folder:All` option still works as a fallback for all categories. Prefer the category-specific flags when network snippets and policy folders are different.
 
+For CI-style local validation that does not require SCM authentication or scope prompts:
+
+```bash
+python3 main.py \
+  --parser panos \
+  --config-file running_config.xml \
+  --panos-config-type local \
+  --validate-only \
+  --current-data current.json \
+  -o InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,OSPFAuthProfile,BgpAuthProfile,BgpAddressFamilyProfile,BgpFilteringProfile,RoutePrefixList,RouteAccessList,RouteCommunityList,RoutePathAccessList,BgpRouteMap,BgpRouteMapRedistribution,BgpRedistributionProfile,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,PbfRule,Zones
+```
+
+`--validate-only` prints the same planner summary plus a `blockers` count. It exits with status `1` when conflicts or unsupported parsed entries are present, and keeps schema-sensitive or missing-reference findings as warnings.
+
 For a network-only offline report that does not require SCM scope/current-data comparison:
 
 ```bash
@@ -108,6 +122,7 @@ python3 main.py \
 - Set policy destination scope: `--policy-scope folder:All`
 - Set network destination scope: `--network-scope snippet:Network-Stack`
 - Build an offline plan without SCM authentication: `--dry-run`
+- Run local parser/planner validation without SCM authentication or scope prompts: `--validate-only`
 - Emit parsed network payloads and warnings without SCM comparison: `--network-report`
 - Write a full dry-run plan: `--plan-output /tmp/plan.json`
 - Write a full network report: `--report-output /tmp/network-report.json`
