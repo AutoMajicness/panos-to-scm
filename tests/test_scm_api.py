@@ -51,6 +51,10 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(obj.Zones.get_endpoint(), "/config/network/v1/zones")
         self.assertTrue(obj.Zones.uses_payload_scope())
 
+    def test_aggregate_interface_endpoint_is_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.AggregateInterface.get_endpoint(), "/config/network/v1/aggregate-interfaces")
+        self.assertTrue(obj.AggregateInterface.uses_payload_scope())
+
     def test_ethernet_interface_endpoint_is_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.EthernetInterface.get_endpoint(), "/config/network/v1/ethernet-interfaces")
         self.assertTrue(obj.EthernetInterface.uses_payload_scope())
@@ -149,6 +153,32 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(
             session.post_calls[0]["json"],
             {"name": "trust", "network": {"layer3": ["ethernet1/1"]}, "snippet": "Network-Stack"},
+        )
+
+    def test_aggregate_interface_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.AggregateInterface], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&snippet=Network-Stack",
+            [{"name": "$ae1", "default_value": "ae1", "layer3": {"ip": [{"name": "198.51.100.1/24"}]}}],
+            obj.AggregateInterface,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/network/v1/aggregate-interfaces",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {
+                "name": "$ae1",
+                "default_value": "ae1",
+                "layer3": {"ip": [{"name": "198.51.100.1/24"}]},
+                "snippet": "Network-Stack",
+            },
         )
 
     def test_ethernet_interface_post_puts_scope_in_payload_not_url(self):

@@ -109,6 +109,7 @@ class XMLParser:
             'nat_pre_rules': self._parse_entries(self._nat_pre_rules_entries),
             'nat_post_rules': self._parse_entries(self._nat_post_rules_entries),
             'Application': self._parse_entries(self._application_entries),
+            'AggregateInterface': self._parse_entries(self._aggregate_interface_entries),
             'EthernetInterface': self._parse_entries(self._ethernet_interface_entries),
             'Layer3Subinterface': self._parse_entries(self._layer3_subinterface_entries),
             'VlanInterface': self._parse_entries(self._vlan_interface_entries),
@@ -150,6 +151,7 @@ class XMLParser:
             'nat_pre_rules': self._nat_pre_rules_entries,
             'nat_post_rules': self._nat_post_rules_entries,
             'Application': self._application_entries,
+            'AggregateInterface': self._aggregate_interface_entries,
             'EthernetInterface': self._ethernet_interface_entries,
             'Layer3Subinterface': self._layer3_subinterface_entries,
             'VlanInterface': self._vlan_interface_entries,
@@ -1697,6 +1699,68 @@ class XMLParser:
             schedules.append(schedule_entry)
 
         return schedules
+
+    def _aggregate_interface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Aggregate interface migration currently supports local firewall XML only.")
+            return []
+
+        interfaces = []
+        for entry in self.root.findall('./devices/entry/network/interface/aggregate-ethernet/entry'):
+            payload = self._convert_aggregate_interface(entry)
+            if payload:
+                interfaces.append(payload)
+
+        return interfaces
+
+    def _convert_aggregate_interface(self, entry):
+        aggregate_name = entry.get('name')
+        if not aggregate_name:
+            return None
+
+        payload = {
+            'name': f"${self._sanitize_name(aggregate_name)}",
+            'default_value': aggregate_name,
+        }
+
+        comment = self._child_text(entry, 'comment')
+        if comment:
+            payload['comment'] = comment
+
+        lacp = self._convert_lacp(entry.find('lacp'))
+        if lacp:
+            payload['lacp'] = lacp
+
+        layer3 = entry.find('layer3')
+        if layer3 is not None:
+            payload['layer3'] = self._convert_ethernet_layer3(layer3)
+            return payload
+
+        if entry.find('layer2') is not None:
+            payload['layer2'] = {}
+            return payload
+
+        self.logger.warning(f"Skipping aggregate interface '{aggregate_name}' because it has no supported mode.")
+        return None
+
+    def _convert_lacp(self, lacp):
+        if lacp is None:
+            return None
+
+        lacp_payload = {}
+        enabled = self._child_text(lacp, 'enable')
+        if enabled:
+            lacp_payload['enable'] = enabled.lower() == 'yes'
+
+        mode = self._child_text(lacp, 'mode')
+        if mode:
+            lacp_payload['mode'] = mode
+
+        transmission_rate = self._child_text(lacp, 'transmission-rate')
+        if transmission_rate:
+            lacp_payload['transmission_rate'] = transmission_rate
+
+        return lacp_payload or None
 
     def _ethernet_interface_entries(self):
         if self.config_type != 'local':
