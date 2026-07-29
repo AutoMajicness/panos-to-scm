@@ -113,6 +113,7 @@ class XMLParser:
             'Layer3Subinterface': self._parse_entries(self._layer3_subinterface_entries),
             'VlanInterface': self._parse_entries(self._vlan_interface_entries),
             'TunnelInterface': self._parse_entries(self._tunnel_interface_entries),
+            'LoopbackInterface': self._parse_entries(self._loopback_interface_entries),
             'LogicalRouter': self._parse_entries(self._logical_router_entries),
             'Zones': self._parse_entries(self._zones),
             'DecryptionProfile': self._parse_entries(self._decryption_profiles_entries),
@@ -153,6 +154,7 @@ class XMLParser:
             'Layer3Subinterface': self._layer3_subinterface_entries,
             'VlanInterface': self._vlan_interface_entries,
             'TunnelInterface': self._tunnel_interface_entries,
+            'LoopbackInterface': self._loopback_interface_entries,
             'LogicalRouter': self._logical_router_entries,
             'Zones': self._zones,
             'DecryptionProfile': self._decryption_profiles_entries,
@@ -1884,6 +1886,48 @@ class XMLParser:
         }
 
         return self._apply_common_l3_interface_fields(payload, entry)
+
+    def _loopback_interface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Loopback interface migration currently supports local firewall XML only.")
+            return []
+
+        interfaces = []
+        for entry in self.root.findall('./devices/entry/network/interface/loopback/units/entry'):
+            payload = self._convert_loopback_interface(entry)
+            if payload:
+                interfaces.append(payload)
+
+        return interfaces
+
+    def _convert_loopback_interface(self, entry):
+        interface_name = entry.get('name')
+        if not interface_name:
+            return None
+
+        payload = {'name': interface_name}
+        field_map = {
+            'comment': 'comment',
+            'interface-management-profile': 'interface_management_profile',
+        }
+        for panos_name, scm_name in field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        mtu = self._child_text(entry, 'mtu')
+        if mtu and mtu.isdigit():
+            payload['mtu'] = int(mtu)
+
+        ip_entries = [
+            ip_entry.get('name')
+            for ip_entry in entry.findall('ip/entry')
+            if ip_entry.get('name')
+        ]
+        if ip_entries:
+            payload['ip'] = ip_entries
+
+        return payload
 
     def _logical_router_entries(self):
         if self.config_type != 'local':

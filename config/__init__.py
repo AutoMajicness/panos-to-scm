@@ -21,7 +21,7 @@ class AppConfig:
         ]
         self.network_obj_types = [
             obj.EthernetInterface, obj.Layer3Subinterface, obj.VlanInterface,
-            obj.TunnelInterface, obj.LogicalRouter, obj.Zones
+            obj.TunnelInterface, obj.LoopbackInterface, obj.LogicalRouter, obj.Zones
         ]
         self.sec_obj = obj.SecurityRule
         self.nat_obj = obj.NatRule

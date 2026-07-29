@@ -65,6 +65,10 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertTrue(obj.VlanInterface.uses_payload_scope())
         self.assertTrue(obj.TunnelInterface.uses_payload_scope())
 
+    def test_loopback_interface_endpoint_is_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.LoopbackInterface.get_endpoint(), "/config/network/v1/loopback-interfaces")
+        self.assertTrue(obj.LoopbackInterface.uses_payload_scope())
+
     def test_logical_router_endpoint_is_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.LogicalRouter.get_endpoint(), "/config/network/v1/logical-routers")
         self.assertTrue(obj.LogicalRouter.uses_payload_scope())
@@ -247,6 +251,31 @@ class ProcessorTests(unittest.TestCase):
                 "name": "tunnel.1",
                 "default_value": "tunnel.1",
                 "ip": [{"name": "169.254.1.1/30"}],
+                "snippet": "Network-Stack",
+            },
+        )
+
+    def test_loopback_interface_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.LoopbackInterface], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&snippet=Network-Stack",
+            [{"name": "loopback.1", "ip": ["10.255.0.1/32"]}],
+            obj.LoopbackInterface,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/network/v1/loopback-interfaces",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {
+                "name": "loopback.1",
+                "ip": ["10.255.0.1/32"],
                 "snippet": "Network-Stack",
             },
         )

@@ -63,6 +63,10 @@ class TunnelInterface(PanApiHandler):
     _endpoint = "/config/network/v1/tunnel-interfaces"
     _scope_in_payload = True
 
+class LoopbackInterface(PanApiHandler):
+    _endpoint = "/config/network/v1/loopback-interfaces"
+    _scope_in_payload = True
+
 class LogicalRouter(PanApiHandler):
     _endpoint = "/config/network/v1/logical-routers"
     _scope_in_payload = True
