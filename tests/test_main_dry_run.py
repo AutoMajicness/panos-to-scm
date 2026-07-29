@@ -10,6 +10,55 @@ from config import AppConfig
 
 
 class MainDryRunTests(unittest.TestCase):
+    def test_snapshot_current_data_writes_selected_object_types(self):
+        class SnapshotSession:
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                if url.endswith("/ethernet-interfaces"):
+                    payload = {"data": [{"name": "$ethernet1-1", "default_value": "ethernet1/1"}]}
+                elif url.endswith("/zones"):
+                    payload = {"data": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}]}
+                else:
+                    payload = {"data": []}
+
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return payload
+
+                return Response()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "current-data.json"
+
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch.object(main, "initialize_api_session", return_value=SnapshotSession()),
+            ):
+                snapshot = main.main(
+                    AppConfig(),
+                    run_objects="EthernetInterface,Zones",
+                    snapshot_current_data=True,
+                    snapshot_output=str(output_path),
+                    network_scope="snippet:Network-Stack",
+                )
+
+            output = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(snapshot, output)
+        self.assertEqual(
+            output,
+            {
+                "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1"}],
+                "Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}],
+            },
+        )
+
     def test_network_report_writes_payloads_and_warnings_without_scope(self):
         fixture_path = Path(__file__).parent / "fixtures" / "panos" / "local_routing_unsupported_nodes.xml"
 
@@ -888,6 +937,79 @@ class MainDryRunTests(unittest.TestCase):
                     )
 
         input_mock.assert_not_called()
+
+    def test_network_post_requires_explicit_post_network_flag(self):
+        parsed_data = {"Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_objects="Zones",
+                        json_file=str(parsed_path),
+                        network_scope="snippet:Network-Stack",
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_network_post_guard_exits_on_validation_blockers(self):
+        parsed_data = {"Zones": [{"name": "trust", "network": {"layer3": ["missing-interface"]}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_objects="Zones",
+                        json_file=str(parsed_path),
+                        network_scope="snippet:Network-Stack",
+                        post_network=True,
+                        warnings_as_errors=True,
+                        warning_codes="missing-network-reference",
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_network_post_guard_allows_clean_network_plan(self):
+        class TokenSession:
+            def ensure_valid_token(self):
+                pass
+
+        parsed_data = {
+            "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1", "layer3": {}}],
+            "Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch.object(main, "initialize_api_session", return_value=TokenSession()),
+                patch.object(main, "process_obj_types") as process_mock,
+            ):
+                main.main(
+                    AppConfig(),
+                    run_objects="EthernetInterface,Zones",
+                    json_file=str(parsed_path),
+                    network_scope="snippet:Network-Stack",
+                    post_network=True,
+                )
+
+        self.assertEqual(process_mock.call_count, 2)
+        self.assertEqual(
+            [obj_type.__name__ for obj_type in process_mock.call_args_list[1].args[1]],
+            ["EthernetInterface", "Zones"],
+        )
 
     def test_cisco_parser_can_be_selected_without_detection_prompt(self):
         cisco_config = "\n".join(

@@ -135,6 +135,8 @@ python3 main.py \
 - Set network destination scope: `--network-scope snippet:Network-Stack`
 - Build an offline plan without SCM authentication: `--dry-run`
 - Run local parser/planner validation without SCM authentication or scope prompts: `--validate-only`
+- Fetch current SCM object data into validation JSON: `--snapshot-current-data --snapshot-output /tmp/current-data.json`
+- Allow guarded live network object posting: `--post-network`
 - Promote validate-only warnings to blockers: `--warnings-as-errors`
 - Restrict promoted warnings by code: `--warning-codes missing-network-reference,unsupported-panos-routing-node`
 - Emit parsed network payloads and warnings without SCM comparison: `--network-report`
@@ -158,6 +160,18 @@ python3 main.py \
 ```
 
 A committed sanitized example lives at `examples/current-data-network.json`.
+
+To build that current-data file directly from SCM, authenticate normally and run a scoped snapshot:
+
+```bash
+python3 main.py \
+  --snapshot-current-data \
+  --snapshot-output /tmp/current-network.json \
+  --network-scope snippet:Network-Stack \
+  -o EthernetInterface,Layer3Subinterface,TunnelInterface,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,Zones,LogicalRouter
+```
+
+Live network posting is guarded. Any selected network object type requires `--post-network`; before posting, the tool builds a local plan and refuses to continue if validation blockers are present. Combine this with `--warnings-as-errors` and `--warning-codes` when you want missing references or parser warnings to stop posting.
 
 ### Currently Supported PAN-OS Migration Features:
 
@@ -228,7 +242,7 @@ Network object posting is dependency ordered even when `-o` is supplied out of o
 
 BGP import/export policy rules are converted into route-map objects and attached to migrated BGP peers under IPv4 or IPv6 unicast address-family data based on the matched prefix family. Route-map conversion includes prefix, access-list, community, AS-path, metric, local-preference, MED, next-hop, community, and AS-path set operations. Validate these payloads with `--dry-run` against real SCM current data before posting, because advanced routing schemas are strict and local PAN-OS XML can vary by PAN-OS release.
 
-Dry-run plans include a `warnings` section for schema-sensitive or inferred network payloads, including generated BGP filtering profiles, BGP address-family profiles, Logical Router BGP peer references, static route option mappings, missing generated route-map/profile/list/VPN references, and parser-reported unsupported PAN-OS routing nodes. Reference validation checks selected generated payloads against both parsed output and optional `--current-data`, which helps catch dependencies that were not selected with `-o` or that do not already exist in the target SCM tenant. These warnings are non-blocking; use them as the review checklist before posting to SCM. Parser warnings are emitted under `_migration_warnings` in parsed data and are carried into dry-run plans automatically.
+Dry-run plans include a `warnings` section for schema-sensitive or inferred network payloads, including generated BGP filtering profiles, BGP address-family profiles, Logical Router BGP peer references, static route option mappings, missing generated route-map/profile/list/VPN/interface references, and parser-reported unsupported PAN-OS routing nodes. Reference validation checks selected generated payloads against both parsed output and optional `--current-data`, which helps catch dependencies that were not selected with `-o` or that do not already exist in the target SCM tenant. Physical Ethernet references are matched against both SCM payload `name` values and `default_value` interface names, because generated Ethernet payload names use the SCM `$ethernet...` format while zones/routes reference PAN-OS interface names like `ethernet1/1`. These warnings are non-blocking; use them as the review checklist before posting to SCM. Parser warnings are emitted under `_migration_warnings` in parsed data and are carried into dry-run plans automatically.
 
 Sanitized local PAN-OS routing regression fixtures live under `tests/fixtures/panos/`. Add new fixtures there when validating XML variants from different PAN-OS releases, then cover the expected SCM payloads in `tests/test_panos_routing_fixtures.py`. The fixture set includes focused BGP/OSPF/static-route variants plus a compact real-world edge-stack pattern with L3 interfaces, L3 subinterfaces, DHCP server/relay, tunnel interfaces, VPN objects, zones, and static route path monitoring. Current parser warnings include PAN-OS virtual-router ECMP, BGP dampening, BGP conditional advertisement, BGP graceful-restart routing options, unmapped BGP redistribution sources, multicast/PIM routing, static-route qualified-next-hop nodes, and Panorama template-style virtual-router layouts parsed in local mode.
 

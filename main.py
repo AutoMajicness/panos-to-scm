@@ -235,6 +235,34 @@ def write_plan_output(plan, plan_output, label):
     logger.info(f"{label} written to {plan_output}")
 
 
+def write_json_file(output_path, payload, label):
+    if not output_path:
+        raise CliError(f"{label} output path is required")
+    try:
+        with open(output_path, 'w') as file:
+            json.dump(payload, file, indent=2, sort_keys=True)
+            file.write('\n')
+    except Exception as err:
+        logger.error(f"Error while writing {label} json file {err}")
+        sys.exit(1)
+    logger.info(f"{label} written to {output_path}")
+
+
+def build_current_data_snapshot(api_session, selected_obj_types, scope_param, config):
+    manager = setup_scm_object_manager(
+        api_session,
+        selected_obj_types,
+        config.sec_obj,
+        config.nat_obj,
+        scope_param,
+    )
+    current_objects = manager.get_current_objects(manager.obj_types, max_workers=6, limit=config.limit)
+    return {
+        obj_type.__name__: current_objects.get(obj_type, [])
+        for obj_type in manager.obj_types
+    }
+
+
 def parse_warning_codes(warning_codes):
     if not warning_codes:
         return set()
@@ -279,6 +307,9 @@ def main(
     json_file="",
     dry_run=False,
     validate_only=False,
+    snapshot_current_data=False,
+    snapshot_output="",
+    post_network=False,
     warnings_as_errors=False,
     warning_codes="",
     network_report=False,
@@ -306,6 +337,58 @@ def main(
             logger.info(f'Running specific objects: {run_objects_list}')
         else:
             run_objects_list = []  # Initialize as empty list
+
+        selected_regular_obj_types, selected_network_obj_types = split_selected_obj_types(config, run_objects_list)
+        selected_obj_types = selected_regular_obj_types + selected_network_obj_types
+        if run_objects and not selected_obj_types:
+            logger.warning(f"No valid objects found to run for {run_objects_list}")
+
+        if snapshot_current_data:
+            if not selected_obj_types:
+                selected_obj_types = get_supported_obj_types(config)
+                selected_regular_obj_types, selected_network_obj_types = split_selected_obj_types(
+                    config,
+                    [obj_type.__name__ for obj_type in selected_obj_types],
+                )
+            needs_object_scope = bool(selected_regular_obj_types)
+            needs_network_scope = bool(selected_network_obj_types)
+            scopes = resolve_category_scopes(
+                scope,
+                object_scope,
+                policy_scope,
+                network_scope,
+                interactive,
+                needs_object_scope,
+                False,
+                needs_network_scope,
+            )
+            from scm import PanApiHandler
+
+            api_session = PanApiHandler(initialize_api_session())
+            snapshot = {}
+            if selected_regular_obj_types:
+                snapshot.update(
+                    build_current_data_snapshot(
+                        api_session,
+                        selected_regular_obj_types,
+                        scopes.get('object'),
+                        config,
+                    )
+                )
+            if selected_network_obj_types:
+                snapshot.update(
+                    build_current_data_snapshot(
+                        api_session,
+                        selected_network_obj_types,
+                        scopes.get('network'),
+                        config,
+                    )
+                )
+            write_json_file(snapshot_output, snapshot, "Current data snapshot")
+            summary = {object_type: len(entries) for object_type, entries in sorted(snapshot.items())}
+            logger.info(f"Current data snapshot summary: {json.dumps(summary, sort_keys=True)}")
+            print(json.dumps(summary, indent=2, sort_keys=True))
+            return snapshot
 
         if not json_file and config_file.lower().endswith('.json'):
             json_file = config_file
@@ -358,11 +441,6 @@ def main(
 
             logger.debug(f"Parse Data: {json.dumps(parsed_data,indent=4)}")
             logger.debug(f"Parsed data keys: {list(parsed_data.keys())}")
-
-        selected_regular_obj_types, selected_network_obj_types = split_selected_obj_types(config, run_objects_list)
-        selected_obj_types = selected_regular_obj_types + selected_network_obj_types
-        if run_objects and not selected_obj_types:
-            logger.warning(f"No valid objects found to run for {run_objects_list}")
 
         has_rule_flag = any([run_security, run_app_override, run_decrypt_rules, run_nat])
         needs_object_scope = bool(selected_regular_obj_types) and (bool(run_objects) or not has_rule_flag)
@@ -462,6 +540,31 @@ def main(
             print(json.dumps(plan.summary(), indent=2, sort_keys=True))
             return plan
 
+        if selected_network_obj_types:
+            if not post_network:
+                raise CliError(
+                    "Network object posting requires --post-network. Run --validate-only first, "
+                    "or add --post-network to acknowledge live SCM network changes."
+                )
+            current_data = load_current_data(current_data_file)
+            warning_code_filter = parse_warning_codes(warning_codes)
+            network_type_names = [obj_type.__name__ for obj_type in selected_network_obj_types]
+            network_plan = build_plan(
+                parsed_data,
+                current_data=current_data,
+                object_types=network_type_names,
+                conflict_policy=conflict_policy,
+            )
+            summary = validation_summary(
+                network_plan,
+                warnings_as_errors=warnings_as_errors,
+                warning_codes=warning_code_filter,
+            )
+            logger.info(f"Network post validation summary: {json.dumps(summary, sort_keys=True)}")
+            if summary["blockers"]:
+                print(json.dumps(summary, indent=2, sort_keys=True))
+                sys.exit(1)
+
         from scm import PanApiHandler
 
         api_session = PanApiHandler(initialize_api_session())
@@ -538,6 +641,9 @@ if __name__ == "__main__":
     parser.add_argument('--device-group', action='store', default="", help="Panorama device-group name when using panorama/device-group")
     parser.add_argument('--dry-run', action='store_true', help="Build a local migration plan without authenticating to SCM or writing changes")
     parser.add_argument('--validate-only', action='store_true', help="Run parser/planner validation without SCM authentication or scope prompts; exits 1 on conflicts or unsupported entries")
+    parser.add_argument('--snapshot-current-data', action='store_true', help="Fetch current SCM objects into --current-data compatible JSON and exit")
+    parser.add_argument('--snapshot-output', action='store', default="", help="Write --snapshot-current-data JSON to this path")
+    parser.add_argument('--post-network', action='store_true', help="Allow live network object posting after validation blockers are checked")
     parser.add_argument('--warnings-as-errors', action='store_true', help="In validate-only mode, promote warnings to blockers and exit 1 when matching warnings exist")
     parser.add_argument('--warning-codes', action='store', default="", help="Comma-separated warning codes to promote with --warnings-as-errors. Defaults to all warnings")
     parser.add_argument('--network-report', action='store_true', help="Emit parsed network payloads and migration warnings without SCM comparison or authentication")
@@ -548,4 +654,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config = parser_config if args.dry_run or args.validate_only or args.network_report else ConfigurationManager().app_config
     
-    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, validate_only=args.validate_only, warnings_as_errors=args.warnings_as_errors, warning_codes=args.warning_codes, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)
+    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, validate_only=args.validate_only, snapshot_current_data=args.snapshot_current_data, snapshot_output=args.snapshot_output, post_network=args.post_network, warnings_as_errors=args.warnings_as_errors, warning_codes=args.warning_codes, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)

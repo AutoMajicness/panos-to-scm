@@ -397,6 +397,67 @@ class BuildPlanTests(unittest.TestCase):
             {warning.code for warning in plan.warnings},
         )
 
+    def test_build_plan_warns_for_missing_interface_references(self):
+        parsed_data = {
+            "Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1", "tunnel.1"]}}],
+            "LogicalRouter": [
+                {
+                    "name": "default",
+                    "routing_stack": "advanced",
+                    "vrf": [
+                        {
+                            "name": "default",
+                            "interface": ["ethernet1/1"],
+                            "routing_table": {
+                                "ip": {
+                                    "static_route": [
+                                        {
+                                            "name": "default-route",
+                                            "destination": "0.0.0.0/0",
+                                            "interface": "ethernet1/1",
+                                        }
+                                    ]
+                                }
+                            },
+                        }
+                    ],
+                }
+            ],
+            "PbfRule": [{"name": "pbf-a", "action": {"forwarding": {"egress_interface": "ethernet1/2"}}}],
+        }
+
+        plan = build_plan(parsed_data)
+        missing = [warning for warning in plan.warnings if warning.code == "missing-network-reference"]
+
+        self.assertEqual(
+            {
+                warning.message.split("'")[1]
+                for warning in missing
+            },
+            {"ethernet1/1", "tunnel.1", "ethernet1/2"},
+        )
+
+    def test_build_plan_uses_default_value_for_interface_reference_validation(self):
+        parsed_data = {
+            "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1"}],
+            "TunnelInterface": [{"name": "tunnel.1", "default_value": "tunnel.1"}],
+            "Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1", "tunnel.1"]}}],
+            "LogicalRouter": [
+                {
+                    "name": "default",
+                    "routing_stack": "advanced",
+                    "vrf": [{"name": "default", "interface": ["ethernet1/1", "tunnel.1"]}],
+                }
+            ],
+        }
+
+        plan = build_plan(parsed_data)
+
+        self.assertNotIn(
+            "missing-network-reference",
+            {warning.code for warning in plan.warnings},
+        )
+
     def test_build_plan_warns_when_reference_target_is_parsed_but_not_selected(self):
         parsed_data = {
             "BgpFilteringProfile": [

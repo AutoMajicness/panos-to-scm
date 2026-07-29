@@ -480,33 +480,75 @@ def _network_reference_warnings(
             if not name:
                 continue
             for path, key, value in _walk_payload(entry):
+                if isinstance(value, list):
+                    warnings.extend(
+                        _missing_reference_warnings_for_values(
+                            object_type,
+                            name,
+                            path,
+                            key,
+                            value,
+                            available_names,
+                            seen,
+                        )
+                    )
+                    continue
                 if not isinstance(value, str) or not value:
                     continue
-                target_types = _network_reference_targets(object_type, path, key)
-                if not target_types:
-                    continue
-                if any(value in available_names.get(target_type, set()) for target_type in target_types):
-                    continue
-
-                dedupe_key = (object_type, name, path, value, target_types)
-                if dedupe_key in seen:
-                    continue
-                seen.add(dedupe_key)
-                target_label = " or ".join(target_types)
-                warnings.append(
-                    PlanWarning(
-                        object_type=object_type,
-                        name=name,
-                        path=path,
-                        code="missing-network-reference",
-                        message=(
-                            f"Reference '{value}' was not found in generated payloads or current SCM data "
-                            f"for {target_label}; include that object type in the migration or verify it "
-                            "already exists in the target tenant before posting."
-                        ),
+                warnings.extend(
+                    _missing_reference_warnings_for_values(
+                        object_type,
+                        name,
+                        path,
+                        key,
+                        [value],
+                        available_names,
+                        seen,
                     )
                 )
 
+    return warnings
+
+
+def _missing_reference_warnings_for_values(
+    object_type: str,
+    name: str,
+    path: str,
+    key: str,
+    values: list[Any],
+    available_names: dict[str, set[str]],
+    seen: set[tuple[str, str, str, str, tuple[str, ...]]],
+) -> list[PlanWarning]:
+    target_types = _network_reference_targets(object_type, path, key)
+    if not target_types:
+        return []
+
+    warnings = []
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or not value:
+            continue
+        if any(value in available_names.get(target_type, set()) for target_type in target_types):
+            continue
+
+        value_path = path if len(values) == 1 else f"{path}[{index}]"
+        dedupe_key = (object_type, name, value_path, value, target_types)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        target_label = " or ".join(target_types)
+        warnings.append(
+            PlanWarning(
+                object_type=object_type,
+                name=name,
+                path=value_path,
+                code="missing-network-reference",
+                message=(
+                    f"Reference '{value}' was not found in generated payloads or current SCM data "
+                    f"for {target_label}; include that object type in the migration or verify it "
+                    "already exists in the target tenant before posting."
+                ),
+            )
+        )
     return warnings
 
 
@@ -524,6 +566,8 @@ def _names_by_type(
         for entry in entries:
             if isinstance(entry, dict) and isinstance(entry.get("name"), str):
                 object_names.add(entry["name"])
+            if isinstance(entry, dict) and isinstance(entry.get("default_value"), str):
+                object_names.add(entry["default_value"])
     return names
 
 
@@ -583,6 +627,18 @@ def _network_reference_targets(object_type: str, path: str, key: str) -> tuple[s
         if key == "name" and "auto_key.ike_gateway[" in path:
             return ("IKEGateway",)
 
+    if object_type == "Zones":
+        if key in {"layer2", "layer3"} and "network." in path:
+            return _INTERFACE_REFERENCE_TYPES
+
+    if object_type == "LogicalRouter":
+        if key == "interface":
+            return _INTERFACE_REFERENCE_TYPES
+
+    if object_type == "PbfRule":
+        if key in {"egress_interface", "symmetric_return_interface"}:
+            return _INTERFACE_REFERENCE_TYPES
+
     return ()
 
 
@@ -594,7 +650,19 @@ _NETWORK_REFERENCE_OBJECT_TYPES = {
     "IKEGateway",
     "IPsecTunnel",
     "LogicalRouter",
+    "PbfRule",
+    "Zones",
 }
+
+_INTERFACE_REFERENCE_TYPES = (
+    "AggregateInterface",
+    "EthernetInterface",
+    "Layer2Subinterface",
+    "Layer3Subinterface",
+    "VlanInterface",
+    "TunnelInterface",
+    "LoopbackInterface",
+)
 
 
 def _walk_payload(value: Any, path: str = ""):
