@@ -193,6 +193,47 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                         </bfd>
                       </entry>
                     </interface>
+                    <virtual-link>
+                      <entry name="vl-to-abbr">
+                        <neighbor-id>192.0.2.2</neighbor-id>
+                        <transit-area-id>0.0.0.1</transit-area-id>
+                        <enable>yes</enable>
+                        <interface-id>1</interface-id>
+                        <instance-id>0</instance-id>
+                        <authentication>ospf-simple</authentication>
+                        <vr-timing>
+                          <hello-interval>10</hello-interval>
+                          <dead-counts>4</dead-counts>
+                          <retransmit-interval>5</retransmit-interval>
+                          <transit-delay>1</transit-delay>
+                        </vr-timing>
+                      </entry>
+                    </virtual-link>
+                  </entry>
+                  <entry name="0.0.0.1">
+                    <type>
+                      <stub>
+                        <default-route>
+                          <advertise>yes</advertise>
+                          <metric>15</metric>
+                          <type>ext-2</type>
+                        </default-route>
+                        <accept-summary>no</accept-summary>
+                      </stub>
+                    </type>
+                    <import-list>ospf-import-pl</import-list>
+                    <export-list>ospf-export-pl</export-list>
+                    <range>
+                      <entry name="10.20.0.0/16">
+                        <advertise>yes</advertise>
+                        <substitute>10.20.0.0/15</substitute>
+                      </entry>
+                    </range>
+                    <vr-range>
+                      <entry name="10.30.0.0/16">
+                        <suppress />
+                      </entry>
+                    </vr-range>
                   </entry>
                 </area>
                 <export-rules>
@@ -233,6 +274,12 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                   </entry>
                   <entry name="discard-rfc1918">
                     <destination>10.0.0.0/8</destination>
+                    <route-table>
+                      <no-install />
+                    </route-table>
+                    <option>
+                      <passive />
+                    </option>
                     <nexthop>
                       <discard />
                     </nexthop>
@@ -248,11 +295,19 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                           <enable>yes</enable>
                           <source>10.0.0.1</source>
                           <destination>10.0.0.254</destination>
+                          <destination-fqdn>probe.example.com</destination-fqdn>
                           <interval>3</interval>
                           <count>5</count>
                         </entry>
                       </monitor-destinations>
                     </path-monitor>
+                  </entry>
+                  <entry name="interface-only">
+                    <destination>192.0.2.0/24</destination>
+                    <interface>ethernet1/2</interface>
+                    <route-table>
+                      <multicast />
+                    </route-table>
                   </entry>
                 </static-route>
               </ip>
@@ -392,6 +447,50 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                                 "bfd": {"profile": "default"},
                                             }
                                         ],
+                                        "virtual_link": [
+                                            {
+                                                "name": "vl-to-abbr",
+                                                "neighbor_id": "192.0.2.2",
+                                                "transit_area_id": "0.0.0.1",
+                                                "authentication": "ospf-simple",
+                                                "enable": True,
+                                                "interface_id": 1,
+                                                "instance_id": 0,
+                                                "vr_timing": {
+                                                    "hello_interval": 10,
+                                                    "dead_counts": 4,
+                                                    "retransmit_interval": 5,
+                                                    "transit_delay": 1,
+                                                },
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "name": "0.0.0.1",
+                                        "type": {
+                                            "stub": {
+                                                "default_route_advertise": True,
+                                                "default_route_metric": 15,
+                                                "default_route_type": "ext-2",
+                                                "accept_summary": False,
+                                            }
+                                        },
+                                        "import_list": "ospf-import-pl",
+                                        "export_list": "ospf-export-pl",
+                                        "range": [
+                                            {
+                                                "name": "10.20.0.0/16",
+                                                "substitute": "10.20.0.0/15",
+                                                "advertise": True,
+                                            }
+                                        ],
+                                        "vr_range": [
+                                            {
+                                                "suppress": {
+                                                    "name": "10.30.0.0/16",
+                                                }
+                                            }
+                                        ],
                                     }
                                 ],
                             },
@@ -426,6 +525,8 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                         {
                                             "name": "discard-rfc1918",
                                             "destination": "10.0.0.0/8",
+                                            "route_table": {"no_install": {}},
+                                            "option": {"passive": {}},
                                             "nexthop": {"discard": {}},
                                             "bfd": {"profile": "default"},
                                             "path_monitor": {
@@ -438,11 +539,18 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                                         "enable": True,
                                                         "source": "10.0.0.1",
                                                         "destination": "10.0.0.254",
+                                                        "destination_fqdn": "probe.example.com",
                                                         "interval": 3,
                                                         "count": 5,
                                                     }
                                                 ],
                                             },
+                                        },
+                                        {
+                                            "name": "interface-only",
+                                            "destination": "192.0.2.0/24",
+                                            "interface": "ethernet1/2",
+                                            "route_table": {"multicast": {}},
                                         },
                                     ]
                                 },

@@ -2537,6 +2537,14 @@ class XMLParser:
             if value and value.isdigit():
                 route[scm_name] = int(value)
 
+        route_table = self._convert_static_route_table(entry.find('route-table'))
+        if route_table:
+            route['route_table'] = route_table
+
+        option = self._convert_static_route_option(entry.find('option'))
+        if option:
+            route['option'] = option
+
         nexthop = self._convert_static_route_nexthop(entry.find('nexthop'))
         if nexthop:
             route['nexthop'] = nexthop
@@ -2550,6 +2558,28 @@ class XMLParser:
             route['path_monitor'] = path_monitor
 
         return route
+
+    def _convert_static_route_table(self, route_table):
+        if route_table is None:
+            return None
+
+        for table_name in ['unicast', 'multicast', 'both', 'no-install', 'no_install']:
+            if route_table.find(table_name) is not None:
+                return {table_name.replace('-', '_'): {}}
+
+        value = self._first_text_or_member(route_table)
+        if value:
+            return {value.replace('-', '_'): {}}
+        return None
+
+    def _convert_static_route_option(self, option):
+        if option is None:
+            return None
+
+        payload = {}
+        if option.find('passive') is not None:
+            payload['passive'] = {}
+        return payload or None
 
     def _convert_static_route_nexthop(self, nexthop):
         if nexthop is None:
@@ -2598,6 +2628,7 @@ class XMLParser:
                 ('enable', 'enable'),
                 ('source', 'source'),
                 ('destination', 'destination'),
+                ('destination-fqdn', 'destination_fqdn'),
                 ('interval', 'interval'),
                 ('count', 'count'),
             ]:
@@ -3589,9 +3620,27 @@ class XMLParser:
 
         area_type = area_entry.find('type')
         if area_type is not None:
-            child_name = self._first_child_name(area_type)
-            if child_name:
-                payload['type'] = {child_name: {}}
+            type_payload = self._convert_ospf_area_type(area_type)
+            if type_payload:
+                payload['type'] = type_payload
+
+        for panos_name, scm_name in [
+            ('import-list', 'import_list'),
+            ('export-list', 'export_list'),
+            ('inbound-filter-list', 'inbound_filter_list'),
+            ('outbound-filter-list', 'outbound_filter_list'),
+        ]:
+            value = self._child_text(area_entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        ranges = self._convert_ospf_ranges(area_entry)
+        if ranges:
+            payload['range'] = ranges
+
+        vr_ranges = self._convert_ospf_vr_ranges(area_entry)
+        if vr_ranges:
+            payload['vr_range'] = vr_ranges
 
         interfaces = []
         for interface_entry in area_entry.findall('interface/entry'):
@@ -3601,7 +3650,73 @@ class XMLParser:
         if interfaces:
             payload['interface'] = interfaces
 
+        virtual_links = []
+        for virtual_link_entry in area_entry.findall('virtual-link/entry'):
+            virtual_link = self._convert_ospf_virtual_link(virtual_link_entry)
+            if virtual_link:
+                virtual_links.append(virtual_link)
+        if virtual_links:
+            payload['virtual_link'] = virtual_links
+
         return payload
+
+    def _convert_ospf_area_type(self, area_type):
+        child_name = self._first_child_name(area_type)
+        if not child_name:
+            return None
+
+        child = area_type.find(child_name)
+        payload = {}
+        for panos_name, scm_name in [
+            ('default-route/advertise', 'default_route_advertise'),
+            ('default-route/metric', 'default_route_metric'),
+            ('default-route/type', 'default_route_type'),
+            ('accept-summary', 'accept_summary'),
+        ]:
+            value = self._child_text(child, panos_name) if child is not None else None
+            if not value:
+                continue
+            if value.lower() in {'yes', 'no'}:
+                payload[scm_name] = value.lower() == 'yes'
+            elif value.isdigit():
+                payload[scm_name] = int(value)
+            else:
+                payload[scm_name] = value
+
+        abr = self._child_text(child, 'abr') if child is not None else None
+        if abr:
+            payload['abr'] = abr
+
+        return {child_name: payload}
+
+    def _convert_ospf_ranges(self, area_entry):
+        ranges = []
+        for range_entry in area_entry.findall('range/entry'):
+            name = range_entry.get('name')
+            if not name:
+                continue
+            payload = {'name': name}
+            substitute = self._child_text(range_entry, 'substitute')
+            if substitute:
+                payload['substitute'] = substitute
+            advertise = self._child_text(range_entry, 'advertise')
+            if advertise:
+                payload['advertise'] = advertise.lower() == 'yes'
+            ranges.append(payload)
+        return ranges
+
+    def _convert_ospf_vr_ranges(self, area_entry):
+        ranges = []
+        for range_entry in area_entry.findall('vr-range/entry'):
+            name = range_entry.get('name')
+            if not name:
+                continue
+            mode = self._first_child_name(range_entry)
+            if mode in {'advertise', 'suppress'}:
+                ranges.append({mode: {'name': name}})
+            else:
+                ranges.append({'advertise': {'name': name}})
+        return ranges
 
     def _convert_ospf_export_rules(self, ospf):
         export_rules = []
@@ -3650,6 +3765,48 @@ class XMLParser:
             return explicit
         return None
 
+    def _convert_ospf_virtual_link(self, virtual_link_entry):
+        link_name = virtual_link_entry.get('name')
+        if not link_name:
+            return None
+
+        payload = {'name': link_name}
+        for panos_name, scm_name in [
+            ('neighbor-id', 'neighbor_id'),
+            ('transit-area-id', 'transit_area_id'),
+            ('authentication', 'authentication'),
+            ('timing', 'timing'),
+        ]:
+            value = self._child_text(virtual_link_entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        for panos_name, scm_name in [
+            ('enable', 'enable'),
+            ('passive', 'passive'),
+        ]:
+            value = self._child_text(virtual_link_entry, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes'
+
+        for panos_name, scm_name in [
+            ('interface-id', 'interface_id'),
+            ('instance-id', 'instance_id'),
+        ]:
+            value = self._child_text(virtual_link_entry, panos_name)
+            if value and value.isdigit():
+                payload[scm_name] = int(value)
+
+        vr_timing = self._convert_ospf_vr_timing(virtual_link_entry.find('vr-timing'))
+        if vr_timing:
+            payload['vr_timing'] = vr_timing
+
+        bfd_profile = self._child_text(virtual_link_entry, 'bfd/profile')
+        if bfd_profile:
+            payload['bfd'] = {'profile': bfd_profile}
+
+        return payload
+
     def _convert_ospf_interface(self, interface_entry):
         interface_name = interface_entry.get('name')
         if not interface_name:
@@ -3662,7 +3819,9 @@ class XMLParser:
             ('mtu-ignore', 'mtu_ignore'),
             ('priority', 'priority'),
             ('metric', 'metric'),
+            ('instance-id', 'instance_id'),
             ('authentication', 'authentication'),
+            ('timing', 'timing'),
         ]:
             value = self._child_text(interface_entry, panos_name)
             if not value:
@@ -3684,7 +3843,36 @@ class XMLParser:
         if bfd_profile:
             payload['bfd'] = {'profile': bfd_profile}
 
+        neighbors = []
+        for neighbor_entry in interface_entry.findall('neighbor/entry'):
+            neighbor_name = neighbor_entry.get('name')
+            if neighbor_name:
+                neighbors.append({'name': neighbor_name})
+        if neighbors:
+            payload['neighbor'] = neighbors
+
+        vr_timing = self._convert_ospf_vr_timing(interface_entry.find('vr-timing'))
+        if vr_timing:
+            payload['vr_timing'] = vr_timing
+
         return payload
+
+    def _convert_ospf_vr_timing(self, timing_entry):
+        if timing_entry is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('hello-interval', 'hello_interval'),
+            ('dead-counts', 'dead_counts'),
+            ('retransmit-interval', 'retransmit_interval'),
+            ('transit-delay', 'transit_delay'),
+            ('gr-delay', 'gr_delay'),
+        ]:
+            value = self._child_text(timing_entry, panos_name)
+            if value and value.isdigit():
+                payload[scm_name] = int(value)
+        return payload or None
 
     def _bgp_policy_rule_entries(self, router_entry, direction):
         entries = []
