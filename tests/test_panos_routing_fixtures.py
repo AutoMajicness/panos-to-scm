@@ -9,6 +9,175 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures" / "panos"
 
 
 class PanosRoutingFixtureTests(unittest.TestCase):
+    def test_real_world_edge_stack_fixture_parses_network_dependencies(self):
+        object_types = [
+            "InterfaceManagementProfile",
+            "DHCPInterface",
+            "EthernetInterface",
+            "Layer3Subinterface",
+            "TunnelInterface",
+            "LogicalRouter",
+            "IKECryptoProfile",
+            "IPsecCryptoProfile",
+            "IKEGateway",
+            "IPsecTunnel",
+            "Zones",
+        ]
+        parsed = XMLParser(
+            str(FIXTURE_DIR / "local_real_world_edge_stack.xml"),
+            "local",
+        ).parse_specific_types(object_types)
+
+        self.assertEqual(
+            [profile["name"] for profile in parsed["InterfaceManagementProfile"]],
+            ["InternetManagement", "Ping_Only"],
+        )
+        self.assertEqual(
+            parsed["EthernetInterface"],
+            [
+                {
+                    "name": "$ethernet1-1",
+                    "default_value": "ethernet1/1",
+                    "comment": "Primary ISP",
+                    "layer3": {
+                        "interface_management_profile": "InternetManagement",
+                        "ip": [{"name": "198.51.100.10/29"}],
+                    },
+                },
+                {
+                    "name": "$ethernet1-2",
+                    "default_value": "ethernet1/2",
+                    "comment": "Inside trunk",
+                    "layer3": {},
+                },
+            ],
+        )
+        self.assertEqual(
+            parsed["Layer3Subinterface"],
+            [
+                {
+                    "name": "ethernet1/2.10",
+                    "parent_interface": "ethernet1/2",
+                    "tag": 10,
+                    "comment": "Users",
+                    "interface_management_profile": "Ping_Only",
+                    "ip": [{"name": "10.10.10.1/24"}],
+                },
+                {
+                    "name": "ethernet1/2.20",
+                    "parent_interface": "ethernet1/2",
+                    "tag": 20,
+                    "comment": "Voice",
+                    "interface_management_profile": "Ping_Only",
+                    "ip": [{"name": "10.10.20.1/24"}],
+                },
+            ],
+        )
+        self.assertEqual(
+            parsed["DHCPInterface"],
+            [
+                {
+                    "name": "ethernet1/2.10",
+                    "server": {
+                        "mode": "auto",
+                        "ip_pool": ["10.10.10.50-10.10.10.200"],
+                        "option": {
+                            "gateway": "10.10.10.1",
+                            "subnet_mask": "255.255.255.0",
+                            "primary_dns": "9.9.9.9",
+                        },
+                    },
+                },
+                {
+                    "name": "ethernet1/2.20",
+                    "relay": {
+                        "enable": True,
+                        "server": ["10.10.10.10", "10.10.10.11"],
+                    },
+                },
+            ],
+        )
+        self.assertEqual(
+            parsed["TunnelInterface"],
+            [
+                {
+                    "name": "tunnel.1",
+                    "default_value": "tunnel.1",
+                    "comment": "Data center VPN",
+                    "ip": [{"name": "169.254.10.2/30"}],
+                }
+            ],
+        )
+        self.assertEqual(parsed["IKECryptoProfile"][0]["name"], "ike-edge-a")
+        self.assertEqual(parsed["IPsecCryptoProfile"][0]["name"], "ipsec-edge-a")
+        self.assertEqual(parsed["IKEGateway"][0]["name"], "dc-vpn-gw")
+        self.assertEqual(parsed["IPsecTunnel"][0]["auto_key"]["ike_gateway"], [{"name": "dc-vpn-gw"}])
+        self.assertEqual(
+            parsed["Zones"],
+            [
+                {"name": "Untrust", "network": {"layer3": ["ethernet1/1"]}},
+                {"name": "Trust", "network": {"layer3": ["ethernet1/2.10", "tunnel.1"]}},
+                {"name": "Voice", "network": {"layer3": ["ethernet1/2.20"]}},
+            ],
+        )
+
+        vrf = parsed["LogicalRouter"][0]["vrf"][0]
+        self.assertEqual(
+            vrf["interface"],
+            ["ethernet1/1", "ethernet1/2.10", "ethernet1/2.20", "tunnel.1"],
+        )
+        self.assertEqual(vrf["bgp"], {"enable": False})
+        self.assertEqual(vrf["ospf"], {"enable": False})
+        self.assertEqual(vrf["ospfv3"], {"enable": False})
+        self.assertEqual(
+            vrf["routing_table"]["ip"]["static_route"][0],
+            {
+                "name": "Primary-Default",
+                "destination": "0.0.0.0/0",
+                "interface": "ethernet1/1",
+                "metric": 10,
+                "nexthop": {"ip_address": "198.51.100.9"},
+                "bfd": {"profile": "None"},
+                "path_monitor": {
+                    "enable": True,
+                    "failure_condition": "all",
+                    "hold_time": 1,
+                    "monitor_destinations": [
+                        {
+                            "name": "SLA-9.9.9.9",
+                            "enable": True,
+                            "source": "198.51.100.10/29",
+                            "destination": "9.9.9.9",
+                            "interval": 3,
+                            "count": 3,
+                        }
+                    ],
+                },
+                "route_table": {"unicast": {}},
+            },
+        )
+        self.assertEqual(
+            vrf["routing_table"]["ip"]["static_route"][1],
+            {
+                "name": "Data-Center",
+                "destination": "10.20.0.0/16",
+                "interface": "tunnel.1",
+                "metric": 230,
+                "admin_dist": 230,
+                "nexthop": {"ip_address": "169.254.10.1"},
+                "route_table": {"unicast": {}},
+            },
+        )
+
+        plan = build_plan(parsed, object_types=object_types)
+        self.assertEqual(plan.summary()["unsupported"], 0)
+        self.assertEqual(plan.summary()["conflicts"], 0)
+        self.assertEqual(plan.summary()["warnings"], 2)
+        self.assertEqual(
+            [warning.code for warning in plan.warnings],
+            ["logical-router-static-route-option", "logical-router-static-route-option"],
+        )
+
     def test_bgp_fixture_variants_parse_to_scm_network_objects(self):
         parsed = XMLParser(
             str(FIXTURE_DIR / "local_routing_bgp_variants.xml"),

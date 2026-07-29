@@ -1,0 +1,262 @@
+<config>
+  <devices>
+    <entry name="localhost.localdomain">
+      <network>
+        <interface>
+          <ethernet>
+            <entry name="ethernet1/1">
+              <comment>Primary ISP</comment>
+              <layer3>
+                <interface-management-profile>InternetManagement</interface-management-profile>
+                <ip>
+                  <entry name="198.51.100.10/29" />
+                </ip>
+              </layer3>
+            </entry>
+            <entry name="ethernet1/2">
+              <comment>Inside trunk</comment>
+              <layer3>
+                <units>
+                  <entry name="ethernet1/2.10">
+                    <tag>10</tag>
+                    <comment>Users</comment>
+                    <interface-management-profile>Ping_Only</interface-management-profile>
+                    <ip>
+                      <entry name="10.10.10.1/24" />
+                    </ip>
+                  </entry>
+                  <entry name="ethernet1/2.20">
+                    <tag>20</tag>
+                    <comment>Voice</comment>
+                    <interface-management-profile>Ping_Only</interface-management-profile>
+                    <ip>
+                      <entry name="10.10.20.1/24" />
+                    </ip>
+                  </entry>
+                </units>
+              </layer3>
+            </entry>
+          </ethernet>
+          <tunnel>
+            <units>
+              <entry name="tunnel.1">
+                <comment>Data center VPN</comment>
+                <ip>
+                  <entry name="169.254.10.2/30" />
+                </ip>
+              </entry>
+            </units>
+          </tunnel>
+        </interface>
+        <profiles>
+          <interface-management-profile>
+            <entry name="InternetManagement">
+              <ping>yes</ping>
+            </entry>
+            <entry name="Ping_Only">
+              <ping>yes</ping>
+            </entry>
+          </interface-management-profile>
+        </profiles>
+        <dhcp>
+          <interface>
+            <entry name="ethernet1/2.10">
+              <server>
+                <mode>auto</mode>
+                <ip-pool>
+                  <member>10.10.10.50-10.10.10.200</member>
+                </ip-pool>
+                <option>
+                  <gateway>10.10.10.1</gateway>
+                  <subnet-mask>255.255.255.0</subnet-mask>
+                  <primary-dns>9.9.9.9</primary-dns>
+                </option>
+              </server>
+            </entry>
+            <entry name="ethernet1/2.20">
+              <relay>
+                <enable>yes</enable>
+                <server>
+                  <member>10.10.10.10</member>
+                  <member>10.10.10.11</member>
+                </server>
+              </relay>
+            </entry>
+          </interface>
+        </dhcp>
+        <ike>
+          <crypto-profiles>
+            <ike-crypto-profiles>
+              <entry name="ike-edge-a">
+                <hash>
+                  <member>sha256</member>
+                </hash>
+                <encryption>
+                  <member>aes-256-cbc</member>
+                </encryption>
+                <dh-group>
+                  <member>group14</member>
+                </dh-group>
+                <lifetime>
+                  <hours>8</hours>
+                </lifetime>
+              </entry>
+            </ike-crypto-profiles>
+            <ipsec-crypto-profiles>
+              <entry name="ipsec-edge-a">
+                <esp>
+                  <encryption>
+                    <member>aes-256-gcm</member>
+                  </encryption>
+                  <authentication>
+                    <member>sha256</member>
+                  </authentication>
+                </esp>
+                <dh-group>group14</dh-group>
+                <lifetime>
+                  <hours>1</hours>
+                </lifetime>
+              </entry>
+            </ipsec-crypto-profiles>
+          </crypto-profiles>
+          <gateway>
+            <entry name="dc-vpn-gw">
+              <protocol>
+                <version>ikev2</version>
+                <ikev2>
+                  <ike-crypto-profile>ike-edge-a</ike-crypto-profile>
+                  <dpd>
+                    <enable>yes</enable>
+                  </dpd>
+                </ikev2>
+              </protocol>
+              <local-address>
+                <interface>ethernet1/1</interface>
+                <ip>198.51.100.10/29</ip>
+              </local-address>
+              <peer-address>
+                <ip>203.0.113.10</ip>
+              </peer-address>
+              <authentication>
+                <pre-shared-key>
+                  <key>sanitized-secret</key>
+                </pre-shared-key>
+              </authentication>
+            </entry>
+          </gateway>
+        </ike>
+        <tunnel>
+          <ipsec>
+            <entry name="dc-vpn">
+              <tunnel-interface>tunnel.1</tunnel-interface>
+              <auto-key>
+                <ike-gateway>
+                  <entry name="dc-vpn-gw" />
+                </ike-gateway>
+                <ipsec-crypto-profile>ipsec-edge-a</ipsec-crypto-profile>
+              </auto-key>
+              <tunnel-monitor>
+                <enable>no</enable>
+              </tunnel-monitor>
+            </entry>
+          </ipsec>
+        </tunnel>
+        <virtual-router>
+          <entry name="default">
+            <interface>
+              <member>ethernet1/1</member>
+              <member>ethernet1/2.10</member>
+              <member>ethernet1/2.20</member>
+              <member>tunnel.1</member>
+            </interface>
+            <protocol>
+              <bgp>
+                <enable>no</enable>
+              </bgp>
+              <ospf>
+                <enable>no</enable>
+              </ospf>
+              <ospfv3>
+                <enable>no</enable>
+              </ospfv3>
+            </protocol>
+            <routing-table>
+              <ip>
+                <static-route>
+                  <entry name="Primary-Default">
+                    <destination>0.0.0.0/0</destination>
+                    <interface>ethernet1/1</interface>
+                    <nexthop>
+                      <ip-address>198.51.100.9</ip-address>
+                    </nexthop>
+                    <metric>10</metric>
+                    <bfd>
+                      <profile>None</profile>
+                    </bfd>
+                    <path-monitor>
+                      <enable>yes</enable>
+                      <failure-condition>all</failure-condition>
+                      <hold-time>1</hold-time>
+                      <monitor-destinations>
+                        <entry name="SLA-9.9.9.9">
+                          <enable>yes</enable>
+                          <source>198.51.100.10/29</source>
+                          <destination>9.9.9.9</destination>
+                          <interval>3</interval>
+                          <count>3</count>
+                        </entry>
+                      </monitor-destinations>
+                    </path-monitor>
+                    <route-table>
+                      <unicast />
+                    </route-table>
+                  </entry>
+                  <entry name="Data-Center">
+                    <destination>10.20.0.0/16</destination>
+                    <interface>tunnel.1</interface>
+                    <nexthop>
+                      <ip-address>169.254.10.1</ip-address>
+                    </nexthop>
+                    <metric>230</metric>
+                    <admin-dist>230</admin-dist>
+                    <route-table>
+                      <unicast />
+                    </route-table>
+                  </entry>
+                </static-route>
+              </ip>
+            </routing-table>
+          </entry>
+        </virtual-router>
+      </network>
+      <vsys>
+        <entry name="vsys1">
+          <zone>
+            <entry name="Untrust">
+              <network>
+                <layer3>
+                  <member>ethernet1/1</member>
+                </layer3>
+              </network>
+            </entry>
+            <entry name="Trust">
+              <network>
+                <layer3>
+                  <member>ethernet1/2.10</member>
+                  <member>tunnel.1</member>
+                </layer3>
+              </network>
+            </entry>
+            <entry name="Voice">
+              <network>
+                <layer3>
+                  <member>ethernet1/2.20</member>
+                </layer3>
+              </network>
+            </entry>
+          </zone>
+        </entry>
+      </vsys>
+    </entry>
+  </devices>
+</config>
