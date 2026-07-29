@@ -453,6 +453,101 @@ class MainDryRunTests(unittest.TestCase):
 
         self.assertEqual(plan.summary()["creates"], 1)
 
+    def test_validate_only_parses_objects_and_policy_flags_together(self):
+        fixture_path = (
+            Path(__file__).parent
+            / "fixtures"
+            / "panos"
+            / "local_policy_reference_variants.xml"
+        )
+
+        with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+            plan = main.main(
+                AppConfig(),
+                parser_type="panos",
+                config_file=str(fixture_path),
+                panos_config_type="local",
+                run_objects="Address",
+                run_security=True,
+                validate_only=True,
+            )
+
+        self.assertEqual(plan.summary()["creates"], 4)
+        self.assertEqual(
+            {change.object_type for change in plan.creates},
+            {"Address", "security_pre_rules"},
+        )
+
+    def test_load_current_data_normalizes_policy_dependency_export_shapes(self):
+        current_data = {
+            "addresses": {
+                "data": [
+                    {"name": "users-net"},
+                    {"name": "web-public"},
+                ]
+            },
+            "/config/objects/v1/services": {"data": [{"name": "tcp-443"}]},
+            "data": [
+                {"object_type": "Zones", "name": "trust"},
+                {"object_type": "Zones", "name": "untrust"},
+                {"type": "profile-groups", "name": "strict-profiles"},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            current_path = Path(directory) / "current.json"
+            current_path.write_text(json.dumps(current_data), encoding="utf-8")
+
+            loaded = main.load_current_data(str(current_path))
+
+        self.assertEqual(
+            loaded,
+            {
+                "Address": [{"name": "users-net"}, {"name": "web-public"}],
+                "Service": [{"name": "tcp-443"}],
+                "Zones": [
+                    {"object_type": "Zones", "name": "trust"},
+                    {"object_type": "Zones", "name": "untrust"},
+                ],
+                "ProfileGroup": [{"type": "profile-groups", "name": "strict-profiles"}],
+            },
+        )
+
+    def test_normalized_current_data_satisfies_strict_policy_references(self):
+        current_data = {
+            "addresses": {"data": [{"name": "users-net"}, {"name": "web-public"}]},
+            "services": {"data": [{"name": "tcp-443"}]},
+            "data": [
+                {"object_type": "Zones", "name": "trust"},
+                {"object_type": "Zones", "name": "untrust"},
+                {"type": "profile-groups", "name": "strict-profiles"},
+            ],
+        }
+        fixture_path = (
+            Path(__file__).parent
+            / "fixtures"
+            / "panos"
+            / "local_policy_reference_variants.xml"
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            current_path = Path(directory) / "current.json"
+            current_path.write_text(json.dumps(current_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    parser_type="panos",
+                    config_file=str(fixture_path),
+                    panos_config_type="local",
+                    run_security=True,
+                    validate_only=True,
+                    strict_local_firewall=True,
+                    current_data_file=str(current_path),
+                )
+
+        self.assertEqual(plan.summary()["warnings"], 0)
+
     def test_zones_can_be_selected_for_dry_run(self):
         parsed_data = {"Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}]}
 

@@ -82,6 +82,8 @@ python3 main.py \
 
 The legacy `--scope folder:All` option still works as a fallback for all categories. Prefer the category-specific flags when network snippets and policy folders are different.
 
+Object selection can be combined with policy flags. For example, `-o Address,Service --security-rules --nat-rules` parses and plans the selected object types plus the selected local firewall rulebases.
+
 For CI-style local validation that does not require SCM authentication or scope prompts:
 
 ```bash
@@ -117,6 +119,18 @@ python3 main.py \
   --network-report \
   --report-output /tmp/network-report.json
 ```
+
+For repeatable smoke checks against local real-world PAN-OS XML exports, use the sanitized smoke harness. It parses configs in local mode, builds dry-run validation summaries, and writes counts/warning summaries without raw object payloads:
+
+```bash
+python3 -m tools.smoke_real_configs \
+  --config-dir /home/hawkinsd/As-Built_Document_Helper \
+  --strict-local-firewall \
+  --fail-on-blockers \
+  --output /tmp/panos-to-scm-smoke.json
+```
+
+Use `--limit 1` for a quick parser smoke or repeat `--config-file path/to/config.xml` to target specific firewall exports.
 
 ### Command Line Options:
 - Check the "HELP" feature using `python main.py -h`

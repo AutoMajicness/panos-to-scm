@@ -23,6 +23,31 @@ STRICT_LOCAL_FIREWALL_WARNING_CODES = {
     "unsupported-panos-routing-node",
 }
 
+CURRENT_DATA_KEY_ALIASES = {
+    "address": "Address",
+    "addresses": "Address",
+    "addressgroup": "AddressGroup",
+    "addressgroups": "AddressGroup",
+    "address-group": "AddressGroup",
+    "address-groups": "AddressGroup",
+    "service": "Service",
+    "services": "Service",
+    "servicegroup": "ServiceGroup",
+    "servicegroups": "ServiceGroup",
+    "service-group": "ServiceGroup",
+    "service-groups": "ServiceGroup",
+    "profilegroup": "ProfileGroup",
+    "profilegroups": "ProfileGroup",
+    "profile-group": "ProfileGroup",
+    "profile-groups": "ProfileGroup",
+    "decryptionprofile": "DecryptionProfile",
+    "decryptionprofiles": "DecryptionProfile",
+    "decryption-profile": "DecryptionProfile",
+    "decryption-profiles": "DecryptionProfile",
+    "zone": "Zones",
+    "zones": "Zones",
+}
+
 
 class CliError(Exception):
     """Raised for invalid non-interactive CLI usage."""
@@ -205,9 +230,23 @@ def selected_type_names_for_plan(
     run_app_override=False,
     run_decrypt_rules=False,
     run_nat=False,
+    include_selected_objects=False,
 ):
     if run_all:
         return list(parsed_data.keys())
+    if include_selected_objects and any([run_security, run_app_override, run_decrypt_rules, run_nat]):
+        selected = [obj_type.__name__ for obj_type in selected_obj_types]
+        selected.extend(
+            name
+            for name in selected_policy_type_names(
+                run_security=run_security,
+                run_app_override=run_app_override,
+                run_decrypt_rules=run_decrypt_rules,
+                run_nat=run_nat,
+            )
+            if name not in selected
+        )
+        return selected
     if run_security:
         return ['security_pre_rules', 'security_post_rules']
     if run_app_override:
@@ -219,15 +258,93 @@ def selected_type_names_for_plan(
     return [obj_type.__name__ for obj_type in selected_obj_types]
 
 
+def selected_type_names_for_parse(
+    run_objects_list,
+    run_all=False,
+    run_security=False,
+    run_app_override=False,
+    run_decrypt_rules=False,
+    run_nat=False,
+):
+    if run_all or not run_objects_list:
+        return run_objects_list
+
+    selected = list(dict.fromkeys(run_objects_list))
+    selected.extend(
+        name
+        for name in selected_policy_type_names(
+            run_security=run_security,
+            run_app_override=run_app_override,
+            run_decrypt_rules=run_decrypt_rules,
+            run_nat=run_nat,
+        )
+        if name not in selected
+    )
+    return selected
+
+
 def load_current_data(current_data_file):
     if not current_data_file:
         return {}
     try:
         with open(current_data_file, 'r') as file:
-            return json.load(file)
+            return normalize_current_data(json.load(file))
     except Exception as err:
         logger.error(f"Error while loading current data json file {err}")
         sys.exit(1)
+
+
+def normalize_current_data(current_data):
+    if not isinstance(current_data, dict):
+        return {}
+
+    normalized = {}
+    if isinstance(current_data.get("data"), list):
+        _add_current_entries(normalized, "data", current_data["data"])
+
+    for key, value in current_data.items():
+        if key == "data":
+            continue
+        entries = _extract_current_entries(value)
+        if entries is None:
+            continue
+        _add_current_entries(normalized, key, entries)
+
+    return normalized
+
+
+def _extract_current_entries(value):
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict) and isinstance(value.get("data"), list):
+        return value["data"]
+    return None
+
+
+def _add_current_entries(normalized, key, entries):
+    fallback_type = canonical_current_data_key(key)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        object_type = canonical_current_data_key(
+            entry.get("object_type")
+            or entry.get("type")
+            or entry.get("@type")
+            or fallback_type
+        )
+        if not object_type:
+            continue
+        normalized.setdefault(object_type, []).append(entry)
+
+
+def canonical_current_data_key(key):
+    if not isinstance(key, str) or not key:
+        return ""
+    if key in CURRENT_DATA_KEY_ALIASES.values():
+        return key
+    key = key.rstrip("/").split("/")[-1]
+    normalized_key = key.replace("_", "-").strip().lower()
+    return CURRENT_DATA_KEY_ALIASES.get(normalized_key, key)
 
 
 def write_plan_output(plan, plan_output, label):
@@ -499,7 +616,16 @@ def main(
                 parser.config_type = config_type
                 parser.device_group_name = device_group_name
                 if run_objects:
-                    parsed_data = parser.parse_specific_types(run_objects_list)
+                    parsed_data = parser.parse_specific_types(
+                        selected_type_names_for_parse(
+                            run_objects_list,
+                            run_all=run_all,
+                            run_security=run_security,
+                            run_app_override=run_app_override,
+                            run_decrypt_rules=run_decrypt_rules,
+                            run_nat=run_nat,
+                        )
+                    )
                 else:
                     run_objects_list = []  # Initialize as empty list
                     parsed_data = parser.parse_all()
@@ -559,6 +685,7 @@ def main(
                 run_app_override=run_app_override,
                 run_decrypt_rules=run_decrypt_rules,
                 run_nat=run_nat,
+                include_selected_objects=bool(run_objects),
             )
             plan = build_plan(
                 parsed_data,
@@ -599,6 +726,7 @@ def main(
                 run_app_override=run_app_override,
                 run_decrypt_rules=run_decrypt_rules,
                 run_nat=run_nat,
+                include_selected_objects=bool(run_objects),
             )
             plan = build_plan(
                 parsed_data,
