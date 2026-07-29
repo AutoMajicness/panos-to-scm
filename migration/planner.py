@@ -95,6 +95,29 @@ class MigrationPlan:
         }
 
 
+@dataclass(frozen=True)
+class NetworkReport:
+    """Offline report for parsed network payloads and migration warnings."""
+
+    objects: dict[str, list[dict[str, Any]]]
+    warnings: list[PlanWarning] = field(default_factory=list)
+
+    def summary(self) -> dict[str, int]:
+        summary = {
+            object_type: len(entries)
+            for object_type, entries in sorted(self.objects.items())
+        }
+        summary["warnings"] = len(self.warnings)
+        return summary
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "summary": self.summary(),
+            "objects": self.objects,
+            "warnings": _serialize_warnings(self.warnings),
+        }
+
+
 def build_plan(
     parsed_data: ParsedData,
     current_data: CurrentData | None = None,
@@ -243,6 +266,25 @@ def build_plan(
         unsupported=unsupported,
         warnings=warnings,
     )
+
+
+def build_network_report(parsed_data: ParsedData, object_types: list[str]) -> NetworkReport:
+    """Build an offline report for parsed network payloads without SCM comparison."""
+
+    network_objects = {
+        object_type: parsed_data.get(object_type, [])
+        for object_type in object_types
+        if object_type != "_migration_warnings"
+    }
+    warnings = _parser_warnings(parsed_data.get("_migration_warnings", []))
+    for object_type, entries in network_objects.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("name"):
+                warnings.extend(_schema_warnings_for_entry(object_type, entry["name"], entry))
+
+    return NetworkReport(objects=network_objects, warnings=warnings)
 
 
 def _normalize(value: Any) -> Any:

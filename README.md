@@ -82,6 +82,17 @@ python3 main.py \
 
 The legacy `--scope folder:All` option still works as a fallback for all categories. Prefer the category-specific flags when network snippets and policy folders are different.
 
+For a network-only offline report that does not require SCM scope/current-data comparison:
+
+```bash
+python3 main.py \
+  --parser panos \
+  --config-file running_config.xml \
+  --panos-config-type local \
+  --network-report \
+  --report-output /tmp/network-report.json
+```
+
 ### Command Line Options:
 - Check the "HELP" feature using `python main.py -h`
 - Run Specific Objects: `python main.py -o Tag,Address,AddressGroup`
@@ -97,7 +108,9 @@ The legacy `--scope folder:All` option still works as a fallback for all categor
 - Set policy destination scope: `--policy-scope folder:All`
 - Set network destination scope: `--network-scope snippet:Network-Stack`
 - Build an offline plan without SCM authentication: `--dry-run`
+- Emit parsed network payloads and warnings without SCM comparison: `--network-report`
 - Write a full dry-run plan: `--plan-output /tmp/plan.json`
+- Write a full network report: `--report-output /tmp/network-report.json`
 - Provide current SCM data for offline comparisons: `--current-data current.json`
 - Review schema-sensitive network warnings in dry-run summary/output before posting generated routing payloads.
 

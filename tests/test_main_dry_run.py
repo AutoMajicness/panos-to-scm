@@ -10,6 +10,56 @@ from config import AppConfig
 
 
 class MainDryRunTests(unittest.TestCase):
+    def test_network_report_writes_payloads_and_warnings_without_scope(self):
+        fixture_path = Path(__file__).parent / "fixtures" / "panos" / "local_routing_unsupported_nodes.xml"
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "network-report.json"
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                report = main.main(
+                    AppConfig(),
+                    parser_type="panos",
+                    config_file=str(fixture_path),
+                    panos_config_type="local",
+                    network_report=True,
+                    report_output=str(output_path),
+                )
+
+            output = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(report.summary()["LogicalRouter"], 1)
+        self.assertEqual(report.summary()["warnings"], 2)
+        self.assertEqual(output["summary"]["LogicalRouter"], 1)
+        self.assertEqual(output["summary"]["warnings"], 2)
+        self.assertIn("LogicalRouter", output["objects"])
+        self.assertEqual(
+            [warning["code"] for warning in output["warnings"]],
+            ["unsupported-panos-routing-node", "unsupported-panos-routing-node"],
+        )
+
+    def test_network_report_honors_selected_network_objects(self):
+        parsed_data = {
+            "LogicalRouter": [{"name": "default", "routing_stack": "advanced", "vrf": [{"name": "default"}]}],
+            "Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}],
+            "_migration_warnings": [],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                report = main.main(
+                    AppConfig(),
+                    run_objects="LogicalRouter,Address",
+                    json_file=str(parsed_path),
+                    network_report=True,
+                )
+
+        self.assertEqual(set(report.objects), {"LogicalRouter"})
+        self.assertEqual(report.summary()["LogicalRouter"], 1)
+
     def test_dry_run_writes_plan_output_with_current_data(self):
         parsed_data = {
             "Address": [

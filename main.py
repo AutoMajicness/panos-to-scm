@@ -6,7 +6,7 @@ from config import AppConfig, ConfigurationManager
 from parse.parse_panos import XMLParser
 from parse.parse_cisco import CiscoParser
 from scm.process import Processor, SCMObjectManager
-from migration import build_plan
+from migration import build_network_report, build_plan
 import scm.obj as obj
 import argparse
 import json
@@ -198,8 +198,10 @@ def main(
     run_all=False,
     json_file="",
     dry_run=False,
+    network_report=False,
     conflict_policy="fail",
     plan_output="",
+    report_output="",
     current_data_file="",
     parser_type=None,
     config_file="",
@@ -286,6 +288,33 @@ def main(
         if run_all:
             needs_object_scope = bool(selected_regular_obj_types)
             needs_network_scope = bool(selected_network_obj_types)
+
+        if network_report:
+            if not run_objects:
+                selected_type_names = [obj_type.__name__ for obj_type in get_network_obj_types(config)]
+                migration_warnings = parsed_data.get("_migration_warnings", [])
+                parsed_data = {
+                    object_type: parsed_data.get(object_type, [])
+                    for object_type in selected_type_names
+                }
+                parsed_data["_migration_warnings"] = migration_warnings
+            else:
+                selected_type_names = [obj_type.__name__ for obj_type in selected_network_obj_types]
+
+            report = build_network_report(parsed_data, selected_type_names)
+            output = report.to_dict()
+            if report_output:
+                try:
+                    with open(report_output, 'w') as file:
+                        json.dump(output, file, indent=2, sort_keys=True)
+                        file.write('\n')
+                except Exception as err:
+                    logger.error(f"Error while writing network report json file {err}")
+                    sys.exit(1)
+                logger.info(f"Network migration report written to {report_output}")
+            logger.info(f"Network migration report summary: {json.dumps(report.summary(), sort_keys=True)}")
+            print(json.dumps(report.summary(), indent=2, sort_keys=True))
+            return report
 
         scopes = resolve_category_scopes(
             scope,
@@ -413,10 +442,12 @@ if __name__ == "__main__":
     parser.add_argument('--panos-config-type', choices=['local', 'panorama/shared', 'panorama/device-group'], default="", help="PAN-OS XML scope type for non-interactive parsing")
     parser.add_argument('--device-group', action='store', default="", help="Panorama device-group name when using panorama/device-group")
     parser.add_argument('--dry-run', action='store_true', help="Build a local migration plan without authenticating to SCM or writing changes")
+    parser.add_argument('--network-report', action='store_true', help="Emit parsed network payloads and migration warnings without SCM comparison or authentication")
     parser.add_argument('--conflict-policy', choices=['fail', 'replace', 'ignore'], default='fail', help="How dry-run planning handles changed existing objects")
     parser.add_argument('--plan-output', action='store', default="", help="Write full dry-run migration plan JSON to this path")
+    parser.add_argument('--report-output', action='store', default="", help="Write full network report JSON to this path")
     parser.add_argument('--current-data', action='store', default="", help="Offline current SCM data JSON for dry-run comparison")
     args = parser.parse_args()
-    config = parser_config if args.dry_run else ConfigurationManager().app_config
+    config = parser_config if args.dry_run or args.network_report else ConfigurationManager().app_config
     
-    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, conflict_policy=args.conflict_policy, plan_output=args.plan_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)
+    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)

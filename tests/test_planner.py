@@ -1,6 +1,6 @@
 import unittest
 
-from migration import build_plan
+from migration import build_network_report, build_plan
 
 
 class BuildPlanTests(unittest.TestCase):
@@ -183,6 +183,50 @@ class BuildPlanTests(unittest.TestCase):
         self.assertEqual(plan.summary()["creates"], 1)
         self.assertEqual(plan.summary()["skips"], 1)
         self.assertEqual(plan.summary()["conflicts"], 1)
+
+    def test_build_network_report_returns_selected_network_objects_and_warnings(self):
+        parsed_data = {
+            "LogicalRouter": [
+                {
+                    "name": "default",
+                    "vrf": [
+                        {
+                            "name": "default",
+                            "routing_table": {
+                                "ip": {
+                                    "static_route": [
+                                        {
+                                            "name": "static-a",
+                                            "route_table": {"no_install": {}},
+                                        }
+                                    ]
+                                }
+                            },
+                        }
+                    ],
+                }
+            ],
+            "Address": [{"name": "addr-a", "ip_netmask": "192.0.2.10"}],
+            "_migration_warnings": [
+                {
+                    "object_type": "LogicalRouter",
+                    "name": "default",
+                    "path": "network.virtual-router.entry[default].ecmp",
+                    "code": "unsupported-panos-routing-node",
+                    "message": "ECMP not migrated",
+                }
+            ],
+        }
+
+        report = build_network_report(parsed_data, ["LogicalRouter"])
+
+        self.assertEqual(report.objects, {"LogicalRouter": parsed_data["LogicalRouter"]})
+        self.assertEqual(report.summary()["LogicalRouter"], 1)
+        self.assertEqual(report.summary()["warnings"], 2)
+        self.assertEqual(
+            [warning.code for warning in report.warnings],
+            ["unsupported-panos-routing-node", "logical-router-static-route-option"],
+        )
 
 
 if __name__ == "__main__":
