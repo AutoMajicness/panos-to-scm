@@ -103,6 +103,38 @@ class MainDryRunTests(unittest.TestCase):
         self.assertEqual(report["skips"][0]["name"], "same")
         self.assertEqual(report["conflicts"][0]["name"], "changed")
 
+    def test_dry_run_plan_output_includes_posting_preview(self):
+        parsed_data = {
+            "LogicalRouter": [{"name": "default", "routing_stack": "advanced", "vrf": [{"name": "default"}]}],
+            "IPsecTunnel": [{"name": "vpn-tunnel-a", "tunnel_interface": "tunnel.1"}],
+            "IKEGateway": [{"name": "vpn-gw-a"}],
+            "TunnelInterface": [{"name": "tunnel.1", "default_value": "tunnel.1"}],
+            "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1", "layer3": {}}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            parsed_path = directory_path / "parsed.json"
+            output_path = directory_path / "plan.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                main.main(
+                    AppConfig(),
+                    run_objects="LogicalRouter,IPsecTunnel,IKEGateway,TunnelInterface,EthernetInterface",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                    plan_output=str(output_path),
+                )
+
+            report = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            [batch["object_type"] for batch in report["posting_preview"]["creates"]],
+            ["EthernetInterface", "TunnelInterface", "IKEGateway", "IPsecTunnel", "LogicalRouter"],
+        )
+
     def test_dry_run_requires_scope_without_interactive(self):
         parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
 

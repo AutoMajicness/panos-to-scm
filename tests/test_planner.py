@@ -83,10 +83,39 @@ class BuildPlanTests(unittest.TestCase):
 
         self.assertEqual(
             list(report.keys()),
-            ["summary", "creates", "updates", "skips", "conflicts", "unsupported", "warnings"],
+            ["summary", "posting_preview", "creates", "updates", "skips", "conflicts", "unsupported", "warnings"],
         )
         self.assertEqual([item["name"] for item in report["creates"]], ["a-first", "z-last"])
         self.assertEqual(report["creates"][0]["action"], "create")
+
+    def test_plan_to_dict_contains_dependency_ordered_posting_preview(self):
+        parsed_data = {
+            "LogicalRouter": [{"name": "default", "routing_stack": "advanced", "vrf": [{"name": "default"}]}],
+            "IPsecTunnel": [{"name": "vpn-tunnel-a", "tunnel_interface": "tunnel.1"}],
+            "IKEGateway": [{"name": "vpn-gw-a"}],
+            "TunnelInterface": [{"name": "tunnel.1", "default_value": "tunnel.1"}],
+            "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1"}],
+            "Address": [{"name": "addr-a", "ip_netmask": "192.0.2.10"}],
+        }
+
+        plan = build_plan(
+            parsed_data,
+            object_types=[
+                "LogicalRouter",
+                "IPsecTunnel",
+                "IKEGateway",
+                "TunnelInterface",
+                "EthernetInterface",
+                "Address",
+            ],
+        )
+        preview = plan.to_dict()["posting_preview"]
+
+        self.assertEqual(
+            [batch["object_type"] for batch in preview["creates"]],
+            ["EthernetInterface", "TunnelInterface", "IKEGateway", "IPsecTunnel", "LogicalRouter", "Address"],
+        )
+        self.assertEqual(preview["updates"], [])
 
     def test_build_plan_reports_schema_sensitive_network_warnings(self):
         parsed_data = {
@@ -295,6 +324,70 @@ class BuildPlanTests(unittest.TestCase):
         current_data = {
             "BgpAddressFamilyProfile": [{"name": "tenant-af"}],
             "BgpRouteMap": [{"name": "tenant-rm"}],
+        }
+
+        plan = build_plan(parsed_data, current_data=current_data)
+
+        self.assertNotIn(
+            "missing-network-reference",
+            {warning.code for warning in plan.warnings},
+        )
+
+    def test_build_plan_warns_for_missing_vpn_references(self):
+        parsed_data = {
+            "IKEGateway": [
+                {
+                    "name": "vpn-gw-a",
+                    "protocol": {"ikev2": {"ike_crypto_profile": "ike-missing"}},
+                }
+            ],
+            "IPsecTunnel": [
+                {
+                    "name": "vpn-tunnel-a",
+                    "tunnel_interface": "tunnel.99",
+                    "auto_key": {
+                        "ike_gateway": [{"name": "vpn-gw-missing"}],
+                        "ipsec_crypto_profile": "ipsec-missing",
+                    },
+                }
+            ],
+        }
+
+        plan = build_plan(parsed_data)
+        missing = [warning for warning in plan.warnings if warning.code == "missing-network-reference"]
+
+        self.assertEqual(len(missing), 4)
+        self.assertEqual(
+            {
+                warning.message.split("'")[1]
+                for warning in missing
+            },
+            {"ike-missing", "tunnel.99", "vpn-gw-missing", "ipsec-missing"},
+        )
+
+    def test_build_plan_uses_current_data_for_vpn_reference_validation(self):
+        parsed_data = {
+            "IKEGateway": [
+                {
+                    "name": "vpn-gw-a",
+                    "protocol": {"ikev2": {"ike_crypto_profile": "tenant-ike"}},
+                }
+            ],
+            "IPsecTunnel": [
+                {
+                    "name": "vpn-tunnel-a",
+                    "tunnel_interface": "tunnel.1",
+                    "auto_key": {
+                        "ike_gateway": [{"name": "vpn-gw-a"}],
+                        "ipsec_crypto_profile": "tenant-ipsec",
+                    },
+                }
+            ],
+        }
+        current_data = {
+            "IKECryptoProfile": [{"name": "tenant-ike"}],
+            "IPsecCryptoProfile": [{"name": "tenant-ipsec"}],
+            "TunnelInterface": [{"name": "tunnel.1"}],
         }
 
         plan = build_plan(parsed_data, current_data=current_data)

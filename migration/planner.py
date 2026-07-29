@@ -9,9 +9,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from scm.process import NETWORK_OBJECT_DEPENDENCY_ORDER
+
 
 ParsedData = Mapping[str, list[dict[str, Any]]]
 CurrentData = Mapping[str, list[dict[str, Any]]]
+
+_POSTING_ORDER_INDEX = {
+    object_type: index
+    for index, object_type in enumerate(NETWORK_OBJECT_DEPENDENCY_ORDER)
+}
 
 
 @dataclass(frozen=True)
@@ -86,12 +93,21 @@ class MigrationPlan:
     def to_dict(self) -> dict[str, Any]:
         return {
             "summary": self.summary(),
+            "posting_preview": self.posting_preview(),
             "creates": _serialize_changes(self.creates),
             "updates": _serialize_changes(self.updates),
             "skips": _serialize_changes(self.skips),
             "conflicts": _serialize_changes(self.conflicts),
             "unsupported": _serialize_changes(self.unsupported),
             "warnings": _serialize_warnings(self.warnings),
+        }
+
+    def posting_preview(self) -> dict[str, list[dict[str, Any]]]:
+        """Preview dependency-ordered create/update batches without payload details."""
+
+        return {
+            "creates": _posting_batches(self.creates),
+            "updates": _posting_batches(self.updates),
         }
 
 
@@ -323,6 +339,30 @@ def _serialize_warnings(warnings: list[PlanWarning]) -> list[dict[str, Any]]:
     ]
 
 
+def _posting_batches(changes: list[Change]) -> list[dict[str, Any]]:
+    names_by_type: dict[str, list[str]] = {}
+    for change in changes:
+        names_by_type.setdefault(change.object_type, []).append(change.name)
+
+    batches = []
+    for object_type in sorted(names_by_type, key=_posting_sort_key):
+        names = sorted(names_by_type[object_type])
+        batches.append(
+            {
+                "object_type": object_type,
+                "count": len(names),
+                "names": names,
+            }
+        )
+    return batches
+
+
+def _posting_sort_key(object_type: str) -> tuple[int, int, str]:
+    if object_type in _POSTING_ORDER_INDEX:
+        return (0, _POSTING_ORDER_INDEX[object_type], object_type)
+    return (1, len(_POSTING_ORDER_INDEX), object_type)
+
+
 def _parser_warnings(entries: Any) -> list[PlanWarning]:
     if not isinstance(entries, list):
         return []
@@ -531,6 +571,18 @@ def _network_reference_targets(object_type: str, path: str, key: str) -> tuple[s
         if key == "distribute_list":
             return ("RouteAccessList",)
 
+    if object_type == "IKEGateway":
+        if key == "ike_crypto_profile":
+            return ("IKECryptoProfile",)
+
+    if object_type == "IPsecTunnel":
+        if key == "tunnel_interface":
+            return ("TunnelInterface",)
+        if key == "ipsec_crypto_profile":
+            return ("IPsecCryptoProfile",)
+        if key == "name" and "auto_key.ike_gateway[" in path:
+            return ("IKEGateway",)
+
     return ()
 
 
@@ -539,6 +591,8 @@ _NETWORK_REFERENCE_OBJECT_TYPES = {
     "BgpRedistributionProfile",
     "BgpRouteMap",
     "BgpRouteMapRedistribution",
+    "IKEGateway",
+    "IPsecTunnel",
     "LogicalRouter",
 }
 

@@ -143,6 +143,22 @@ python3 main.py \
 - Provide current SCM data for offline comparisons: `--current-data current.json`
 - Review schema-sensitive and missing-reference network warnings in dry-run summary/output before posting generated routing payloads.
 
+`--plan-output` includes a `posting_preview` section with dependency-ordered create/update batches by object type. Use this to review the order SCM posts would follow without exposing full payload details in the terminal summary.
+
+`--current-data` expects a JSON object keyed by SCM object type name. Each value is a list of current tenant objects; at minimum, include `name` for reference validation, and include full payload fields when you want dry-run conflict comparison. A minimal network reference snapshot looks like:
+
+```json
+{
+  "BgpRouteMap": [{"name": "tenant-existing-import-rm"}],
+  "IKECryptoProfile": [{"name": "tenant-existing-ike-crypto"}],
+  "IKEGateway": [{"name": "tenant-existing-vpn-gw"}],
+  "IPsecCryptoProfile": [{"name": "tenant-existing-ipsec-crypto"}],
+  "TunnelInterface": [{"name": "tunnel.1"}]
+}
+```
+
+A committed sanitized example lives at `examples/current-data-network.json`.
+
 ### Currently Supported PAN-OS Migration Features:
 
 - **External Dynamic List**
@@ -212,7 +228,7 @@ Network object posting is dependency ordered even when `-o` is supplied out of o
 
 BGP import/export policy rules are converted into route-map objects and attached to migrated BGP peers under IPv4 or IPv6 unicast address-family data based on the matched prefix family. Route-map conversion includes prefix, access-list, community, AS-path, metric, local-preference, MED, next-hop, community, and AS-path set operations. Validate these payloads with `--dry-run` against real SCM current data before posting, because advanced routing schemas are strict and local PAN-OS XML can vary by PAN-OS release.
 
-Dry-run plans include a `warnings` section for schema-sensitive or inferred network payloads, including generated BGP filtering profiles, BGP address-family profiles, Logical Router BGP peer references, static route option mappings, missing generated route-map/profile/list references, and parser-reported unsupported PAN-OS routing nodes. Reference validation checks selected generated payloads against both parsed output and optional `--current-data`, which helps catch dependencies that were not selected with `-o` or that do not already exist in the target SCM tenant. These warnings are non-blocking; use them as the review checklist before posting to SCM. Parser warnings are emitted under `_migration_warnings` in parsed data and are carried into dry-run plans automatically.
+Dry-run plans include a `warnings` section for schema-sensitive or inferred network payloads, including generated BGP filtering profiles, BGP address-family profiles, Logical Router BGP peer references, static route option mappings, missing generated route-map/profile/list/VPN references, and parser-reported unsupported PAN-OS routing nodes. Reference validation checks selected generated payloads against both parsed output and optional `--current-data`, which helps catch dependencies that were not selected with `-o` or that do not already exist in the target SCM tenant. These warnings are non-blocking; use them as the review checklist before posting to SCM. Parser warnings are emitted under `_migration_warnings` in parsed data and are carried into dry-run plans automatically.
 
 Sanitized local PAN-OS routing regression fixtures live under `tests/fixtures/panos/`. Add new fixtures there when validating XML variants from different PAN-OS releases, then cover the expected SCM payloads in `tests/test_panos_routing_fixtures.py`. The fixture set includes focused BGP/OSPF/static-route variants plus a compact real-world edge-stack pattern with L3 interfaces, L3 subinterfaces, DHCP server/relay, tunnel interfaces, VPN objects, zones, and static route path monitoring. Current parser warnings include PAN-OS virtual-router ECMP, BGP dampening, BGP conditional advertisement, BGP graceful-restart routing options, unmapped BGP redistribution sources, multicast/PIM routing, static-route qualified-next-hop nodes, and Panorama template-style virtual-router layouts parsed in local mode.
 

@@ -1,0 +1,27 @@
+{
+  "BgpRouteMap": [
+    {
+      "name": "tenant-existing-import-rm"
+    }
+  ],
+  "IKECryptoProfile": [
+    {
+      "name": "tenant-existing-ike-crypto"
+    }
+  ],
+  "IKEGateway": [
+    {
+      "name": "tenant-existing-vpn-gw"
+    }
+  ],
+  "IPsecCryptoProfile": [
+    {
+      "name": "tenant-existing-ipsec-crypto"
+    }
+  ],
+  "TunnelInterface": [
+    {
+      "name": "tunnel.1"
+    }
+  ]
+}
