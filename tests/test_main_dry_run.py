@@ -49,6 +49,8 @@ class MainDryRunTests(unittest.TestCase):
         self.assertEqual(plan.summary()["conflicts"], 1)
         self.assertEqual(report["summary"]["skips"], 1)
         self.assertEqual(report["summary"]["conflicts"], 1)
+        self.assertEqual(report["summary"]["warnings"], 0)
+        self.assertEqual(report["warnings"], [])
         self.assertEqual(report["skips"][0]["name"], "same")
         self.assertEqual(report["conflicts"][0]["name"], "changed")
 

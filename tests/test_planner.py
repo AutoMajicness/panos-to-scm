@@ -22,6 +22,7 @@ class BuildPlanTests(unittest.TestCase):
                 "skips": 0,
                 "conflicts": 0,
                 "unsupported": 0,
+                "warnings": 0,
             },
         )
         self.assertEqual([change.name for change in plan.creates], ["web-1", "web-2"])
@@ -82,10 +83,85 @@ class BuildPlanTests(unittest.TestCase):
 
         self.assertEqual(
             list(report.keys()),
-            ["summary", "creates", "updates", "skips", "conflicts", "unsupported"],
+            ["summary", "creates", "updates", "skips", "conflicts", "unsupported", "warnings"],
         )
         self.assertEqual([item["name"] for item in report["creates"]], ["a-first", "z-last"])
         self.assertEqual(report["creates"][0]["action"], "create")
+
+    def test_build_plan_reports_schema_sensitive_network_warnings(self):
+        parsed_data = {
+            "BgpFilteringProfile": [
+                {
+                    "name": "default-ipv4-bgp-filtering",
+                    "ipv4": {"unicast": {"route_maps": {"inbound": "import-rm"}}},
+                }
+            ],
+            "BgpAddressFamilyProfile": [
+                {
+                    "name": "default-upstream-ipv4-af",
+                    "ipv4": {"unicast": {"send_community": {"both": {}}}},
+                }
+            ],
+            "LogicalRouter": [
+                {
+                    "name": "default",
+                    "vrf": [
+                        {
+                            "name": "default",
+                            "routing_table": {
+                                "ip": {
+                                    "static_route": [
+                                        {
+                                            "name": "static-a",
+                                            "destination": "192.0.2.0/24",
+                                            "route_table": {"no_install": {}},
+                                            "option": {"passive": {}},
+                                        }
+                                    ]
+                                }
+                            },
+                            "bgp": {
+                                "peer_group": [
+                                    {
+                                        "name": "upstream",
+                                        "peer": [
+                                            {
+                                                "name": "peer-a",
+                                                "address_family": {
+                                                    "ipv4": {
+                                                        "unicast": {
+                                                            "filtering_profile": "default-ipv4-bgp-filtering",
+                                                            "import_route_map": "import-rm",
+                                                        }
+                                                    }
+                                                },
+                                            }
+                                        ],
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        plan = build_plan(parsed_data)
+
+        self.assertEqual(plan.summary()["warnings"], 6)
+        self.assertEqual(
+            {
+                warning.code
+                for warning in plan.warnings
+            },
+            {
+                "generated-bgp-filtering-profile",
+                "bgp-address-family-profile",
+                "logical-router-bgp-reference",
+                "logical-router-static-route-option",
+            },
+        )
+        self.assertTrue(all(warning.severity == "warning" for warning in plan.warnings))
 
     def test_build_plan_uses_offline_current_data_for_mixed_results(self):
         parsed_data = {

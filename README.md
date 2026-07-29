@@ -99,6 +99,7 @@ The legacy `--scope folder:All` option still works as a fallback for all categor
 - Build an offline plan without SCM authentication: `--dry-run`
 - Write a full dry-run plan: `--plan-output /tmp/plan.json`
 - Provide current SCM data for offline comparisons: `--current-data current.json`
+- Review schema-sensitive network warnings in dry-run summary/output before posting generated routing payloads.
 
 ### Currently Supported PAN-OS Migration Features:
 
@@ -166,6 +167,8 @@ DHCP client mode is supported for Layer 3 ethernet interfaces and Layer 3 ethern
 PAN-OS local firewall XML stores routes under `network/virtual-router`; this tool maps those source entries into SCM Logical Routers with `routing_stack` set to `advanced` for ARE-enabled firewalls. DHCP interface migration covers common local firewall DHCP server and relay interface settings. Logical router migration includes IPv4/IPv6 static routes, route-table options, passive static route options, BFD profile references, static route path-monitor data, BGP peer groups/peers with auth profile references, address-family profile references, filtering profile references, timers, multihop, and connection options, OSPF/OSPFv3 areas/interfaces with auth profile bindings, area ranges, virtual links, interface timing, and export rules, and BGP export route-map references under the Logical Router RIB filter.
 
 BGP import/export policy rules are converted into route-map objects and attached to migrated BGP peers under IPv4 or IPv6 unicast address-family data based on the matched prefix family. Route-map conversion includes prefix, access-list, community, AS-path, metric, local-preference, MED, next-hop, community, and AS-path set operations. Validate these payloads with `--dry-run` against real SCM current data before posting, because advanced routing schemas are strict and local PAN-OS XML can vary by PAN-OS release.
+
+Dry-run plans include a `warnings` section for schema-sensitive or inferred network payloads, including generated BGP filtering profiles, BGP address-family profiles, Logical Router BGP peer references, and static route option mappings. These warnings are non-blocking; use them as the review checklist before posting to SCM.
 
 Virtual-wire zone membership is parsed under security zones. Physical ethernet interfaces using virtual-wire mode are detected in the ethernet interface parser, but SCM currently exposes virtual-wire assignment differently than a standalone network object, so validate those dry-run payloads before posting.
 

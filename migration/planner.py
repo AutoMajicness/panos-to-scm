@@ -37,6 +37,28 @@ class Change:
 
 
 @dataclass(frozen=True)
+class PlanWarning:
+    """A non-blocking validation warning for schema-sensitive payloads."""
+
+    object_type: str
+    name: str
+    message: str
+    path: str = ""
+    code: str = "schema-sensitive"
+    severity: str = "warning"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "severity": self.severity,
+            "object_type": self.object_type,
+            "name": self.name,
+            "path": self.path,
+            "message": self.message,
+        }
+
+
+@dataclass(frozen=True)
 class MigrationPlan:
     """Dry-run output grouped by operation type."""
 
@@ -45,6 +67,7 @@ class MigrationPlan:
     skips: list[Change] = field(default_factory=list)
     conflicts: list[Change] = field(default_factory=list)
     unsupported: list[Change] = field(default_factory=list)
+    warnings: list[PlanWarning] = field(default_factory=list)
 
     @property
     def total_changes(self) -> int:
@@ -57,6 +80,7 @@ class MigrationPlan:
             "skips": len(self.skips),
             "conflicts": len(self.conflicts),
             "unsupported": len(self.unsupported),
+            "warnings": len(self.warnings),
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -67,6 +91,7 @@ class MigrationPlan:
             "skips": _serialize_changes(self.skips),
             "conflicts": _serialize_changes(self.conflicts),
             "unsupported": _serialize_changes(self.unsupported),
+            "warnings": _serialize_warnings(self.warnings),
         }
 
 
@@ -99,6 +124,7 @@ def build_plan(
     skips: list[Change] = []
     conflicts: list[Change] = []
     unsupported: list[Change] = []
+    warnings: list[PlanWarning] = []
 
     for object_type in selected_types:
         desired_entries = parsed_data.get(object_type, [])
@@ -163,10 +189,12 @@ def build_plan(
             current = current_by_name.get(name)
             if current is None:
                 creates.append(Change("create", object_type, name, desired=desired))
+                warnings.extend(_schema_warnings_for_entry(object_type, name, desired))
                 continue
 
             if _normalize(desired) == _normalize(current):
                 skips.append(Change("skip", object_type, name, desired=desired, current=current))
+                warnings.extend(_schema_warnings_for_entry(object_type, name, desired))
             elif conflict_policy == "replace":
                 updates.append(
                     Change(
@@ -178,6 +206,7 @@ def build_plan(
                         reason="desired object differs from current object",
                     )
                 )
+                warnings.extend(_schema_warnings_for_entry(object_type, name, desired))
             elif conflict_policy == "ignore":
                 skips.append(
                     Change(
@@ -189,6 +218,7 @@ def build_plan(
                         reason="desired object differs and conflict_policy=ignore",
                     )
                 )
+                warnings.extend(_schema_warnings_for_entry(object_type, name, desired))
             else:
                 conflicts.append(
                     Change(
@@ -200,6 +230,7 @@ def build_plan(
                         reason="desired object differs from current object",
                     )
                 )
+                warnings.extend(_schema_warnings_for_entry(object_type, name, desired))
 
     return MigrationPlan(
         creates=creates,
@@ -207,6 +238,7 @@ def build_plan(
         skips=skips,
         conflicts=conflicts,
         unsupported=unsupported,
+        warnings=warnings,
     )
 
 
@@ -230,3 +262,90 @@ def _serialize_changes(changes: list[Change]) -> list[dict[str, Any]]:
         change.to_dict()
         for change in sorted(changes, key=lambda item: (item.object_type, item.name, item.action))
     ]
+
+
+def _serialize_warnings(warnings: list[PlanWarning]) -> list[dict[str, Any]]:
+    return [
+        warning.to_dict()
+        for warning in sorted(warnings, key=lambda item: (item.object_type, item.name, item.path, item.code))
+    ]
+
+
+def _schema_warnings_for_entry(object_type: str, name: str, desired: dict[str, Any]) -> list[PlanWarning]:
+    warnings: list[PlanWarning] = []
+
+    if object_type == "BgpFilteringProfile":
+        warnings.append(
+            PlanWarning(
+                object_type=object_type,
+                name=name,
+                path="",
+                code="generated-bgp-filtering-profile",
+                message=(
+                    "BGP filtering profile was generated from PAN-OS import/export policy artifacts; "
+                    "validate route-map and network-filter references against SCM current data before posting."
+                ),
+            )
+        )
+
+    if object_type == "BgpAddressFamilyProfile":
+        warnings.append(
+            PlanWarning(
+                object_type=object_type,
+                name=name,
+                path="",
+                code="bgp-address-family-profile",
+                message=(
+                    "BGP address family profile fields are schema-sensitive and may vary by SCM release; "
+                    "validate the generated payload with dry-run current data or a tenant response before posting."
+                ),
+            )
+        )
+
+    if object_type == "LogicalRouter":
+        warnings.extend(_logical_router_schema_warnings(object_type, name, desired))
+
+    return warnings
+
+
+def _logical_router_schema_warnings(object_type: str, name: str, desired: dict[str, Any]) -> list[PlanWarning]:
+    warnings: list[PlanWarning] = []
+    for path, key, _ in _walk_payload(desired):
+        if key in {"address_family_profile", "filtering_profile", "import_route_map", "export_route_map"}:
+            warnings.append(
+                PlanWarning(
+                    object_type=object_type,
+                    name=name,
+                    path=path,
+                    code="logical-router-bgp-reference",
+                    message=(
+                        f"Logical Router BGP field '{key}' is schema-sensitive; validate this peer "
+                        "address-family reference against SCM current data before posting."
+                    ),
+                )
+            )
+        elif key in {"route_table", "option"} and ".routing_table." in path:
+            warnings.append(
+                PlanWarning(
+                    object_type=object_type,
+                    name=name,
+                    path=path,
+                    code="logical-router-static-route-option",
+                    message=(
+                        f"Static route field '{key}' is migrated from PAN-OS routing-table options; "
+                        "validate the generated Logical Router static route payload before posting."
+                    ),
+                )
+            )
+    return warnings
+
+
+def _walk_payload(value: Any, path: str = ""):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            next_path = f"{path}.{key}" if path else key
+            yield next_path, key, item
+            yield from _walk_payload(item, next_path)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _walk_payload(item, f"{path}[{index}]")
