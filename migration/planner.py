@@ -149,6 +149,7 @@ def build_plan(
     unsupported: list[Change] = []
     warnings: list[PlanWarning] = []
     warnings.extend(_parser_warnings(parsed_data.get("_migration_warnings", [])))
+    warnings.extend(_network_reference_warnings(parsed_data, current_data, selected_types))
 
     for object_type in selected_types:
         if object_type == "_migration_warnings":
@@ -268,15 +269,21 @@ def build_plan(
     )
 
 
-def build_network_report(parsed_data: ParsedData, object_types: list[str]) -> NetworkReport:
+def build_network_report(
+    parsed_data: ParsedData,
+    object_types: list[str],
+    current_data: CurrentData | None = None,
+) -> NetworkReport:
     """Build an offline report for parsed network payloads without SCM comparison."""
 
+    current_data = current_data or {}
     network_objects = {
         object_type: parsed_data.get(object_type, [])
         for object_type in object_types
         if object_type != "_migration_warnings"
     }
     warnings = _parser_warnings(parsed_data.get("_migration_warnings", []))
+    warnings.extend(_network_reference_warnings(parsed_data, current_data, object_types))
     for object_type, entries in network_objects.items():
         if not isinstance(entries, list):
             continue
@@ -404,6 +411,136 @@ def _logical_router_schema_warnings(object_type: str, name: str, desired: dict[s
                 )
             )
     return warnings
+
+
+def _network_reference_warnings(
+    parsed_data: ParsedData,
+    current_data: CurrentData,
+    object_types: list[str],
+) -> list[PlanWarning]:
+    """Warn when generated network references are absent from desired/current data."""
+
+    available_names = _merge_names_by_type(
+        _names_by_type(parsed_data, allowed_types=set(object_types)),
+        _names_by_type(current_data),
+    )
+    warnings: list[PlanWarning] = []
+    seen: set[tuple[str, str, str, str, tuple[str, ...]]] = set()
+
+    for object_type in object_types:
+        if object_type == "_migration_warnings":
+            continue
+        entries = parsed_data.get(object_type, [])
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if not name:
+                continue
+            for path, key, value in _walk_payload(entry):
+                if not isinstance(value, str) or not value:
+                    continue
+                target_types = _network_reference_targets(object_type, path, key)
+                if not target_types:
+                    continue
+                if any(value in available_names.get(target_type, set()) for target_type in target_types):
+                    continue
+
+                dedupe_key = (object_type, name, path, value, target_types)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                target_label = " or ".join(target_types)
+                warnings.append(
+                    PlanWarning(
+                        object_type=object_type,
+                        name=name,
+                        path=path,
+                        code="missing-network-reference",
+                        message=(
+                            f"Reference '{value}' was not found in generated payloads or current SCM data "
+                            f"for {target_label}; include that object type in the migration or verify it "
+                            "already exists in the target tenant before posting."
+                        ),
+                    )
+                )
+
+    return warnings
+
+
+def _names_by_type(
+    data_map: Mapping[str, Any],
+    allowed_types: set[str] | None = None,
+) -> dict[str, set[str]]:
+    names: dict[str, set[str]] = {}
+    for object_type, entries in data_map.items():
+        if object_type == "_migration_warnings" or not isinstance(entries, list):
+            continue
+        if allowed_types is not None and object_type not in allowed_types:
+            continue
+        object_names = names.setdefault(object_type, set())
+        for entry in entries:
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+                object_names.add(entry["name"])
+    return names
+
+
+def _merge_names_by_type(*name_maps: dict[str, set[str]]) -> dict[str, set[str]]:
+    merged: dict[str, set[str]] = {}
+    for name_map in name_maps:
+        for object_type, names in name_map.items():
+            merged.setdefault(object_type, set()).update(names)
+    return merged
+
+
+def _network_reference_targets(object_type: str, path: str, key: str) -> tuple[str, ...]:
+    if object_type not in _NETWORK_REFERENCE_OBJECT_TYPES:
+        return ()
+
+    if key == "address_family_profile":
+        return ("BgpAddressFamilyProfile",)
+    if key == "filtering_profile":
+        return ("BgpFilteringProfile",)
+    if key == "authentication_profile":
+        if ".ospf" in path:
+            return ("OSPFAuthProfile",)
+        if ".bgp" in path:
+            return ("BgpAuthProfile",)
+    if key in {"import_route_map", "export_route_map", "route_map"}:
+        return ("BgpRouteMap", "BgpRouteMapRedistribution")
+    if key in {"inbound", "outbound"} and ".route_maps." in path:
+        return ("BgpRouteMap", "BgpRouteMapRedistribution")
+    if key == "redistribution_profile" and ".bgp" in path:
+        return ("BgpRedistributionProfile",)
+
+    if object_type in {"BgpRouteMap", "BgpRouteMapRedistribution"}:
+        if key == "prefix_list":
+            return ("RoutePrefixList",)
+        if key == "access_list":
+            return ("RouteAccessList",)
+        if key == "as_path_access_list":
+            return ("RoutePathAccessList",)
+        if key == "regular_community" and ".match." in path:
+            return ("RouteCommunityList",)
+
+    if object_type == "BgpFilteringProfile":
+        if key == "prefix_list":
+            return ("RoutePrefixList",)
+        if key == "distribute_list":
+            return ("RouteAccessList",)
+
+    return ()
+
+
+_NETWORK_REFERENCE_OBJECT_TYPES = {
+    "BgpFilteringProfile",
+    "BgpRedistributionProfile",
+    "BgpRouteMap",
+    "BgpRouteMapRedistribution",
+    "LogicalRouter",
+}
 
 
 def _walk_payload(value: Any, path: str = ""):

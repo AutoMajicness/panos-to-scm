@@ -102,6 +102,12 @@ class BuildPlanTests(unittest.TestCase):
                     "ipv4": {"unicast": {"send_community": {"both": {}}}},
                 }
             ],
+            "BgpRouteMap": [
+                {
+                    "name": "import-rm",
+                    "route_map": [{"name": "rule-a", "action": {"permit": {}}}],
+                }
+            ],
             "LogicalRouter": [
                 {
                     "name": "default",
@@ -162,6 +168,163 @@ class BuildPlanTests(unittest.TestCase):
             },
         )
         self.assertTrue(all(warning.severity == "warning" for warning in plan.warnings))
+
+    def test_build_plan_warns_for_missing_network_references(self):
+        parsed_data = {
+            "BgpFilteringProfile": [
+                {
+                    "name": "default-ipv4-bgp-filtering",
+                    "ipv4": {
+                        "unicast": {
+                            "route_maps": {"inbound": "import-rm"},
+                            "network_filter": {"prefix_list": "pl-missing"},
+                        }
+                    },
+                }
+            ],
+            "BgpRouteMap": [
+                {
+                    "name": "import-rm",
+                    "route_map": [
+                        {
+                            "name": "rule-a",
+                            "match": {
+                                "prefix_list": "pl-missing",
+                                "regular_community": "community-missing",
+                                "as_path_access_list": "aspath-missing",
+                            },
+                        }
+                    ],
+                }
+            ],
+            "LogicalRouter": [
+                {
+                    "name": "default",
+                    "vrf": [
+                        {
+                            "name": "default",
+                            "bgp": {
+                                "redistribution_profile": "redist-missing",
+                                "peer_group": [
+                                    {
+                                        "name": "upstream",
+                                        "peer": [
+                                            {
+                                                "name": "peer-a",
+                                                "authentication_profile": "bgp-auth-missing",
+                                                "address_family": {
+                                                    "ipv4": {
+                                                        "unicast": {
+                                                            "address_family_profile": "af-missing",
+                                                            "filtering_profile": "filter-missing",
+                                                            "import_route_map": "import-rm",
+                                                        }
+                                                    }
+                                                },
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        plan = build_plan(parsed_data)
+        missing = [warning for warning in plan.warnings if warning.code == "missing-network-reference"]
+
+        self.assertEqual(len(missing), 8)
+        self.assertEqual(
+            {
+                warning.message.split("'")[1]
+                for warning in missing
+            },
+            {
+                "pl-missing",
+                "community-missing",
+                "aspath-missing",
+                "redist-missing",
+                "bgp-auth-missing",
+                "af-missing",
+                "filter-missing",
+            },
+        )
+
+    def test_build_plan_uses_current_data_for_network_reference_validation(self):
+        parsed_data = {
+            "BgpFilteringProfile": [
+                {
+                    "name": "default-ipv4-bgp-filtering",
+                    "ipv4": {"unicast": {"route_maps": {"inbound": "tenant-rm"}}},
+                }
+            ],
+            "LogicalRouter": [
+                {
+                    "name": "default",
+                    "vrf": [
+                        {
+                            "name": "default",
+                            "bgp": {
+                                "peer_group": [
+                                    {
+                                        "name": "upstream",
+                                        "peer": [
+                                            {
+                                                "name": "peer-a",
+                                                "address_family": {
+                                                    "ipv4": {
+                                                        "unicast": {
+                                                            "address_family_profile": "tenant-af",
+                                                            "filtering_profile": "default-ipv4-bgp-filtering",
+                                                            "import_route_map": "tenant-rm",
+                                                        }
+                                                    }
+                                                },
+                                            }
+                                        ],
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        current_data = {
+            "BgpAddressFamilyProfile": [{"name": "tenant-af"}],
+            "BgpRouteMap": [{"name": "tenant-rm"}],
+        }
+
+        plan = build_plan(parsed_data, current_data=current_data)
+
+        self.assertNotIn(
+            "missing-network-reference",
+            {warning.code for warning in plan.warnings},
+        )
+
+    def test_build_plan_warns_when_reference_target_is_parsed_but_not_selected(self):
+        parsed_data = {
+            "BgpFilteringProfile": [
+                {
+                    "name": "default-ipv4-bgp-filtering",
+                    "ipv4": {"unicast": {"route_maps": {"inbound": "parsed-but-not-selected"}}},
+                }
+            ],
+            "BgpRouteMap": [
+                {
+                    "name": "parsed-but-not-selected",
+                    "route_map": [{"name": "rule-a", "action": {"permit": {}}}],
+                }
+            ],
+        }
+
+        plan = build_plan(parsed_data, object_types=["BgpFilteringProfile"])
+
+        missing = [warning for warning in plan.warnings if warning.code == "missing-network-reference"]
+        self.assertEqual(len(missing), 1)
+        self.assertIn("parsed-but-not-selected", missing[0].message)
 
     def test_build_plan_uses_offline_current_data_for_mixed_results(self):
         parsed_data = {
