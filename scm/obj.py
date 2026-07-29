@@ -21,11 +21,10 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 '''
 
-from scm import PanApiHandler
-
 class PanApiHandler:
     """Base class for Pan objects."""
     _endpoint = None  # Default endpoint
+    _scope_in_payload = False
 
     @classmethod
     def get_endpoint(cls):
@@ -33,6 +32,10 @@ class PanApiHandler:
         if cls._endpoint is None:
             raise NotImplementedError("Endpoint not defined for this object type")
         return cls._endpoint
+
+    @classmethod
+    def uses_payload_scope(cls):
+        return cls._scope_in_payload
 
 class SecurityRule(PanApiHandler):
     _endpoint = "/sse/config/v1/security-rules?"
@@ -45,19 +48,23 @@ class Zones(PanApiHandler):
 
 class Address(PanApiHandler):
     "An address object"
-    _endpoint = "/sse/config/v1/addresses?"
+    _endpoint = "/config/objects/v1/addresses"
+    _scope_in_payload = True
 
 class AddressGroup(PanApiHandler):
     "An address group"
-    _endpoint = "/sse/config/v1/address-groups?"
+    _endpoint = "/config/objects/v1/address-groups"
+    _scope_in_payload = True
     
 class Service(PanApiHandler):
     "An application group"
-    _endpoint = "/sse/config/v1/services?"
+    _endpoint = "/config/objects/v1/services"
+    _scope_in_payload = True
         
 class ServiceGroup(PanApiHandler):
     "A service group"
-    _endpoint = "/sse/config/v1/service-groups?"
+    _endpoint = "/config/objects/v1/service-groups"
+    _scope_in_payload = True
     
 class Application(PanApiHandler):
     "An application object"
@@ -113,7 +120,8 @@ class Schedule(PanApiHandler):
 
 class Tag(PanApiHandler):
     "A tag object"
-    _endpoint = "/sse/config/v1/tags?"
+    _endpoint = "/config/objects/v1/tags"
+    _scope_in_payload = True
 
 class URLCategory(PanApiHandler):
     "A custom URL category"

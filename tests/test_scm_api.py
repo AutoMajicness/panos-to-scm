@@ -1,0 +1,125 @@
+import unittest
+
+import scm.obj as obj
+from scm import PanApiHandler
+from scm.process import Processor, SCMObjectManager
+
+
+class FakeResponse:
+    def __init__(self, status_code, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.text = text
+
+    def json(self):
+        return self._payload
+
+
+class FakeSession:
+    def __init__(self):
+        self.get_calls = []
+        self.post_calls = []
+        self.put_calls = []
+        self.get_response = FakeResponse(200, {"data": []})
+        self.post_response = FakeResponse(201, {"id": "created"})
+        self.put_response = FakeResponse(200, {"id": "updated"})
+
+    def ensure_valid_token(self):
+        pass
+
+    def get(self, url, params=None, timeout=20):
+        self.get_calls.append({"url": url, "params": params, "timeout": timeout})
+        return self.get_response
+
+    def post(self, url, json=None, timeout=20):
+        self.post_calls.append({"url": url, "json": json, "timeout": timeout})
+        return self.post_response
+
+    def put(self, url, json=None, timeout=20):
+        self.put_calls.append({"url": url, "json": json, "timeout": timeout})
+        return self.put_response
+
+
+class EndpointRegistryTests(unittest.TestCase):
+    def test_core_object_endpoints_are_modern_and_payload_scoped(self):
+        self.assertEqual(obj.Address.get_endpoint(), "/config/objects/v1/addresses")
+        self.assertEqual(obj.Tag.get_endpoint(), "/config/objects/v1/tags")
+        self.assertTrue(obj.Address.uses_payload_scope())
+        self.assertTrue(obj.ServiceGroup.uses_payload_scope())
+
+
+class PanApiHandlerTests(unittest.TestCase):
+    def test_get_uses_strata_base_url_and_query_params(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+
+        handler.get("/config/objects/v1/addresses", params={"folder": "All", "limit": 100})
+
+        self.assertEqual(
+            session.get_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/objects/v1/addresses",
+        )
+        self.assertEqual(session.get_calls[0]["params"], {"folder": "All", "limit": 100})
+
+    def test_post_returns_created_status(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+
+        result = handler.post("/config/objects/v1/addresses", {"name": "addr"})
+
+        self.assertEqual(result["status"], "created")
+
+
+class ProcessorTests(unittest.TestCase):
+    def test_core_object_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&folder=All", obj, [obj.Address], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&folder=All",
+            [{"name": "addr", "fqdn": "example.com"}],
+            obj.Address,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/objects/v1/addresses",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {"name": "addr", "fqdn": "example.com", "folder": "All"},
+        )
+
+    def test_fetch_objects_uses_query_scope(self):
+        session = FakeSession()
+        session.get_response = FakeResponse(200, {"data": [{"name": "addr", "folder": "All"}]})
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&folder=All", obj, [obj.Address], obj.SecurityRule, obj.NatRule)
+
+        objects = manager.fetch_objects(obj.Address, limit="100")
+
+        self.assertEqual(objects, [{"name": "addr", "folder": "All"}])
+        self.assertEqual(session.get_calls[0]["params"]["folder"], "All")
+        self.assertNotIn("folder", session.get_calls[0]["url"])
+
+    def test_analyze_results_counts_modern_statuses(self):
+        processor = Processor(None, 1, obj, None)
+
+        _, exists_count, error_count, error_objects = processor.analyze_results(
+            [
+                {"status": "created", "name": "created"},
+                {"status": "exists", "name": "exists"},
+                {"status": "error", "name": "bad"},
+                {"status": "exception", "name": "boom"},
+            ]
+        )
+
+        self.assertEqual(exists_count, 1)
+        self.assertEqual(error_count, 2)
+        self.assertEqual(error_objects, ["bad", "boom"])
+
+
+if __name__ == "__main__":
+    unittest.main()

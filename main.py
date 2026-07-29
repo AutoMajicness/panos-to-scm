@@ -2,18 +2,22 @@ import logging
 from logging.handlers import TimedRotatingFileHandler
 import time
 import os
-from config import ConfigurationManager
+from config import AppConfig, ConfigurationManager
 from parse.parse_panos import XMLParser
 from parse.parse_cisco import CiscoParser
-from api import PanApiSession
-from scm import PanApiHandler
 from scm.process import Processor, SCMObjectManager
-from api.palo_token import PaloToken
-from panos import PaloConfigManager
+from migration import build_plan
 import scm.obj as obj
 import argparse
 import json
 import sys
+import xml.etree.ElementTree as ET
+
+logger = logging.getLogger(__name__)
+
+
+class CliError(Exception):
+    """Raised for invalid non-interactive CLI usage."""
 
 def setup_logging():
     logger = logging.getLogger('')
@@ -28,17 +32,63 @@ def setup_logging():
     console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(console_handler)
 
-def get_file_path_and_type(config, logger):
-    if os.path.exists('cisco_config.txt'):
+def scope_param_from_cli(scope_arg):
+    try:
+        scope_type, scope_value = scope_arg.split(':', 1)
+    except ValueError as err:
+        raise CliError("Scope must use the format '<folder|snippet|device>:<value>'") from err
+
+    from scm.scope import Scope
+
+    return f"&{Scope(scope_type, scope_value).scope_type}={scope_value}"
+
+
+def prompt_for_scope(prompt_label):
+    scope_type = input("Do you want to use a folder, snippet, or device? Enter 'folder', 'snippet', or 'device': ").strip().lower()
+    scope_value = input(prompt_label.format(scope_type=scope_type)).strip()
+    return f"&{scope_type}={scope_value}"
+
+
+def require_scope(scope_arg, interactive, prompt_label):
+    if scope_arg:
+        return scope_param_from_cli(scope_arg)
+    if interactive:
+        return prompt_for_scope(prompt_label)
+    raise CliError("Missing required --scope. Use a value like --scope folder:All")
+
+
+def infer_panos_config_type(file_path):
+    root = ET.parse(file_path).getroot()
+    if root.find('.//devices/entry/device-group') is not None:
+        raise CliError(
+            "PAN-OS XML appears to contain Panorama device-groups. "
+            "Specify --panos-config-type panorama/shared or panorama/device-group."
+        )
+    return 'local'
+
+
+def get_file_path_and_type(config, logger, parser_type=None, config_file="", fetch_panos_config=False, interactive=False):
+    if parser_type:
+        config_choice = parser_type
+    elif interactive and os.path.exists('cisco_config.txt'):
         config_choice = input("Do you want to parse Cisco or PANOS configuration? (cisco/panos): ").strip().lower()
     else:
         config_choice = 'panos'
 
-    if config_choice == 'panos':
-        user_choice = input("Do you want to retrieve new config from Palo Alto NGFW? (yes/no): ").strip().lower()
-        file_path = "running_config.xml"
+    if config_choice not in {'panos', 'cisco'}:
+        raise CliError("--parser must be either 'panos' or 'cisco'")
 
-        if user_choice == 'yes':
+    if config_choice == 'panos':
+        if interactive and not fetch_panos_config and not config_file:
+            user_choice = input("Do you want to retrieve new config from Palo Alto NGFW? (yes/no): ").strip().lower()
+            fetch_panos_config = user_choice == 'yes'
+
+        file_path = config_file or "running_config.xml"
+
+        if fetch_panos_config:
+            from api.palo_token import PaloToken
+            from panos import PaloConfigManager
+
             palo_token_manager = PaloToken()
             token = palo_token_manager.retrieve_token()
             palo_config_manager = PaloConfigManager(token, palo_token_manager.ngfw_url)
@@ -48,15 +98,17 @@ def get_file_path_and_type(config, logger):
                 file.write(running_config)
             logger.info("New running configuration retrieved and saved.")
         else:
-            file_path = config.xml_file_path
+            file_path = config_file or config.xml_file_path
             logger.info(f"Using local XML file: {file_path}")
     else:
-        file_path = config.cisco_file_path
+        file_path = config_file or config.cisco_file_path
         logger.info(f"Using Cisco configuration file: {file_path}")
 
     return file_path, config_choice
 
 def initialize_api_session():
+    from api import PanApiSession
+
     session = PanApiSession()
     session.authenticate()
     return session
@@ -73,12 +125,30 @@ def run_selected_objects(parsed_data, scm_obj_manager, scope_param, device_group
     
     scm_obj_manager.process_objects(parsed_data, scope_param, device_group_name, max_workers=6, limit=config.limit)
 
-def main(config, run_objects=None, run_security=False, run_app_override=False, run_decrypt_rules=False, run_nat=False, run_all=False,json_file=""):
+def main(
+    config,
+    run_objects=None,
+    run_security=False,
+    run_app_override=False,
+    run_decrypt_rules=False,
+    run_nat=False,
+    run_all=False,
+    json_file="",
+    dry_run=False,
+    conflict_policy="fail",
+    plan_output="",
+    current_data_file="",
+    parser_type=None,
+    config_file="",
+    scope="",
+    fetch_panos_config=False,
+    interactive=False,
+    panos_config_type="",
+    device_group_name="",
+):
     try:
         start_time = time.time()
         logger.info(f"Script started at {time.ctime(start_time)}")
-
-        api_session = PanApiHandler(initialize_api_session())
 
         if run_objects:
             run_objects_list = run_objects.split(',')
@@ -86,9 +156,15 @@ def main(config, run_objects=None, run_security=False, run_app_override=False, r
         else:
             run_objects_list = []  # Initialize as empty list
 
+        if not json_file and config_file.lower().endswith('.json'):
+            json_file = config_file
+
         if json_file != "":
-            scope_type = input("Do you want to use a folder or a snippet? Enter 'folder' or 'snippet': ").strip().lower()
-            scope_value = input(f'Enter the {scope_type} name (Use "All" for "Global", "Shared" for "Prisma Access"): ').strip()
+            scope_param = require_scope(
+                scope,
+                interactive,
+                'Enter the {scope_type} name (Use "All" for "Global", "Shared" for "Prisma Access"): ',
+            )
             config_type = 'local'
             device_group_name = None
             try:
@@ -97,15 +173,31 @@ def main(config, run_objects=None, run_security=False, run_app_override=False, r
             except Exception as err:
                 logger.error(f"Error while loading json file {err}")
                 sys.exit(1)
-            scope_param = f"&{scope_type}={scope_value}"
         else:
-            file_path, config_type = get_file_path_and_type(config, logger)
+            file_path, config_type = get_file_path_and_type(
+                config,
+                logger,
+                parser_type=parser_type,
+                config_file=config_file,
+                fetch_panos_config=fetch_panos_config,
+                interactive=interactive,
+            )
 
             logger.info(f"File path: {file_path}, Config type: {config_type}")
 
             if config_type == 'panos':
                 parser = XMLParser(file_path, config_type)
-                scope_param, config_type, device_group_name = parser.parse_config_and_set_scope(file_path)
+                if interactive and not scope and not panos_config_type:
+                    scope_param, config_type, device_group_name = parser.parse_config_and_set_scope(file_path)
+                else:
+                    scope_param = require_scope(
+                        scope,
+                        interactive,
+                        'Enter the {scope_type} name (Use "All" for "Global"): ',
+                    )
+                    config_type = panos_config_type or infer_panos_config_type(file_path)
+                    if config_type == 'panorama/device-group' and not device_group_name:
+                        raise CliError("--device-group is required with --panos-config-type panorama/device-group")
                 scope_type, scope_value = scope_param.replace('&', '').split('=')
                 logger.info(f'Current SCM {scope_type}: {scope_value}, PANOS: {config_type}, Device Group: {device_group_name}')
                 parser.config_type = config_type
@@ -120,9 +212,11 @@ def main(config, run_objects=None, run_security=False, run_app_override=False, r
                 parser = CiscoParser(file_path)
                 parser.parse()
                 parsed_data = parser.get_parsed_data()
-                scope_type = input("Do you want to use a folder or a snippet for Cisco config? Enter 'folder' or 'snippet': ").strip().lower()
-                scope_value = input(f"What {scope_type} is Cisco config going into? Case Sensitive: ").strip()
-                scope_param = f"&{scope_type}={scope_value}"
+                scope_param = require_scope(
+                    scope,
+                    interactive,
+                    'What {scope_type} is Cisco config going into? Case Sensitive: ',
+                )
                 device_group_name = None
                 run_objects_list = run_objects.split(',') if run_objects else []
 
@@ -130,6 +224,50 @@ def main(config, run_objects=None, run_security=False, run_app_override=False, r
             logger.debug(f"Parsed data keys: {list(parsed_data.keys())}")
 
         selected_obj_types = [obj for obj in config.obj_types if obj.__name__ in run_objects_list] if run_objects else config.obj_types
+
+        if dry_run:
+            current_data = {}
+            if current_data_file:
+                try:
+                    with open(current_data_file, 'r') as file:
+                        current_data = json.load(file)
+                except Exception as err:
+                    logger.error(f"Error while loading current data json file {err}")
+                    sys.exit(1)
+
+            selected_type_names = [obj_type.__name__ for obj_type in selected_obj_types]
+            if run_all:
+                selected_type_names = list(parsed_data.keys())
+            elif run_security:
+                selected_type_names = ['security_pre_rules', 'security_post_rules']
+            elif run_app_override:
+                selected_type_names = ['app_override_pre_rules', 'app_override_post_rules']
+            elif run_decrypt_rules:
+                selected_type_names = ['decryption_pre_rules', 'decryption_post_rules']
+            elif run_nat:
+                selected_type_names = ['nat_pre_rules', 'nat_post_rules']
+            plan = build_plan(
+                parsed_data,
+                current_data=current_data,
+                object_types=selected_type_names,
+                conflict_policy=conflict_policy,
+            )
+            if plan_output:
+                try:
+                    with open(plan_output, 'w') as file:
+                        json.dump(plan.to_dict(), file, indent=2, sort_keys=True)
+                        file.write('\n')
+                except Exception as err:
+                    logger.error(f"Error while writing plan output json file {err}")
+                    sys.exit(1)
+                logger.info(f"Dry-run migration plan written to {plan_output}")
+            logger.info(f"Dry-run migration plan summary: {json.dumps(plan.summary(), sort_keys=True)}")
+            print(json.dumps(plan.summary(), indent=2, sort_keys=True))
+            return plan
+
+        from scm import PanApiHandler
+
+        api_session = PanApiHandler(initialize_api_session())
         scm_obj_manager = setup_scm_object_manager(api_session, selected_obj_types, config.sec_obj, config.nat_obj, scope_param)
 
         if run_all:
@@ -158,20 +296,22 @@ def main(config, run_objects=None, run_security=False, run_app_override=False, r
         logger.info(f"Script execution time: {end_time - start_time:.2f} seconds")
         logger.info(f"Script ended at {time.ctime(end_time)}")
 
+    except CliError as e:
+        logger.error(str(e))
+        sys.exit(1)
     except Exception as e:
         logger.error(f"An error occurred: {e}", exc_info=True)
     
     complete_time = time.time()
-    logger.info(f"Final Script execution time: {complete_time - begin_time:.2f} seconds")
+    script_begin_time = globals().get('begin_time', start_time)
+    logger.info(f"Final Script execution time: {complete_time - script_begin_time:.2f} seconds")
 
 if __name__ == "__main__":
     setup_logging()
-    logger = logging.getLogger(__name__)
     begin_time = time.time()
-    config_manager = ConfigurationManager()
-    config = config_manager.app_config
+    parser_config = AppConfig()
 
-    obj_type_names = [obj.__name__ for obj in config.obj_types]
+    obj_type_names = [obj.__name__ for obj in parser_config.obj_types]
     obj_type_help = "Specify the objects to run, separated by commas. Supported objects: " + ", ".join(obj_type_names)
     
     parser = argparse.ArgumentParser(description="Run specific objects or policies in the project")
@@ -182,6 +322,18 @@ if __name__ == "__main__":
     parser.add_argument('-n', '--nat-rules', action='store_true', help="Run NAT rules")
     parser.add_argument('-a', '--all', action='store_true', help="Run all: Object types as well as Security, App Override, Decryption and NAT policies")
     parser.add_argument('-j', '--json', action='store', default="", help="Take input from local JSON configuration")
+    parser.add_argument('--parser', choices=['panos', 'cisco'], default=None, help="Configuration parser to use")
+    parser.add_argument('--config-file', action='store', default="", help="Configuration source file for PAN-OS XML or Cisco config")
+    parser.add_argument('--scope', action='store', default="", help="SCM scope in the format folder:All, snippet:Shared, or device:name")
+    parser.add_argument('--fetch-panos-config', action='store_true', help="Retrieve running PAN-OS config before parsing")
+    parser.add_argument('--interactive', action='store_true', help="Allow legacy prompts for missing CLI values")
+    parser.add_argument('--panos-config-type', choices=['local', 'panorama/shared', 'panorama/device-group'], default="", help="PAN-OS XML scope type for non-interactive parsing")
+    parser.add_argument('--device-group', action='store', default="", help="Panorama device-group name when using panorama/device-group")
+    parser.add_argument('--dry-run', action='store_true', help="Build a local migration plan without authenticating to SCM or writing changes")
+    parser.add_argument('--conflict-policy', choices=['fail', 'replace', 'ignore'], default='fail', help="How dry-run planning handles changed existing objects")
+    parser.add_argument('--plan-output', action='store', default="", help="Write full dry-run migration plan JSON to this path")
+    parser.add_argument('--current-data', action='store', default="", help="Offline current SCM data JSON for dry-run comparison")
     args = parser.parse_args()
+    config = parser_config if args.dry_run else ConfigurationManager().app_config
     
-    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json)
+    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, conflict_policy=args.conflict_policy, plan_output=args.plan_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)

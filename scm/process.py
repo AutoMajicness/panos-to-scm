@@ -2,6 +2,9 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, List, Tuple, Dict
+from urllib.parse import urlencode
+
+from scm.scope import Scope
 
 class Processor:
     def __init__(self, api_handler, max_workers: int, obj_module, scm_object_manager):
@@ -21,11 +24,17 @@ class Processor:
 
         start_time = time.time()
         initial_entry_count = len(entries)
-        endpoint_message = obj_type.get_endpoint().replace('/sse/config/v1/', '').replace('?', '')
+        endpoint_message = obj_type.get_endpoint().strip('/').split('/')[-1]
         self.logger.info(f"Processing {initial_entry_count} {endpoint_message} entries in parallel.")
 
-        endpoint = f"{obj_type.get_endpoint()}{extra_query_params}{scope_param}"
-        results = self.create_objects(endpoint, entries)
+        scope = Scope.from_param(scope_param)
+        if obj_type.uses_payload_scope():
+            endpoint = obj_type.get_endpoint()
+            scoped_entries = [scope.apply_to_payload(entry) for entry in entries]
+        else:
+            endpoint = self._legacy_endpoint(obj_type.get_endpoint(), scope, extra_query_params)
+            scoped_entries = entries
+        results = self.create_objects(endpoint, scoped_entries)
 
         created_count, exists_count, error_count, error_objects = self.analyze_results(results)
 
@@ -42,11 +51,10 @@ class Processor:
                 try:
                     result = future.result()
                     results.append(result)
-                    if result.get('status') == 'success':
-                        if result.get('message') == 'Object processed':
-                            self.logger.info(f"Object '{result.get('name')}' created successfully.")
-                        else:
-                            self.logger.info(f"Object '{result.get('name')}' already exists.")
+                    if result.get('status') in {'success', 'created', 'updated'}:
+                        self.logger.info(f"Object '{result.get('name')}' processed successfully.")
+                    elif result.get('status') == 'exists':
+                        self.logger.info(f"Object '{result.get('name')}' already exists.")
                     else:
                         self.logger.error(f"Error creating object '{futures[future].get('name')}': {result.get('message')}")
                 except Exception as e:
@@ -54,11 +62,21 @@ class Processor:
         return results
 
     def analyze_results(self, results: List[Dict[str, Any]]) -> Tuple[int, int, int, List[str]]:
-        created_count = sum(1 for r in results if r.get('status') == 'success' and r.get('message') == 'Object processed')
-        exists_count = sum(1 for r in results if r.get('status') == 'success' and r.get('message') != 'Object processed')
-        error_count = sum(1 for r in results if r.get('status') == 'error creating object')
-        error_objects = [r.get('name') for r in results if r.get('status') == 'error creating object']
+        created_count = sum(1 for r in results if r.get('status') in {'success', 'created', 'updated'})
+        exists_count = sum(1 for r in results if r.get('status') == 'exists')
+        error_statuses = {'error', 'exception', 'failed'}
+        error_count = sum(1 for r in results if r.get('status') in error_statuses)
+        error_objects = [r.get('name') for r in results if r.get('status') in error_statuses]
         return created_count, exists_count, error_count, error_objects
+
+    @staticmethod
+    def _legacy_endpoint(endpoint: str, scope: Scope, extra_query_params: str) -> str:
+        params = {}
+        if extra_query_params:
+            params.update(dict(item.split('=', 1) for item in extra_query_params.strip('?&').split('&') if item))
+        params.update(scope.as_query_params())
+        separator = '&' if '?' in endpoint else '?'
+        return f"{endpoint}{separator}{urlencode(params)}"
 
     def log_summary(self, initial_count: int, created_count: int, exists_count: int, error_count: int, error_objects: List[str], message: str, start_time: float):
         processing_time = time.time() - start_time
@@ -125,20 +143,21 @@ class SCMObjectManager:
     def __init__(self, api_handler, scope_param, obj_module, obj_types, sec_obj, nat_obj):
         self.api_handler = api_handler
         self.scope_param = scope_param
+        self.scope = Scope.from_param(scope_param)
         self.configure = Processor(api_handler, 6, obj_module, self)
         self.obj = obj_module
         self.obj_types = obj_types
         self.sec_obj = sec_obj
         self.nat_obj = nat_obj        
         self.logger = logging.getLogger(__name__)
-        self.scope_type, self.scope_value = self.parse_scope_param(scope_param)
+        self.scope_type, self.scope_value = self.scope.scope_type, self.scope.scope_value
 
     def parse_scope_param(self, scope_param):
         scope_type, scope_value = scope_param.lstrip('&').split('=')
         return scope_type, scope_value
 
     def fetch_objects(self, obj_type, limit='10000', position=''):
-        endpoint = obj_type._endpoint
+        endpoint = obj_type.get_endpoint()
         max_limit = 5000  # Maximum limit allowed by the API - atleast for GET on address objects
         total_limit = int(limit)  # Convert the limit to an integer
         offset = 0  # Start offset for pagination
@@ -147,17 +166,15 @@ class SCMObjectManager:
         while offset < total_limit:
             # Calculate the limit for the current batch, ensuring it does not exceed max_limit
             current_limit = min(max_limit, total_limit - offset)
-            params = {
-                self.scope_type: self.scope_value,
-                'limit': current_limit,
-                'offset': offset  # Include the offset for pagination
-            }
+            params = {**self.scope.as_query_params(), 'limit': current_limit, 'offset': offset}
             if position:
                 params['position'] = position
             
             # Fetch the current batch of objects
             current_objects = self.api_handler.get(endpoint, params=params)
             self.logger.debug(f'Fetched batch with offset {offset}: {current_objects}')
+            if current_objects is None:
+                raise RuntimeError(f"Failed to fetch objects for endpoint {endpoint}")
 
             # Add the current batch to the overall list
             all_objects.extend(current_objects)
@@ -287,13 +304,8 @@ class SCMObjectManager:
                     self.logger.warning(f"Warning: Object ID not found for {entry['name']} in {entry_type_name}. Skipping update.")
                     continue
 
-                endpoint = f"{entry_class.get_endpoint().replace('?', '')}/{object_id}"
-                
-                # Parse the scope_param
-                scope_type, scope_value = scope_param.lstrip('&').split('=')
-                
-                # Construct the params dictionary for the API call
-                params = {scope_type: scope_value, 'limit': limit}
+                endpoint = f"{entry_class.get_endpoint().rstrip('?')}/{object_id}"
+                params = {**self.scope.as_query_params(), 'limit': limit}
                 
                 current_objects = self.api_handler.get(entry_class.get_endpoint(), params=params)
                 current_object = next((obj for obj in current_objects if obj['name'] == entry['name']), None)
@@ -304,8 +316,9 @@ class SCMObjectManager:
 
                 if self.normalize(entry) != self.normalize(current_object):
                     self.logger.info(f"Updating {entry_type_name}: {entry['name']} at endpoint: {endpoint}")
-                    result = self.api_handler.put(endpoint, entry)
-                    if result['status'] == 'success':
+                    payload = self.scope.apply_to_payload(entry) if entry_class.uses_payload_scope() else entry
+                    result = self.api_handler.put(endpoint, payload)
+                    if result['status'] in {'success', 'updated'}:
                         self.logger.info(f"Updated {entry_type_name}: {entry['name']} with values: {entry}")
                     else:
                         self.logger.error(f"Failed to update {entry_type_name}: {entry['name']}, Reason: {result['message']}")

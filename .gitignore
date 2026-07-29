@@ -166,6 +166,7 @@ cython_debug/
 #debug log files
 debug-log.txt
 debug-log.txt.*
+backups/
 
 #palo alto running_config.xml
 running_config.xml

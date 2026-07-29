@@ -1,122 +1,145 @@
+import requests
+import logging
+import time
 import yaml
 import os
-import jwt
-import threading
-import logging
-import datetime
-from jwt import PyJWKClient
-from jwt.exceptions import ExpiredSignatureError
-from oauthlib.oauth2 import BackendApplicationClient
 from requests_oauthlib import OAuth2Session
 
-
-class PanApiSession(OAuth2Session):
-    """PanApi extension to :class:`requests_oauthlib.OAuth2Session`.
-
-    Methods
-    -------
-    authenticate(self, **kwargs)
-        Create the OAuth2 session and request an access token
-
-    validate(self)
-        Validate the OAuth2 session's access token
-
-    refresh(self)
-        Request a new OAuth2 access token for the session
-
-    decode_token(self)
-        Validate the JWT token contents and signature
-
-    Properties
-    ----------
-    is_expired
-        Has the the access token expired?
+class PanApiSession:
     """
+    Manages a session with the SASE API, including authentication.
+    """
+    def __init__(self):
+        self.session = self._create_session()
+        self.token = None
+        self.token_expiry_time = None
+        self.config = self._load_config()
+        self.oauth_session = None
 
-    _configfile = "~/.panapi/config.yml"
+    def _create_session(self):
+        session = requests.Session()
+        # Configure session as needed (e.g., retries, adapters)
+        return session
 
-    def authenticate(self, token_url = 'https://auth.apps.paloaltonetworks.com/oauth2/access_token', **kwargs):
-        self.token_url = 'https://auth.apps.paloaltonetworks.com/oauth2/access_token'
-        # Process the configfile or kwargs
-        keys = ("client_id", "client_secret", "tsg_id")
-        if set(keys).issubset(kwargs):
-            self.client_id = kwargs.get("client_id")
-            self.client_secret = kwargs.get("client_secret")
-            self.tsg_id = kwargs.get("tsg_id")
-        else:
-            if "configfile" in kwargs:
-                self._configfile = kwargs.get("configfile")
-            f = os.path.abspath(
-                os.path.expanduser(os.path.expandvars(self._configfile))
+    def _load_config(self):
+        config_file_path = os.path.expanduser('~/.panapi/config.yml')
+        try:
+            with open(config_file_path, 'r') as config_file:
+                config = yaml.safe_load(config_file)
+                return {
+                    'api_url': 'https://api.strata.paloaltonetworks.com',
+                    'client_id': config.get('client_id'),
+                    'client_secret': config.get('client_secret'),
+                    'tsg_id': config.get('tsg_id'),
+                    'auth_url': 'https://auth.apps.paloaltonetworks.com/oauth2/access_token'
+                }
+        except Exception as e:
+            logging.error(f"Error loading config: {e}")
+            return {
+                'api_url': 'https://api.strata.paloaltonetworks.com',
+                'auth_url': 'https://auth.apps.paloaltonetworks.com/oauth2/access_token'
+            }
+
+    def authenticate(self):
+        if not self.token or self.is_token_expired():
+            self.token = self.get_access_token()
+            if self.token:
+                self.session.headers.update({'Authorization': f'Bearer {self.token}'})
+
+    def is_token_expired(self):
+        if not self.token_expiry_time:
+            return True
+        return time.time() >= self.token_expiry_time
+
+    def get_access_token(self):
+        """Get OAuth2 access token using client credentials flow."""
+        try:
+            if not self.config.get('client_id') or not self.config.get('client_secret'):
+                logging.error("Client ID or Client Secret not configured")
+                return None
+
+            # Prepare the OAuth2 client credentials request
+            auth = (self.config['client_id'], self.config['client_secret'])
+            headers = {
+                'Accept': 'application/json',
+                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'
+            }
+            
+            scope = f"email profile tsg_id:{self.config.get('tsg_id', '')}"
+            data = {
+                'grant_type': 'client_credentials',
+                'scope': scope
+            }
+
+            response = requests.post(
+                self.config['auth_url'],
+                headers=headers,
+                data=data,
+                auth=auth,
+                timeout=30
             )
-            with open(f, "r", encoding="utf-8-sig") as c:
-                config = yaml.safe_load(c.read())
-            self.client_id = config["client_id"]
-            self.client_secret = config["client_secret"]
-            self.tsg_id = config["tsg_id"]
-        # Fix the scope to include email and profile
-        self.scope = "email profile tsg_id:" + str(self.tsg_id)
-        # Request the access token and retrieve the issuer's signing key
-        oauth2_client = BackendApplicationClient(
-            client_id=self.client_id, scope=self.scope
-        )
-        self._client = oauth2_client
-        self.fetch_token(
-            token_url=self.token_url,
-            client_id=self.client_id,
-            client_secret=self.client_secret,
-        )
-        # Retrieve the signing key for token validation
-        jwks_uri = (
-            "/".join(self.token_url.split("/")[:-1]) + "/connect/jwk_uri"
-        )
-        jwks_client = PyJWKClient(jwks_uri)
-        self.signing_key = jwks_client.get_signing_key_from_jwt(
-            self.access_token
-        )
-        expiry = datetime.datetime.utcnow() + datetime.timedelta(seconds=self.token['expires_in'])
-        logging.debug(f"Token: {self.token['access_token']}")
-        logging.info(f"Token will expire at {expiry}")
-        
-        # Calculate and store the expiry time
-        self.token_expiry = datetime.datetime.utcnow() + datetime.timedelta(seconds=self.token['expires_in'])
-        logging.info(f"Token will expire at {self.token_expiry}")            
 
-    def reauthenticate(self):
-        logging.info("Reauthenticating session...")
-        self.fetch_token(
-            token_url=self.token_url,
-            client_id=self.client_id,
-            client_secret=self.client_secret,
-        )
-        # Update the token expiry time after reauthentication
-        self.token_expiry = datetime.datetime.utcnow() + datetime.timedelta(seconds=self.token['expires_in'])
-        logging.info(f"New token will expire at {self.token_expiry}")
+            if response.status_code == 200:
+                token_data = response.json()
+                self.token_expiry_time = time.time() + token_data.get('expires_in', 900) - 60  # 60 second buffer
+                logging.info(f"Token will expire at {time.ctime(self.token_expiry_time)}")
+                return token_data.get('access_token')
+            else:
+                logging.error(f"Failed to get access token: {response.status_code} - {response.text}")
+                return None
 
-    def decode_token(self):
-        payload = jwt.decode(
-            self.access_token,
-            self.signing_key.key,
-            algorithms=["RS256"],
-            audience=self.client_id,
-            options={"verify_exp": False, "verify_iat": False},
-        )
-        return payload
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._lock = threading.Lock()
+        except Exception as e:
+            logging.error(f"Error getting access token: {e}")
+            return None
 
     def ensure_valid_token(self):
-        with self._lock:
-            if self.is_expired:
-                self.reauthenticate()
-    
-    @property
-    def is_expired(self):
-        # Check if current time is within 60 seconds of the token expiry time
-        buffer_time = datetime.timedelta(seconds=60)
-        if datetime.datetime.utcnow() >= (self.token_expiry - buffer_time):
-            logging.info("Token is about to expire or has expired")
-            return True
-        return False
+        """Ensure the session token is valid."""
+        self.authenticate()
+
+    def get(self, endpoint, params=None, timeout=20):
+        self.authenticate()
+        # Check if endpoint is already a full URL
+        if isinstance(endpoint, str) and endpoint.startswith('http'):
+            url = endpoint
+        else:
+            # Ensure we don't leave a trailing '?' on the endpoint which can lead to malformed URLs
+            endpoint = endpoint.rstrip('?')
+            url = f"{self.config['api_url']}{endpoint}"
+        try:
+            response = self.session.get(url, params=params, timeout=timeout)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error during API request to {url}: {e}")
+            return None
+
+    def post(self, endpoint, data=None, headers=None, timeout=20, json=None):
+        self.authenticate()
+
+        # Check if endpoint is already a full URL
+        if endpoint.startswith('http'):
+            url = endpoint
+        else:
+            endpoint = endpoint.rstrip('?')
+            url = f"{self.config['api_url']}{endpoint}"
+
+        # Use json parameter if provided, otherwise use data
+        request_data = json if json is not None else data
+
+        try:
+            if json is not None:
+                response = self.session.post(url, json=json, headers=headers, timeout=timeout)
+            else:
+                response = self.session.post(url, json=data, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error during POST to {url}: {e}")
+            return None
+        try:
+            response = self.session.post(url, json=data, headers=headers, timeout=20)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error during POST to {url}: {e}")
+            return None
