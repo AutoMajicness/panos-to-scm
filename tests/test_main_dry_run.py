@@ -920,6 +920,55 @@ class MainDryRunTests(unittest.TestCase):
 
         self.assertEqual(plan.summary()["creates"], 1)
 
+    def test_object_post_requires_explicit_post_objects_flag(self):
+        parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_objects="Address",
+                        json_file=str(parsed_path),
+                        object_scope="folder:All",
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_object_post_guard_allows_clean_object_plan(self):
+        class TokenSession:
+            def ensure_valid_token(self):
+                pass
+
+        parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch.object(main, "initialize_api_session", return_value=TokenSession()),
+                patch.object(main, "process_obj_types") as process_mock,
+            ):
+                main.main(
+                    AppConfig(),
+                    run_objects="Address",
+                    json_file=str(parsed_path),
+                    object_scope="folder:All",
+                    post_objects=True,
+                )
+
+        self.assertEqual(process_mock.call_count, 2)
+        self.assertEqual(
+            [obj_type.__name__ for obj_type in process_mock.call_args_list[0].args[1]],
+            ["Address"],
+        )
+
     def test_network_dry_run_requires_network_or_default_scope(self):
         parsed_data = {"Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}]}
 
@@ -1010,6 +1059,51 @@ class MainDryRunTests(unittest.TestCase):
             [obj_type.__name__ for obj_type in process_mock.call_args_list[1].args[1]],
             ["EthernetInterface", "Zones"],
         )
+
+    def test_policy_post_requires_explicit_post_policy_flag(self):
+        parsed_data = {
+            "security_pre_rules": [{"name": "allow-any", "from": ["any"], "to": ["any"], "source": ["any"], "destination": ["any"], "service": ["any"]}],
+            "security_post_rules": [],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_security=True,
+                        json_file=str(parsed_path),
+                        policy_scope="folder:All",
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_policy_post_guard_exits_on_validation_blockers(self):
+        parsed_data = {
+            "security_pre_rules": [{"name": "allow-web", "from": ["missing-zone"], "to": ["any"], "source": ["any"], "destination": ["any"], "service": ["any"]}],
+            "security_post_rules": [],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_security=True,
+                        json_file=str(parsed_path),
+                        policy_scope="folder:All",
+                        post_policy=True,
+                        warnings_as_errors=True,
+                        warning_codes="missing-policy-reference",
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
 
     def test_cisco_parser_can_be_selected_without_detection_prompt(self):
         cisco_config = "\n".join(

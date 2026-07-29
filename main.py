@@ -296,6 +296,54 @@ def validation_summary(plan, warnings_as_errors=False, warning_codes=None):
     summary["blockers"] = validation_blocker_count(plan, warnings_as_errors, warning_codes)
     return summary
 
+
+def selected_policy_type_names(
+    run_all=False,
+    run_security=False,
+    run_app_override=False,
+    run_decrypt_rules=False,
+    run_nat=False,
+):
+    selected = []
+    if run_all or run_security:
+        selected.extend(['security_pre_rules', 'security_post_rules'])
+    if run_all or run_app_override:
+        selected.extend(['app_override_pre_rules', 'app_override_post_rules'])
+    if run_all or run_decrypt_rules:
+        selected.extend(['decryption_pre_rules', 'decryption_post_rules'])
+    if run_all or run_nat:
+        selected.extend(['nat_pre_rules', 'nat_post_rules'])
+    return selected
+
+
+def validate_post_plan(
+    parsed_data,
+    current_data,
+    object_type_names,
+    conflict_policy,
+    warnings_as_errors,
+    warning_codes,
+    label,
+):
+    if not object_type_names:
+        return None
+    plan = build_plan(
+        parsed_data,
+        current_data=current_data,
+        object_types=object_type_names,
+        conflict_policy=conflict_policy,
+    )
+    summary = validation_summary(
+        plan,
+        warnings_as_errors=warnings_as_errors,
+        warning_codes=warning_codes,
+    )
+    logger.info(f"{label} validation summary: {json.dumps(summary, sort_keys=True)}")
+    if summary["blockers"]:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        sys.exit(1)
+    return plan
+
 def main(
     config,
     run_objects=None,
@@ -309,6 +357,8 @@ def main(
     validate_only=False,
     snapshot_current_data=False,
     snapshot_output="",
+    post_objects=False,
+    post_policy=False,
     post_network=False,
     warnings_as_errors=False,
     warning_codes="",
@@ -540,30 +590,73 @@ def main(
             print(json.dumps(plan.summary(), indent=2, sort_keys=True))
             return plan
 
+        current_data = None
+        warning_code_filter = None
+
+        if selected_regular_obj_types:
+            if not post_objects:
+                raise CliError(
+                    "Object/profile posting requires --post-objects. Run --validate-only first, "
+                    "or add --post-objects to acknowledge live SCM object changes."
+                )
+            current_data = load_current_data(current_data_file)
+            warning_code_filter = parse_warning_codes(warning_codes)
+            validate_post_plan(
+                parsed_data,
+                current_data,
+                [obj_type.__name__ for obj_type in selected_regular_obj_types],
+                conflict_policy,
+                warnings_as_errors,
+                warning_code_filter,
+                "Object post",
+            )
+
+        if needs_policy_scope:
+            if not post_policy:
+                raise CliError(
+                    "Policy/NAT posting requires --post-policy. Run --validate-only first, "
+                    "or add --post-policy to acknowledge live SCM policy changes."
+                )
+            if current_data is None:
+                current_data = load_current_data(current_data_file)
+            if warning_code_filter is None:
+                warning_code_filter = parse_warning_codes(warning_codes)
+            validate_post_plan(
+                parsed_data,
+                current_data,
+                selected_policy_type_names(
+                    run_all=run_all,
+                    run_security=run_security,
+                    run_app_override=run_app_override,
+                    run_decrypt_rules=run_decrypt_rules,
+                    run_nat=run_nat,
+                ),
+                conflict_policy,
+                warnings_as_errors,
+                warning_code_filter,
+                "Policy post",
+            )
+
         if selected_network_obj_types:
             if not post_network:
                 raise CliError(
                     "Network object posting requires --post-network. Run --validate-only first, "
                     "or add --post-network to acknowledge live SCM network changes."
                 )
-            current_data = load_current_data(current_data_file)
-            warning_code_filter = parse_warning_codes(warning_codes)
+            if current_data is None:
+                current_data = load_current_data(current_data_file)
+            if warning_code_filter is None:
+                warning_code_filter = parse_warning_codes(warning_codes)
             network_type_names = [obj_type.__name__ for obj_type in selected_network_obj_types]
-            network_plan = build_plan(
+            validate_post_plan(
                 parsed_data,
-                current_data=current_data,
-                object_types=network_type_names,
-                conflict_policy=conflict_policy,
+                current_data,
+                network_type_names,
+                conflict_policy,
+                warnings_as_errors,
+                warning_code_filter,
+                "Network post",
             )
-            summary = validation_summary(
-                network_plan,
-                warnings_as_errors=warnings_as_errors,
-                warning_codes=warning_code_filter,
-            )
-            logger.info(f"Network post validation summary: {json.dumps(summary, sort_keys=True)}")
-            if summary["blockers"]:
-                print(json.dumps(summary, indent=2, sort_keys=True))
-                sys.exit(1)
 
         from scm import PanApiHandler
 
@@ -643,6 +736,8 @@ if __name__ == "__main__":
     parser.add_argument('--validate-only', action='store_true', help="Run parser/planner validation without SCM authentication or scope prompts; exits 1 on conflicts or unsupported entries")
     parser.add_argument('--snapshot-current-data', action='store_true', help="Fetch current SCM objects into --current-data compatible JSON and exit")
     parser.add_argument('--snapshot-output', action='store', default="", help="Write --snapshot-current-data JSON to this path")
+    parser.add_argument('--post-objects', action='store_true', help="Allow live object/profile posting after validation blockers are checked")
+    parser.add_argument('--post-policy', action='store_true', help="Allow live policy/NAT posting after validation blockers are checked")
     parser.add_argument('--post-network', action='store_true', help="Allow live network object posting after validation blockers are checked")
     parser.add_argument('--warnings-as-errors', action='store_true', help="In validate-only mode, promote warnings to blockers and exit 1 when matching warnings exist")
     parser.add_argument('--warning-codes', action='store', default="", help="Comma-separated warning codes to promote with --warnings-as-errors. Defaults to all warnings")
@@ -654,4 +749,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config = parser_config if args.dry_run or args.validate_only or args.network_report else ConfigurationManager().app_config
     
-    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, validate_only=args.validate_only, snapshot_current_data=args.snapshot_current_data, snapshot_output=args.snapshot_output, post_network=args.post_network, warnings_as_errors=args.warnings_as_errors, warning_codes=args.warning_codes, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)
+    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, validate_only=args.validate_only, snapshot_current_data=args.snapshot_current_data, snapshot_output=args.snapshot_output, post_objects=args.post_objects, post_policy=args.post_policy, post_network=args.post_network, warnings_as_errors=args.warnings_as_errors, warning_codes=args.warning_codes, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)

@@ -527,6 +527,8 @@ def _missing_reference_warnings_for_values(
     for index, value in enumerate(values):
         if not isinstance(value, str) or not value:
             continue
+        if _is_builtin_reference(value):
+            continue
         if any(value in available_names.get(target_type, set()) for target_type in target_types):
             continue
 
@@ -541,7 +543,7 @@ def _missing_reference_warnings_for_values(
                 object_type=object_type,
                 name=name,
                 path=value_path,
-                code="missing-network-reference",
+                code=_reference_warning_code(object_type),
                 message=(
                     f"Reference '{value}' was not found in generated payloads or current SCM data "
                     f"for {target_label}; include that object type in the migration or verify it "
@@ -550,6 +552,12 @@ def _missing_reference_warnings_for_values(
             )
         )
     return warnings
+
+
+def _reference_warning_code(object_type: str) -> str:
+    if object_type in _POLICY_REFERENCE_OBJECT_TYPES:
+        return "missing-policy-reference"
+    return "missing-network-reference"
 
 
 def _names_by_type(
@@ -580,7 +588,7 @@ def _merge_names_by_type(*name_maps: dict[str, set[str]]) -> dict[str, set[str]]
 
 
 def _network_reference_targets(object_type: str, path: str, key: str) -> tuple[str, ...]:
-    if object_type not in _NETWORK_REFERENCE_OBJECT_TYPES:
+    if object_type not in _REFERENCE_OBJECT_TYPES:
         return ()
 
     if key == "address_family_profile":
@@ -639,7 +647,44 @@ def _network_reference_targets(object_type: str, path: str, key: str) -> tuple[s
         if key in {"egress_interface", "symmetric_return_interface"}:
             return _INTERFACE_REFERENCE_TYPES
 
+    if object_type in _POLICY_REFERENCE_OBJECT_TYPES:
+        if key in {"from", "to"}:
+            return ("Zones",)
+        if key in {"source", "destination", "translated_address"} and not _is_nat_type_path(path):
+            return ("Address", "AddressGroup")
+        if key == "service":
+            return ("Service", "ServiceGroup")
+        if key == "group" and path.endswith("profile_setting.group"):
+            return ("ProfileGroup",)
+        if key == "profile" and object_type in {"decryption_pre_rules", "decryption_post_rules"}:
+            return ("DecryptionProfile",)
+        if key == "translated_address" and _is_nat_type_path(path):
+            return ("Address", "AddressGroup")
+
     return ()
+
+
+def _is_nat_type_path(path: str) -> bool:
+    return "translation" in path
+
+
+def _is_builtin_reference(value: str) -> bool:
+    lowered = value.lower()
+    if lowered in _BUILTIN_REFERENCE_VALUES:
+        return True
+    if _looks_like_ip_or_cidr(value):
+        return True
+    return False
+
+
+def _looks_like_ip_or_cidr(value: str) -> bool:
+    try:
+        import ipaddress
+
+        ipaddress.ip_network(value, strict=False)
+        return True
+    except ValueError:
+        return False
 
 
 _NETWORK_REFERENCE_OBJECT_TYPES = {
@@ -654,6 +699,19 @@ _NETWORK_REFERENCE_OBJECT_TYPES = {
     "Zones",
 }
 
+_POLICY_REFERENCE_OBJECT_TYPES = {
+    "security_pre_rules",
+    "security_post_rules",
+    "app_override_pre_rules",
+    "app_override_post_rules",
+    "decryption_pre_rules",
+    "decryption_post_rules",
+    "nat_pre_rules",
+    "nat_post_rules",
+}
+
+_REFERENCE_OBJECT_TYPES = _NETWORK_REFERENCE_OBJECT_TYPES | _POLICY_REFERENCE_OBJECT_TYPES
+
 _INTERFACE_REFERENCE_TYPES = (
     "AggregateInterface",
     "EthernetInterface",
@@ -663,6 +721,13 @@ _INTERFACE_REFERENCE_TYPES = (
     "TunnelInterface",
     "LoopbackInterface",
 )
+
+_BUILTIN_REFERENCE_VALUES = {
+    "any",
+    "application-default",
+    "default",
+    "none",
+}
 
 
 def _walk_payload(value: Any, path: str = ""):

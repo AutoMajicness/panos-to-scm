@@ -458,6 +458,94 @@ class BuildPlanTests(unittest.TestCase):
             {warning.code for warning in plan.warnings},
         )
 
+    def test_build_plan_warns_for_missing_policy_references(self):
+        parsed_data = {
+            "security_pre_rules": [
+                {
+                    "name": "allow-web",
+                    "from": ["trust"],
+                    "to": ["untrust"],
+                    "source": ["users-net"],
+                    "destination": ["web-dst"],
+                    "service": ["tcp-443"],
+                    "profile_setting": {"group": ["strict-profiles"]},
+                }
+            ],
+            "decryption_pre_rules": [
+                {
+                    "name": "decrypt-web",
+                    "from": ["trust"],
+                    "to": ["untrust"],
+                    "source": ["10.0.0.0/24"],
+                    "destination": ["any"],
+                    "service": ["application-default"],
+                    "profile": "forward-proxy-profile",
+                }
+            ],
+            "nat_pre_rules": [
+                {
+                    "name": "dnat-web",
+                    "from": ["untrust"],
+                    "to": ["untrust"],
+                    "source": ["any"],
+                    "destination": ["203.0.113.10"],
+                    "service": "tcp-443",
+                    "destination_translation": {"translated_address": "inside-web"},
+                }
+            ],
+        }
+
+        plan = build_plan(
+            parsed_data,
+            object_types=["security_pre_rules", "decryption_pre_rules", "nat_pre_rules"],
+        )
+        missing = [warning for warning in plan.warnings if warning.code == "missing-policy-reference"]
+
+        self.assertEqual(
+            {
+                warning.message.split("'")[1]
+                for warning in missing
+            },
+            {
+                "trust",
+                "untrust",
+                "users-net",
+                "web-dst",
+                "tcp-443",
+                "strict-profiles",
+                "forward-proxy-profile",
+                "inside-web",
+            },
+        )
+
+    def test_build_plan_uses_current_data_for_policy_reference_validation(self):
+        parsed_data = {
+            "security_pre_rules": [
+                {
+                    "name": "allow-web",
+                    "from": ["trust"],
+                    "to": ["untrust"],
+                    "source": ["users-net"],
+                    "destination": ["web-dst"],
+                    "service": ["tcp-443"],
+                    "profile_setting": {"group": ["strict-profiles"]},
+                }
+            ]
+        }
+        current_data = {
+            "Zones": [{"name": "trust"}, {"name": "untrust"}],
+            "Address": [{"name": "users-net"}, {"name": "web-dst"}],
+            "Service": [{"name": "tcp-443"}],
+            "ProfileGroup": [{"name": "strict-profiles"}],
+        }
+
+        plan = build_plan(parsed_data, current_data=current_data, object_types=["security_pre_rules"])
+
+        self.assertNotIn(
+            "missing-policy-reference",
+            {warning.code for warning in plan.warnings},
+        )
+
     def test_build_plan_warns_when_reference_target_is_parsed_but_not_selected(self):
         parsed_data = {
             "BgpFilteringProfile": [
