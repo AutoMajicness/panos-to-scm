@@ -33,6 +33,16 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                       <keep-alive-interval>30</keep-alive-interval>
                       <hold-time>90</hold-time>
                     </timers>
+                    <address-family>
+                      <ipv4>
+                        <send-community>
+                          <both />
+                        </send-community>
+                        <route-reflector-client>yes</route-reflector-client>
+                        <default-originate>yes</default-originate>
+                        <default-originate-map>default-export-export-default-rm</default-originate-map>
+                      </ipv4>
+                    </address-family>
                     <peer>
                       <entry name="peer-a">
                         <enable>yes</enable>
@@ -59,6 +69,24 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                           <outgoing-bgp-connection>yes</outgoing-bgp-connection>
                           <local-port>179</local-port>
                         </connection-options>
+                        <address-family>
+                          <ipv6>
+                            <next-hop>
+                              <self />
+                            </next-hop>
+                            <remove-private-AS>
+                              <replace-AS />
+                            </remove-private-AS>
+                            <maximum-prefix>
+                              <num-prefixes>1000</num-prefixes>
+                              <threshold>80</threshold>
+                              <warning-only />
+                            </maximum-prefix>
+                            <allowas-in>
+                              <occurrence>2</occurrence>
+                            </allowas-in>
+                          </ipv6>
+                        </address-family>
                       </entry>
                     </peer>
                   </entry>
@@ -377,6 +405,13 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                             "keep_alive_interval": 30,
                                             "hold_time": 90,
                                         },
+                                        "address_family": {
+                                            "ipv4": {
+                                                "unicast": {
+                                                    "address_family_profile": "default-upstream-ipv4-af",
+                                                }
+                                            }
+                                        },
                                         "peer": [
                                             {
                                                 "name": "peer-a",
@@ -409,6 +444,7 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                                     },
                                                     "ipv6": {
                                                         "unicast": {
+                                                            "address_family_profile": "default-upstream-peer-a-ipv6-af",
                                                             "import_route_map": "default-import-import-v6-rm",
                                                             "export_route_map": "default-export-export-v6-rm",
                                                         }
@@ -592,6 +628,7 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                 [
                     "OSPFAuthProfile",
                     "BgpAuthProfile",
+                    "BgpAddressFamilyProfile",
                     "RoutePrefixList",
                     "RouteAccessList",
                     "RouteCommunityList",
@@ -627,6 +664,37 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                     "name": "bgp-md5",
                     "secret": "bgp-secret",
                 }
+            ],
+        )
+        self.assertEqual(
+            parsed["BgpAddressFamilyProfile"],
+            [
+                {
+                    "name": "default-upstream-ipv4-af",
+                    "ipv4": {
+                        "unicast": {
+                            "route_reflector_client": True,
+                            "default_originate": True,
+                            "default_originate_map": "default-export-export-default-rm",
+                            "send_community": {"both": {}},
+                        }
+                    },
+                },
+                {
+                    "name": "default-upstream-peer-a-ipv6-af",
+                    "ipv6": {
+                        "unicast": {
+                            "allowas_in": {"occurrence": 2},
+                            "maximum_prefix": {
+                                "num_prefixes": 1000,
+                                "threshold": 80,
+                                "action": {"warning_only": {}},
+                            },
+                            "next_hop": {"self": {}},
+                            "remove_private_AS": {"replace_AS": {}},
+                        }
+                    },
+                },
             ],
         )
         self.assertEqual(

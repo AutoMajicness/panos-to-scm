@@ -121,6 +121,7 @@ class XMLParser:
             'LoopbackInterface': self._parse_entries(self._loopback_interface_entries),
             'OSPFAuthProfile': self._parse_entries(self._ospf_auth_profile_entries),
             'BgpAuthProfile': self._parse_entries(self._bgp_auth_profile_entries),
+            'BgpAddressFamilyProfile': self._parse_entries(self._bgp_address_family_profile_entries),
             'LogicalRouter': self._parse_entries(self._logical_router_entries),
             'RoutePrefixList': self._parse_entries(self._route_prefix_list_entries),
             'RouteAccessList': self._parse_entries(self._route_access_list_entries),
@@ -181,6 +182,7 @@ class XMLParser:
             'LoopbackInterface': self._loopback_interface_entries,
             'OSPFAuthProfile': self._ospf_auth_profile_entries,
             'BgpAuthProfile': self._bgp_auth_profile_entries,
+            'BgpAddressFamilyProfile': self._bgp_address_family_profile_entries,
             'LogicalRouter': self._logical_router_entries,
             'RoutePrefixList': self._route_prefix_list_entries,
             'RouteAccessList': self._route_access_list_entries,
@@ -3157,6 +3159,240 @@ class XMLParser:
 
         return {'name': profile_name, 'secret': secret}
 
+    def _bgp_address_family_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("BGP address family profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            router_name = router_entry.get('name')
+            bgp = router_entry.find('protocol/bgp')
+            if not router_name or bgp is None:
+                continue
+
+            for group_entry in bgp.findall('peer-group/entry'):
+                group_name = group_entry.get('name')
+                if not group_name:
+                    continue
+                for family, af_entry in self._bgp_address_family_entries(group_entry):
+                    profile = self._convert_bgp_address_family_profile(
+                        self._bgp_address_family_profile_name(router_name, group_name, None, family),
+                        family,
+                        af_entry,
+                    )
+                    if profile and profile['name'] not in seen_names:
+                        seen_names.add(profile['name'])
+                        profiles.append(profile)
+
+                for peer_entry in group_entry.findall('peer/entry'):
+                    peer_name = peer_entry.get('name')
+                    if not peer_name:
+                        continue
+                    for family, af_entry in self._bgp_address_family_entries(peer_entry):
+                        profile = self._convert_bgp_address_family_profile(
+                            self._bgp_address_family_profile_name(router_name, group_name, peer_name, family),
+                            family,
+                            af_entry,
+                        )
+                        if profile and profile['name'] not in seen_names:
+                            seen_names.add(profile['name'])
+                            profiles.append(profile)
+
+        return profiles
+
+    def _bgp_address_family_entries(self, entry):
+        entries = []
+        for family, paths in {
+            'ipv4': [
+                'address-family/ipv4',
+                'address-family/ipv4-unicast',
+                'address-family/ipv4/unicast',
+                'afi-safi/ipv4-unicast',
+            ],
+            'ipv6': [
+                'address-family/ipv6',
+                'address-family/ipv6-unicast',
+                'address-family/ipv6/unicast',
+                'afi-safi/ipv6-unicast',
+            ],
+        }.items():
+            for path in paths:
+                af_entry = entry.find(path)
+                if af_entry is not None:
+                    entries.append((family, af_entry))
+                    break
+        return entries
+
+    def _convert_bgp_address_family_profile(self, profile_name, family, af_entry):
+        unicast = self._convert_bgp_address_family_unicast(af_entry)
+        if not unicast:
+            return None
+        return {'name': profile_name, family: {'unicast': unicast}}
+
+    def _convert_bgp_address_family_unicast(self, af_entry):
+        payload = {}
+        for panos_name, scm_name in [
+            ('enable', 'enable'),
+            ('soft-reconfig-with-stored-info', 'soft_reconfig_with_stored_info'),
+            ('soft-reconfiguration-with-stored-info', 'soft_reconfig_with_stored_info'),
+            ('as-override', 'as_override'),
+            ('route-reflector-client', 'route_reflector_client'),
+            ('default-originate', 'default_originate'),
+        ]:
+            value = self._child_text(af_entry, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes' if value.lower() in {'yes', 'no'} else value
+
+        default_originate_map = self._child_text(af_entry, 'default-originate-map')
+        if default_originate_map:
+            payload['default_originate_map'] = default_originate_map
+
+        add_path = self._convert_bgp_add_path(af_entry.find('add-path'))
+        if add_path:
+            payload['add_path'] = add_path
+
+        allowas_in = self._convert_bgp_allowas_in(af_entry.find('allowas-in'))
+        if allowas_in:
+            payload['allowas_in'] = allowas_in
+
+        maximum_prefix_entry = af_entry.find('maximum-prefix')
+        if maximum_prefix_entry is None:
+            maximum_prefix_entry = af_entry.find('max-prefix')
+        maximum_prefix = self._convert_bgp_maximum_prefix(maximum_prefix_entry)
+        if maximum_prefix:
+            payload['maximum_prefix'] = maximum_prefix
+
+        next_hop = self._convert_bgp_next_hop_option(af_entry.find('next-hop'))
+        if next_hop:
+            payload['next_hop'] = next_hop
+
+        remove_private_as_entry = af_entry.find('remove-private-AS')
+        if remove_private_as_entry is None:
+            remove_private_as_entry = af_entry.find('remove-private-as')
+        remove_private_as = self._convert_bgp_remove_private_as(remove_private_as_entry)
+        if remove_private_as:
+            payload['remove_private_AS'] = remove_private_as
+
+        send_community = self._convert_bgp_send_community(af_entry.find('send-community'))
+        if send_community:
+            payload['send_community'] = send_community
+
+        orf = self._convert_bgp_orf(af_entry.find('orf'))
+        if orf:
+            payload['orf'] = orf
+
+        return payload
+
+    def _convert_bgp_add_path(self, add_path):
+        if add_path is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('tx-all-paths', 'tx_all_paths'),
+            ('tx-bestpath-per-AS', 'tx_bestpath_per_AS'),
+            ('tx-bestpath-per-as', 'tx_bestpath_per_AS'),
+        ]:
+            value = self._child_text(add_path, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes' if value.lower() in {'yes', 'no'} else value
+        return payload or None
+
+    def _convert_bgp_allowas_in(self, allowas_in):
+        if allowas_in is None:
+            return None
+
+        occurrence = self._child_text(allowas_in, 'occurrence')
+        if occurrence and occurrence.isdigit():
+            return {'occurrence': int(occurrence)}
+        if allowas_in.find('origin') is not None:
+            return {'origin': {}}
+        value = self._first_text_or_member(allowas_in)
+        if value and value.isdigit():
+            return {'occurrence': int(value)}
+        if value == 'origin':
+            return {'origin': {}}
+        return None
+
+    def _convert_bgp_maximum_prefix(self, maximum_prefix):
+        if maximum_prefix is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('num-prefixes', 'num_prefixes'),
+            ('number', 'num_prefixes'),
+            ('prefix-limit', 'num_prefixes'),
+            ('threshold', 'threshold'),
+        ]:
+            value = self._child_text(maximum_prefix, panos_name)
+            if value and value.isdigit():
+                payload[scm_name] = int(value)
+
+        action = self._child_text(maximum_prefix, 'action')
+        if action:
+            payload['action'] = {action.replace('-', '_'): {}}
+        elif maximum_prefix.find('warning-only') is not None:
+            payload['action'] = {'warning_only': {}}
+        elif maximum_prefix.find('restart') is not None:
+            payload['action'] = {'restart': {}}
+
+        return payload or None
+
+    def _convert_bgp_next_hop_option(self, next_hop):
+        if next_hop is None:
+            return None
+        if next_hop.find('self-force') is not None:
+            return {'self_force': {}}
+        if next_hop.find('self') is not None:
+            return {'self': {}}
+        value = self._first_text_or_member(next_hop)
+        if value in {'self', 'self-force', 'self_force'}:
+            return {value.replace('-', '_'): {}}
+        return None
+
+    def _convert_bgp_remove_private_as(self, remove_private_as):
+        if remove_private_as is None:
+            return None
+        if remove_private_as.find('replace-AS') is not None or remove_private_as.find('replace-as') is not None:
+            return {'replace_AS': {}}
+        if remove_private_as.find('all') is not None:
+            return {'all': {}}
+        value = self._first_text_or_member(remove_private_as)
+        if value in {'all', 'replace-AS', 'replace-as'}:
+            return {value.replace('-', '_').replace('_as', '_AS'): {}}
+        return None
+
+    def _convert_bgp_send_community(self, send_community):
+        if send_community is None:
+            return None
+        for option in ['all', 'both', 'extended', 'large', 'standard']:
+            if send_community.find(option) is not None:
+                return {option: {}}
+        value = self._first_text_or_member(send_community)
+        if value in {'all', 'both', 'extended', 'large', 'standard'}:
+            return {value: {}}
+        return None
+
+    def _convert_bgp_orf(self, orf):
+        if orf is None:
+            return None
+
+        orf_prefix_list = self._child_text(orf, 'orf-prefix-list') or self._child_text(orf, 'prefix-list')
+        if orf_prefix_list:
+            return {'orf_prefix_list': orf_prefix_list}
+        value = self._first_text_or_member(orf)
+        if value in {'none', 'both', 'receive', 'send'}:
+            return {'orf_prefix_list': value}
+        return None
+
+    def _bgp_address_family_profile_name(self, router_name, group_name, peer_name, family):
+        if peer_name:
+            return self._sanitize_name(f"{router_name}-{group_name}-{peer_name}-{family}-af")
+        return self._sanitize_name(f"{router_name}-{group_name}-{family}-af")
+
     def _route_prefix_list_entries(self):
         if self.config_type != 'local':
             self.logger.warning("Route prefix list migration currently supports local firewall XML only.")
@@ -3453,9 +3689,17 @@ class XMLParser:
         if timers:
             payload['timers'] = timers
 
+        address_family = self._convert_bgp_address_family_references(
+            router_entry,
+            group_entry,
+            group_name,
+        )
+        if address_family:
+            payload['address_family'] = address_family
+
         peers = []
         for peer_entry in group_entry.findall('peer/entry'):
-            peer_payload = self._convert_bgp_peer(peer_entry, router_entry)
+            peer_payload = self._convert_bgp_peer(peer_entry, router_entry, group_name)
             if peer_payload:
                 peers.append(peer_payload)
         if peers:
@@ -3463,7 +3707,7 @@ class XMLParser:
 
         return payload
 
-    def _convert_bgp_peer(self, peer_entry, router_entry):
+    def _convert_bgp_peer(self, peer_entry, router_entry, group_name):
         peer_name = peer_entry.get('name')
         if not peer_name:
             return None
@@ -3494,27 +3738,53 @@ class XMLParser:
         if connection_options:
             payload['connection_options'] = connection_options
 
+        address_family = self._convert_bgp_address_family_references(
+            router_entry,
+            peer_entry,
+            group_name,
+            peer_name,
+        )
+
         import_ipv4_route_maps = self._bgp_policy_route_map_names(router_entry, 'import', family='ipv4')
         export_ipv4_route_maps = self._bgp_policy_route_map_names(router_entry, 'export', family='ipv4')
         import_ipv6_route_maps = self._bgp_policy_route_map_names(router_entry, 'import', family='ipv6')
         export_ipv6_route_maps = self._bgp_policy_route_map_names(router_entry, 'export', family='ipv6')
         if import_ipv4_route_maps or export_ipv4_route_maps or import_ipv6_route_maps or export_ipv6_route_maps:
-            address_family = {}
             if import_ipv4_route_maps or export_ipv4_route_maps:
-                address_family['ipv4'] = {'unicast': {}}
+                address_family.setdefault('ipv4', {'unicast': {}})
                 if import_ipv4_route_maps:
                     address_family['ipv4']['unicast']['import_route_map'] = import_ipv4_route_maps[0]
                 if export_ipv4_route_maps:
                     address_family['ipv4']['unicast']['export_route_map'] = export_ipv4_route_maps[0]
             if import_ipv6_route_maps or export_ipv6_route_maps:
-                address_family['ipv6'] = {'unicast': {}}
+                address_family.setdefault('ipv6', {'unicast': {}})
                 if import_ipv6_route_maps:
                     address_family['ipv6']['unicast']['import_route_map'] = import_ipv6_route_maps[0]
                 if export_ipv6_route_maps:
                     address_family['ipv6']['unicast']['export_route_map'] = export_ipv6_route_maps[0]
+        if address_family:
             payload['address_family'] = address_family
 
         return payload
+
+    def _convert_bgp_address_family_references(self, router_entry, entry, group_name, peer_name=None):
+        router_name = router_entry.get('name')
+        if not router_name or not group_name:
+            return {}
+
+        address_family = {}
+        for family, _ in self._bgp_address_family_entries(entry):
+            address_family[family] = {
+                'unicast': {
+                    'address_family_profile': self._bgp_address_family_profile_name(
+                        router_name,
+                        group_name,
+                        peer_name,
+                        family,
+                    )
+                }
+            }
+        return address_family
 
     def _convert_bgp_timers(self, timers):
         if timers is None:

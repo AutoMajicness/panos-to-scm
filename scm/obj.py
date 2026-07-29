@@ -95,6 +95,10 @@ class BgpAuthProfile(PanApiHandler):
     _endpoint = "/config/network/v1/bgp-auth-profiles"
     _scope_in_payload = True
 
+class BgpAddressFamilyProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/bgp-address-family-profiles"
+    _scope_in_payload = True
+
 class LogicalRouter(PanApiHandler):
     _endpoint = "/config/network/v1/logical-routers"
     _scope_in_payload = True
