@@ -17,6 +17,27 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
             </interface>
             <protocol>
               <bgp>
+                <enable>yes</enable>
+                <router-id>192.0.2.1</router-id>
+                <local-as>65001</local-as>
+                <peer-group>
+                  <entry name="upstream">
+                    <enable>yes</enable>
+                    <peer>
+                      <entry name="peer-a">
+                        <enable>yes</enable>
+                        <peer-as>65002</peer-as>
+                        <local-address>
+                          <interface>ethernet1/1</interface>
+                          <ip>192.0.2.1/24</ip>
+                        </local-address>
+                        <peer-address>
+                          <ip>192.0.2.2</ip>
+                        </peer-address>
+                      </entry>
+                    </peer>
+                  </entry>
+                </peer-group>
                 <policy>
                   <import>
                     <rules>
@@ -28,6 +49,19 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                               <exact>yes</exact>
                             </entry>
                           </address-prefix>
+                          <as-path>
+                            <member>^65010_</member>
+                          </as-path>
+                        </match>
+                      </entry>
+                      <entry name="import-access-list">
+                        <action>allow</action>
+                        <match>
+                          <route-table>
+                            <access-list>
+                              <member>corp-routes</member>
+                            </access-list>
+                          </route-table>
                         </match>
                       </entry>
                     </rules>
@@ -41,6 +75,9 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                           <address-prefix>
                             <entry name="0.0.0.0/0" />
                           </address-prefix>
+                          <community>
+                            <member>65001:100</member>
+                          </community>
                         </match>
                         <set>
                           <local-preference>200</local-preference>
@@ -50,7 +87,57 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                     </rules>
                   </export>
                 </policy>
+                <redist-rules>
+                  <entry name="static-to-bgp">
+                    <type>static</type>
+                    <metric>100</metric>
+                    <action>allow</action>
+                  </entry>
+                  <entry name="connected-to-bgp">
+                    <type>connected</type>
+                    <metric>20</metric>
+                    <action>allow</action>
+                  </entry>
+                </redist-rules>
               </bgp>
+              <ospf>
+                <enable>yes</enable>
+                <router-id>192.0.2.1</router-id>
+                <area>
+                  <entry name="0.0.0.0">
+                    <type>
+                      <normal />
+                    </type>
+                    <interface>
+                      <entry name="ethernet1/1">
+                        <enable>yes</enable>
+                        <passive>no</passive>
+                        <metric>10</metric>
+                        <link-type>
+                          <p2p />
+                        </link-type>
+                        <bfd>
+                          <profile>default</profile>
+                        </bfd>
+                      </entry>
+                    </interface>
+                  </entry>
+                </area>
+              </ospf>
+              <ospfv3>
+                <enable>yes</enable>
+                <router-id>192.0.2.1</router-id>
+                <area>
+                  <entry name="0.0.0.0">
+                    <interface>
+                      <entry name="ethernet1/1">
+                        <enable>yes</enable>
+                        <metric>20</metric>
+                      </entry>
+                    </interface>
+                  </entry>
+                </area>
+              </ospfv3>
             </protocol>
             <routing-table>
               <ip>
@@ -136,6 +223,72 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                     }
                                 }
                             },
+                            "bgp": {
+                                "enable": True,
+                                "router_id": "192.0.2.1",
+                                "local_as": "65001",
+                                "redistribution_profile": "default-bgp-redist",
+                                "peer_group": [
+                                    {
+                                        "name": "upstream",
+                                        "enable": True,
+                                        "peer": [
+                                            {
+                                                "name": "peer-a",
+                                                "enable": True,
+                                                "peer_as": "65002",
+                                                "local_interface": "ethernet1/1",
+                                                "local_address": "192.0.2.1/24",
+                                                "peer_address": "192.0.2.2",
+                                                "address_family": {
+                                                    "ipv4": {
+                                                        "unicast": {
+                                                            "import_route_map": "default-import-import-private-rm",
+                                                            "export_route_map": "default-export-export-default-rm",
+                                                        }
+                                                    }
+                                                },
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                            "ospf": {
+                                "enable": True,
+                                "router_id": "192.0.2.1",
+                                "area": [
+                                    {
+                                        "name": "0.0.0.0",
+                                        "type": {"normal": {}},
+                                        "interface": [
+                                            {
+                                                "name": "ethernet1/1",
+                                                "enable": True,
+                                                "passive": False,
+                                                "metric": 10,
+                                                "link_type": {"p2p": {}},
+                                                "bfd": {"profile": "default"},
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                            "ospfv3": {
+                                "enable": True,
+                                "router_id": "192.0.2.1",
+                                "area": [
+                                    {
+                                        "name": "0.0.0.0",
+                                        "interface": [
+                                            {
+                                                "name": "ethernet1/1",
+                                                "enable": True,
+                                                "metric": 20,
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
                             "routing_table": {
                                 "ip": {
                                     "static_route": [
@@ -204,7 +357,17 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
             xml_path = Path(directory) / "running.xml"
             xml_path.write_text(LOCAL_LOGICAL_ROUTER_XML, encoding="utf-8")
 
-            parsed = XMLParser(str(xml_path), "local").parse_specific_types(["RoutePrefixList", "BgpRouteMap"])
+            parsed = XMLParser(str(xml_path), "local").parse_specific_types(
+                [
+                    "RoutePrefixList",
+                    "RouteAccessList",
+                    "RouteCommunityList",
+                    "RoutePathAccessList",
+                    "BgpRouteMap",
+                    "BgpRouteMapRedistribution",
+                    "BgpRedistributionProfile",
+                ]
+            )
 
         self.assertEqual(
             parsed["RoutePrefixList"],
@@ -233,6 +396,51 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
+            parsed["RouteAccessList"],
+            [
+                {
+                    "name": "default-import-import-access-list-acl",
+                    "access_list": [
+                        {
+                            "name": 1,
+                            "action": "permit",
+                            "source": "corp-routes",
+                        }
+                    ],
+                }
+            ],
+        )
+        self.assertEqual(
+            parsed["RouteCommunityList"],
+            [
+                {
+                    "name": "default-export-export-default-cl",
+                    "community_list": [
+                        {
+                            "name": 1,
+                            "action": "permit",
+                            "community": "65001:100",
+                        }
+                    ],
+                }
+            ],
+        )
+        self.assertEqual(
+            parsed["RoutePathAccessList"],
+            [
+                {
+                    "name": "default-import-import-private-pal",
+                    "path_access_list": [
+                        {
+                            "name": 1,
+                            "action": "permit",
+                            "regular_expression": "^65010_",
+                        }
+                    ],
+                }
+            ],
+        )
+        self.assertEqual(
             parsed["BgpRouteMap"],
             [
                 {
@@ -243,9 +451,27 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                             "name": 10,
                             "action": "permit",
                             "match": {
+                                "as_path_access_list": "default-import-import-private-pal",
                                 "ipv4": {
                                     "address": {
                                         "prefix_list": "default-import-import-private-pl",
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                },
+                {
+                    "name": "default-import-import-access-list-rm",
+                    "description": "Generated from PAN-OS BGP import rule import-access-list",
+                    "route_map": [
+                        {
+                            "name": 20,
+                            "action": "permit",
+                            "match": {
+                                "ipv4": {
+                                    "address": {
+                                        "access_list": "default-import-import-access-list-acl",
                                     }
                                 }
                             },
@@ -261,6 +487,7 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                             "description": "Export default only",
                             "action": "permit",
                             "match": {
+                                "regular_community": "default-export-export-default-cl",
                                 "ipv4": {
                                     "address": {
                                         "prefix_list": "default-export-export-default-pl",
@@ -274,6 +501,53 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                         }
                     ],
                 },
+            ],
+        )
+        self.assertEqual(
+            parsed["BgpRouteMapRedistribution"],
+            [
+                {
+                    "name": "default-redist-static-to-bgp-rm",
+                    "route_map": [
+                        {
+                            "name": 10,
+                            "action": "permit",
+                            "set": {"metric": {"action": "set", "value": 100}},
+                        }
+                    ],
+                },
+                {
+                    "name": "default-redist-connected-to-bgp-rm",
+                    "route_map": [
+                        {
+                            "name": 10,
+                            "action": "permit",
+                            "set": {"metric": {"action": "set", "value": 20}},
+                        }
+                    ],
+                },
+            ],
+        )
+        self.assertEqual(
+            parsed["BgpRedistributionProfile"],
+            [
+                {
+                    "name": "default-bgp-redist",
+                    "ipv4": {
+                        "unicast": {
+                            "static": {
+                                "enable": True,
+                                "metric": 100,
+                                "route_map": "default-redist-static-to-bgp-rm",
+                            },
+                            "connected": {
+                                "enable": True,
+                                "metric": 20,
+                                "route_map": "default-redist-connected-to-bgp-rm",
+                            },
+                        }
+                    },
+                }
             ],
         )
 

@@ -121,7 +121,12 @@ class XMLParser:
             'LoopbackInterface': self._parse_entries(self._loopback_interface_entries),
             'LogicalRouter': self._parse_entries(self._logical_router_entries),
             'RoutePrefixList': self._parse_entries(self._route_prefix_list_entries),
+            'RouteAccessList': self._parse_entries(self._route_access_list_entries),
+            'RouteCommunityList': self._parse_entries(self._route_community_list_entries),
+            'RoutePathAccessList': self._parse_entries(self._route_path_access_list_entries),
             'BgpRouteMap': self._parse_entries(self._bgp_route_map_entries),
+            'BgpRouteMapRedistribution': self._parse_entries(self._bgp_route_map_redistribution_entries),
+            'BgpRedistributionProfile': self._parse_entries(self._bgp_redistribution_profile_entries),
             'IKECryptoProfile': self._parse_entries(self._ike_crypto_profile_entries),
             'IPsecCryptoProfile': self._parse_entries(self._ipsec_crypto_profile_entries),
             'IKEGateway': self._parse_entries(self._ike_gateway_entries),
@@ -174,7 +179,12 @@ class XMLParser:
             'LoopbackInterface': self._loopback_interface_entries,
             'LogicalRouter': self._logical_router_entries,
             'RoutePrefixList': self._route_prefix_list_entries,
+            'RouteAccessList': self._route_access_list_entries,
+            'RouteCommunityList': self._route_community_list_entries,
+            'RoutePathAccessList': self._route_path_access_list_entries,
             'BgpRouteMap': self._bgp_route_map_entries,
+            'BgpRouteMapRedistribution': self._bgp_route_map_redistribution_entries,
+            'BgpRedistributionProfile': self._bgp_redistribution_profile_entries,
             'IKECryptoProfile': self._ike_crypto_profile_entries,
             'IPsecCryptoProfile': self._ipsec_crypto_profile_entries,
             'IKEGateway': self._ike_gateway_entries,
@@ -2475,6 +2485,18 @@ class XMLParser:
             ipv4_filter = rib_filter.setdefault('ipv4', {})
             ipv4_filter['bgp'] = {'route_map': export_route_maps[0]}
 
+        bgp = self._convert_bgp(entry.find('protocol/bgp'), entry)
+        if bgp:
+            vrf['bgp'] = bgp
+
+        ospf = self._convert_ospf(entry.find('protocol/ospf'))
+        if ospf:
+            vrf['ospf'] = ospf
+
+        ospfv3 = self._convert_ospfv3(entry.find('protocol/ospfv3'))
+        if ospfv3:
+            vrf['ospfv3'] = ospfv3
+
         return {
             'name': router_name,
             'routing_stack': 'advanced',
@@ -3030,6 +3052,97 @@ class XMLParser:
 
         return prefix_lists
 
+    def _route_access_list_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Route access list migration currently supports local firewall XML only.")
+            return []
+
+        access_lists = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for direction in ['import', 'export']:
+                for rule_entry in self._bgp_policy_rule_entries(router_entry, direction):
+                    values = self._member_texts(rule_entry.find('match/route-table/access-list'))
+                    if not values:
+                        continue
+                    name = self._bgp_policy_access_list_name(router_entry, direction, rule_entry)
+                    if name in seen_names:
+                        continue
+                    seen_names.add(name)
+                    access_lists.append(
+                        {
+                            'name': name,
+                            'access_list': [
+                                {'name': index, 'action': self._bgp_policy_rule_action(rule_entry), 'source': value}
+                                for index, value in enumerate(values, start=1)
+                            ],
+                        }
+                    )
+
+        return access_lists
+
+    def _route_community_list_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Route community list migration currently supports local firewall XML only.")
+            return []
+
+        community_lists = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for direction in ['import', 'export']:
+                for rule_entry in self._bgp_policy_rule_entries(router_entry, direction):
+                    values = []
+                    for path in ['match/community', 'match/regular-community']:
+                        values.extend(self._member_texts(rule_entry.find(path)))
+                    if not values:
+                        continue
+                    name = self._bgp_policy_community_list_name(router_entry, direction, rule_entry)
+                    if name in seen_names:
+                        continue
+                    seen_names.add(name)
+                    community_lists.append(
+                        {
+                            'name': name,
+                            'community_list': [
+                                {'name': index, 'action': self._bgp_policy_rule_action(rule_entry), 'community': value}
+                                for index, value in enumerate(values, start=1)
+                            ],
+                        }
+                    )
+
+        return community_lists
+
+    def _route_path_access_list_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Route path access list migration currently supports local firewall XML only.")
+            return []
+
+        path_lists = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for direction in ['import', 'export']:
+                for rule_entry in self._bgp_policy_rule_entries(router_entry, direction):
+                    values = []
+                    for path in ['match/as-path', 'match/as-path-access-list']:
+                        values.extend(self._member_texts(rule_entry.find(path)))
+                    if not values:
+                        continue
+                    name = self._bgp_policy_path_access_list_name(router_entry, direction, rule_entry)
+                    if name in seen_names:
+                        continue
+                    seen_names.add(name)
+                    path_lists.append(
+                        {
+                            'name': name,
+                            'path_access_list': [
+                                {'name': index, 'action': self._bgp_policy_rule_action(rule_entry), 'regular_expression': value}
+                                for index, value in enumerate(values, start=1)
+                            ],
+                        }
+                    )
+
+        return path_lists
+
     def _bgp_route_map_entries(self):
         if self.config_type != 'local':
             self.logger.warning("BGP route map migration currently supports local firewall XML only.")
@@ -3064,6 +3177,20 @@ class XMLParser:
                             }
                         }
 
+                    access_list = self._bgp_policy_access_list_name_if_needed(router_entry, direction, rule_entry)
+                    if access_list:
+                        match = rule.setdefault('match', {})
+                        ipv4 = match.setdefault('ipv4', {})
+                        ipv4['address'] = {'access_list': access_list}
+
+                    community_list = self._bgp_policy_community_list_name_if_needed(router_entry, direction, rule_entry)
+                    if community_list:
+                        rule.setdefault('match', {})['regular_community'] = community_list
+
+                    path_access_list = self._bgp_policy_path_access_list_name_if_needed(router_entry, direction, rule_entry)
+                    if path_access_list:
+                        rule.setdefault('match', {})['as_path_access_list'] = path_access_list
+
                     set_payload = self._convert_bgp_policy_set(rule_entry.find('set'))
                     if set_payload:
                         rule['set'] = set_payload
@@ -3077,6 +3204,233 @@ class XMLParser:
                     )
 
         return route_maps
+
+    def _bgp_route_map_redistribution_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("BGP route map redistribution migration currently supports local firewall XML only.")
+            return []
+
+        entries = []
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for redist_entry in self._bgp_redist_rule_entries(router_entry):
+                name = self._bgp_redist_route_map_name(router_entry, redist_entry)
+                route_map = {
+                    'name': 10,
+                    'action': self._bgp_policy_rule_action(redist_entry),
+                }
+                metric = self._child_text(redist_entry, 'metric')
+                if metric and metric.isdigit():
+                    route_map['set'] = {'metric': {'action': 'set', 'value': int(metric)}}
+                entries.append({'name': name, 'route_map': [route_map]})
+
+        return entries
+
+    def _bgp_redistribution_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("BGP redistribution profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            redist_rules = self._bgp_redist_rule_entries(router_entry)
+            if not redist_rules:
+                continue
+
+            unicast = {}
+            for redist_entry in redist_rules:
+                source_type = self._bgp_redist_source_type(redist_entry)
+                if source_type not in {'static', 'connected', 'ospf'}:
+                    continue
+                payload = {'enable': True}
+                metric = self._child_text(redist_entry, 'metric')
+                if metric and metric.isdigit():
+                    payload['metric'] = int(metric)
+                payload['route_map'] = self._bgp_redist_route_map_name(router_entry, redist_entry)
+                unicast[source_type] = payload
+
+            if unicast:
+                profiles.append(
+                    {
+                        'name': self._sanitize_name(f"{router_entry.get('name')}-bgp-redist"),
+                        'ipv4': {'unicast': unicast},
+                    }
+                )
+
+        return profiles
+
+    def _convert_bgp(self, bgp, router_entry):
+        if bgp is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('enable', 'enable'),
+            ('router-id', 'router_id'),
+        ]:
+            value = self._child_text(bgp, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes' if panos_name == 'enable' else value
+
+        local_as = self._child_text(bgp, 'local-as')
+        if local_as:
+            payload['local_as'] = local_as
+
+        redist_profile_name = self._bgp_redist_profile_name_if_needed(router_entry)
+        if redist_profile_name:
+            payload['redistribution_profile'] = redist_profile_name
+
+        peer_groups = []
+        for group_entry in bgp.findall('peer-group/entry'):
+            group_payload = self._convert_bgp_peer_group(group_entry, router_entry)
+            if group_payload:
+                peer_groups.append(group_payload)
+        if peer_groups:
+            payload['peer_group'] = peer_groups
+
+        return payload or None
+
+    def _convert_bgp_peer_group(self, group_entry, router_entry):
+        group_name = group_entry.get('name')
+        if not group_name:
+            return None
+
+        payload = {'name': group_name}
+        for panos_name, scm_name in [
+            ('enable', 'enable'),
+            ('type', 'type'),
+        ]:
+            value = self._child_text(group_entry, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes' if panos_name == 'enable' else value
+
+        peers = []
+        for peer_entry in group_entry.findall('peer/entry'):
+            peer_payload = self._convert_bgp_peer(peer_entry, router_entry)
+            if peer_payload:
+                peers.append(peer_payload)
+        if peers:
+            payload['peer'] = peers
+
+        return payload
+
+    def _convert_bgp_peer(self, peer_entry, router_entry):
+        peer_name = peer_entry.get('name')
+        if not peer_name:
+            return None
+
+        payload = {'name': peer_name}
+        for panos_name, scm_name in [
+            ('enable', 'enable'),
+            ('peer-as', 'peer_as'),
+            ('local-address/interface', 'local_interface'),
+            ('local-address/ip', 'local_address'),
+            ('peer-address/ip', 'peer_address'),
+        ]:
+            value = self._child_text(peer_entry, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes' if panos_name == 'enable' else value
+
+        import_route_maps = self._bgp_policy_route_map_names(router_entry, 'import')
+        export_route_maps = self._bgp_policy_route_map_names(router_entry, 'export')
+        if import_route_maps or export_route_maps:
+            address_family = {'ipv4': {'unicast': {}}}
+            if import_route_maps:
+                address_family['ipv4']['unicast']['import_route_map'] = import_route_maps[0]
+            if export_route_maps:
+                address_family['ipv4']['unicast']['export_route_map'] = export_route_maps[0]
+            payload['address_family'] = address_family
+
+        return payload
+
+    def _convert_ospf(self, ospf):
+        if ospf is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('enable', 'enable'),
+            ('router-id', 'router_id'),
+            ('rfc1583', 'rfc1583'),
+            ('reject-default-route', 'reject_default_route'),
+            ('allow-redist-default-route', 'allow_redist_default_route'),
+        ]:
+            value = self._child_text(ospf, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes' if value.lower() in {'yes', 'no'} else value
+
+        areas = []
+        for area_entry in ospf.findall('area/entry'):
+            area = self._convert_ospf_area(area_entry)
+            if area:
+                areas.append(area)
+        if areas:
+            payload['area'] = areas
+
+        return payload or None
+
+    def _convert_ospfv3(self, ospfv3):
+        if ospfv3 is None:
+            return None
+
+        payload = self._convert_ospf(ospfv3) or {}
+        return payload or None
+
+    def _convert_ospf_area(self, area_entry):
+        area_name = area_entry.get('name')
+        if not area_name:
+            return None
+
+        payload = {'name': area_name}
+        area_type = area_entry.find('type')
+        if area_type is not None:
+            child_name = self._first_child_name(area_type)
+            if child_name:
+                payload['type'] = {child_name: {}}
+
+        interfaces = []
+        for interface_entry in area_entry.findall('interface/entry'):
+            interface = self._convert_ospf_interface(interface_entry)
+            if interface:
+                interfaces.append(interface)
+        if interfaces:
+            payload['interface'] = interfaces
+
+        return payload
+
+    def _convert_ospf_interface(self, interface_entry):
+        interface_name = interface_entry.get('name')
+        if not interface_name:
+            return None
+
+        payload = {'name': interface_name}
+        for panos_name, scm_name in [
+            ('enable', 'enable'),
+            ('passive', 'passive'),
+            ('mtu-ignore', 'mtu_ignore'),
+            ('priority', 'priority'),
+            ('metric', 'metric'),
+        ]:
+            value = self._child_text(interface_entry, panos_name)
+            if not value:
+                continue
+            if value.lower() in {'yes', 'no'}:
+                payload[scm_name] = value.lower() == 'yes'
+            elif value.isdigit():
+                payload[scm_name] = int(value)
+            else:
+                payload[scm_name] = value
+
+        link_type = interface_entry.find('link-type')
+        if link_type is not None:
+            child_name = self._first_child_name(link_type)
+            if child_name:
+                payload['link_type'] = {child_name: {}}
+
+        bfd_profile = self._child_text(interface_entry, 'bfd/profile')
+        if bfd_profile:
+            payload['bfd'] = {'profile': bfd_profile}
+
+        return payload
 
     def _bgp_policy_rule_entries(self, router_entry, direction):
         entries = []
@@ -3098,6 +3452,64 @@ class XMLParser:
 
     def _bgp_policy_prefix_list_name(self, router_entry, direction, rule_entry):
         return self._sanitize_name(f"{router_entry.get('name')}-{direction}-{rule_entry.get('name')}-pl")
+
+    def _bgp_policy_access_list_name(self, router_entry, direction, rule_entry):
+        return self._sanitize_name(f"{router_entry.get('name')}-{direction}-{rule_entry.get('name')}-acl")
+
+    def _bgp_policy_community_list_name(self, router_entry, direction, rule_entry):
+        return self._sanitize_name(f"{router_entry.get('name')}-{direction}-{rule_entry.get('name')}-cl")
+
+    def _bgp_policy_path_access_list_name(self, router_entry, direction, rule_entry):
+        return self._sanitize_name(f"{router_entry.get('name')}-{direction}-{rule_entry.get('name')}-pal")
+
+    def _bgp_policy_access_list_name_if_needed(self, router_entry, direction, rule_entry):
+        if self._member_texts(rule_entry.find('match/route-table/access-list')):
+            return self._bgp_policy_access_list_name(router_entry, direction, rule_entry)
+        return None
+
+    def _bgp_policy_community_list_name_if_needed(self, router_entry, direction, rule_entry):
+        for path in ['match/community', 'match/regular-community']:
+            if self._member_texts(rule_entry.find(path)):
+                return self._bgp_policy_community_list_name(router_entry, direction, rule_entry)
+        return None
+
+    def _bgp_policy_path_access_list_name_if_needed(self, router_entry, direction, rule_entry):
+        for path in ['match/as-path', 'match/as-path-access-list']:
+            if self._member_texts(rule_entry.find(path)):
+                return self._bgp_policy_path_access_list_name(router_entry, direction, rule_entry)
+        return None
+
+    def _bgp_redist_rule_entries(self, router_entry):
+        entries = []
+        for path in [
+            'protocol/bgp/redist-rules/entry',
+            'protocol/bgp/redistribution-rule/entry',
+            'protocol/bgp/redist-profile/entry',
+        ]:
+            entries.extend(router_entry.findall(path))
+        return entries
+
+    def _bgp_redist_route_map_name(self, router_entry, redist_entry):
+        return self._sanitize_name(f"{router_entry.get('name')}-redist-{redist_entry.get('name')}-rm")
+
+    def _bgp_redist_profile_name_if_needed(self, router_entry):
+        if self._bgp_redist_rule_entries(router_entry):
+            return self._sanitize_name(f"{router_entry.get('name')}-bgp-redist")
+        return None
+
+    def _bgp_redist_source_type(self, redist_entry):
+        source_type = self._child_text(redist_entry, 'source/type') or self._child_text(redist_entry, 'type')
+        if source_type:
+            source_type = source_type.replace('-', '_')
+        if source_type in {'connect', 'connected'}:
+            return 'connected'
+        if source_type in {'static', 'ospf'}:
+            return source_type
+        rule_name = redist_entry.get('name') or ''
+        for candidate in ['static', 'connected', 'ospf']:
+            if candidate in rule_name.lower():
+                return candidate
+        return None
 
     def _bgp_policy_rule_action(self, rule_entry):
         action = self._child_text(rule_entry, 'action')

@@ -282,7 +282,12 @@ class MainDryRunTests(unittest.TestCase):
             "LoopbackInterface": [{"name": "loopback.1", "ip": ["10.255.0.1/32"]}],
             "LogicalRouter": [{"name": "default", "routing_stack": "advanced", "vrf": [{"name": "default"}]}],
             "RoutePrefixList": [{"name": "default-export-default-pl", "prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}]}],
+            "RouteAccessList": [{"name": "routes-acl", "access_list": [{"name": 1, "action": "permit", "source": "corp-routes"}]}],
+            "RouteCommunityList": [{"name": "communities", "community_list": [{"name": 1, "action": "permit", "community": "65001:100"}]}],
+            "RoutePathAccessList": [{"name": "as-paths", "path_access_list": [{"name": 1, "action": "permit", "regular_expression": "^65010_"}]}],
             "BgpRouteMap": [{"name": "default-export-default-rm", "route_map": [{"name": 10, "action": "permit"}]}],
+            "BgpRouteMapRedistribution": [{"name": "redist-rm", "route_map": [{"name": 10, "action": "permit"}]}],
+            "BgpRedistributionProfile": [{"name": "redist-profile", "ipv4": {"unicast": {"static": {"enable": True}}}}],
             "IKECryptoProfile": [{"name": "ike-crypto-a", "hash": ["sha256"], "encryption": ["aes-256-cbc"], "dh_group": ["group14"]}],
             "IPsecCryptoProfile": [{"name": "ipsec-crypto-a", "esp": {"encryption": ["aes-256-gcm"]}}],
             "IKEGateway": [{"name": "vpn-gw-a", "protocol": {"ikev2": {"ike_crypto_profile": "ike-crypto-a"}}}],
@@ -298,20 +303,21 @@ class MainDryRunTests(unittest.TestCase):
             with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
                 plan = main.main(
                     AppConfig(),
-                    run_objects="InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,RoutePrefixList,BgpRouteMap,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,PbfRule,Zones",
+                    run_objects="InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,RoutePrefixList,RouteAccessList,RouteCommunityList,RoutePathAccessList,BgpRouteMap,BgpRouteMapRedistribution,BgpRedistributionProfile,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,PbfRule,Zones",
                     json_file=str(parsed_path),
                     dry_run=True,
                     network_scope="snippet:Network-Stack",
                 )
 
-        self.assertEqual(plan.summary()["creates"], 19)
+        self.assertEqual(plan.summary()["creates"], 24)
         self.assertEqual(
             [change.object_type for change in plan.creates],
             [
                 "InterfaceManagementProfile", "ZoneProtectionProfile", "DHCPInterface",
                 "AggregateInterface", "EthernetInterface", "Layer2Subinterface", "Layer3Subinterface",
                 "VlanInterface", "TunnelInterface", "LoopbackInterface", "RoutePrefixList",
-                "BgpRouteMap", "LogicalRouter",
+                "RouteAccessList", "RouteCommunityList", "RoutePathAccessList", "BgpRouteMap",
+                "BgpRouteMapRedistribution", "BgpRedistributionProfile", "LogicalRouter",
                 "IKECryptoProfile", "IPsecCryptoProfile", "IKEGateway", "IPsecTunnel",
                 "PbfRule", "Zones"
             ],
@@ -483,7 +489,12 @@ class MainDryRunTests(unittest.TestCase):
     def test_route_filters_can_use_network_scope_for_dry_run(self):
         parsed_data = {
             "RoutePrefixList": [{"name": "default-export-default-pl", "prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}]}],
+            "RouteAccessList": [{"name": "routes-acl", "access_list": [{"name": 1, "action": "permit", "source": "corp-routes"}]}],
+            "RouteCommunityList": [{"name": "communities", "community_list": [{"name": 1, "action": "permit", "community": "65001:100"}]}],
+            "RoutePathAccessList": [{"name": "as-paths", "path_access_list": [{"name": 1, "action": "permit", "regular_expression": "^65010_"}]}],
             "BgpRouteMap": [{"name": "default-export-default-rm", "route_map": [{"name": 10, "action": "permit"}]}],
+            "BgpRouteMapRedistribution": [{"name": "redist-rm", "route_map": [{"name": 10, "action": "permit"}]}],
+            "BgpRedistributionProfile": [{"name": "redist-profile", "ipv4": {"unicast": {"static": {"enable": True}}}}],
         }
 
         with tempfile.TemporaryDirectory() as directory:
@@ -493,14 +504,25 @@ class MainDryRunTests(unittest.TestCase):
             with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
                 plan = main.main(
                     AppConfig(),
-                    run_objects="RoutePrefixList,BgpRouteMap",
+                    run_objects="RoutePrefixList,RouteAccessList,RouteCommunityList,RoutePathAccessList,BgpRouteMap,BgpRouteMapRedistribution,BgpRedistributionProfile",
                     json_file=str(parsed_path),
                     dry_run=True,
                     network_scope="snippet:Network-Stack",
                 )
 
-        self.assertEqual(plan.summary()["creates"], 2)
-        self.assertEqual([change.object_type for change in plan.creates], ["RoutePrefixList", "BgpRouteMap"])
+        self.assertEqual(plan.summary()["creates"], 7)
+        self.assertEqual(
+            [change.object_type for change in plan.creates],
+            [
+                "RoutePrefixList",
+                "RouteAccessList",
+                "RouteCommunityList",
+                "RoutePathAccessList",
+                "BgpRouteMap",
+                "BgpRouteMapRedistribution",
+                "BgpRedistributionProfile",
+            ],
+        )
 
     def test_pbf_rules_can_use_network_scope_for_dry_run(self):
         parsed_data = {"PbfRule": [{"name": "send-guest-to-isp2", "action": {"forwarding": {"egress_interface": "ethernet1/2"}}}]}

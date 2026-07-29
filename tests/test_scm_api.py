@@ -95,9 +95,19 @@ class EndpointRegistryTests(unittest.TestCase):
 
     def test_route_filter_endpoints_are_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.RoutePrefixList.get_endpoint(), "/config/network/v1/route-prefix-lists")
+        self.assertEqual(obj.RouteAccessList.get_endpoint(), "/config/network/v1/route-access-lists")
+        self.assertEqual(obj.RouteCommunityList.get_endpoint(), "/config/network/v1/route-community-lists")
+        self.assertEqual(obj.RoutePathAccessList.get_endpoint(), "/config/network/v1/route-path-access-lists")
         self.assertEqual(obj.BgpRouteMap.get_endpoint(), "/config/network/v1/bgp-route-maps")
+        self.assertEqual(obj.BgpRouteMapRedistribution.get_endpoint(), "/config/network/v1/bgp-route-map-redistributions")
+        self.assertEqual(obj.BgpRedistributionProfile.get_endpoint(), "/config/network/v1/bgp-redistribution-profiles")
         self.assertTrue(obj.RoutePrefixList.uses_payload_scope())
+        self.assertTrue(obj.RouteAccessList.uses_payload_scope())
+        self.assertTrue(obj.RouteCommunityList.uses_payload_scope())
+        self.assertTrue(obj.RoutePathAccessList.uses_payload_scope())
         self.assertTrue(obj.BgpRouteMap.uses_payload_scope())
+        self.assertTrue(obj.BgpRouteMapRedistribution.uses_payload_scope())
+        self.assertTrue(obj.BgpRedistributionProfile.uses_payload_scope())
 
     def test_vpn_object_endpoints_are_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.IKECryptoProfile.get_endpoint(), "/config/network/v1/ike-crypto-profiles")
@@ -523,6 +533,46 @@ class ProcessorTests(unittest.TestCase):
                 "snippet": "Network-Stack",
             },
         )
+
+    def test_route_access_community_path_and_redist_post_put_scope_in_payload(self):
+        cases = [
+            (
+                obj.RouteAccessList,
+                "/config/network/v1/route-access-lists",
+                {"name": "routes-acl", "access_list": [{"name": 1, "action": "permit", "source": "corp-routes"}]},
+            ),
+            (
+                obj.RouteCommunityList,
+                "/config/network/v1/route-community-lists",
+                {"name": "communities", "community_list": [{"name": 1, "action": "permit", "community": "65001:100"}]},
+            ),
+            (
+                obj.RoutePathAccessList,
+                "/config/network/v1/route-path-access-lists",
+                {"name": "as-paths", "path_access_list": [{"name": 1, "action": "permit", "regular_expression": "^65010_"}]},
+            ),
+            (
+                obj.BgpRouteMapRedistribution,
+                "/config/network/v1/bgp-route-map-redistributions",
+                {"name": "redist-rm", "route_map": [{"name": 10, "action": "permit"}]},
+            ),
+            (
+                obj.BgpRedistributionProfile,
+                "/config/network/v1/bgp-redistribution-profiles",
+                {"name": "redist-profile", "ipv4": {"unicast": {"static": {"enable": True}}}},
+            ),
+        ]
+
+        for obj_type, endpoint, payload in cases:
+            with self.subTest(obj_type=obj_type.__name__):
+                session = FakeSession()
+                handler = PanApiHandler(session)
+                manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj_type], obj.SecurityRule, obj.NatRule)
+
+                manager.configure.post_entries("&snippet=Network-Stack", [payload], obj_type, extra_query_params="")
+
+                self.assertEqual(session.post_calls[0]["url"], f"https://api.strata.paloaltonetworks.com{endpoint}")
+                self.assertEqual(session.post_calls[0]["json"], {**payload, "snippet": "Network-Stack"})
 
     def test_vpn_object_post_puts_scope_in_payload_not_url(self):
         session = FakeSession()

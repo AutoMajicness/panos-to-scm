@@ -95,8 +95,28 @@ class RoutePrefixList(PanApiHandler):
     _endpoint = "/config/network/v1/route-prefix-lists"
     _scope_in_payload = True
 
+class RouteAccessList(PanApiHandler):
+    _endpoint = "/config/network/v1/route-access-lists"
+    _scope_in_payload = True
+
+class RouteCommunityList(PanApiHandler):
+    _endpoint = "/config/network/v1/route-community-lists"
+    _scope_in_payload = True
+
+class RoutePathAccessList(PanApiHandler):
+    _endpoint = "/config/network/v1/route-path-access-lists"
+    _scope_in_payload = True
+
 class BgpRouteMap(PanApiHandler):
     _endpoint = "/config/network/v1/bgp-route-maps"
+    _scope_in_payload = True
+
+class BgpRouteMapRedistribution(PanApiHandler):
+    _endpoint = "/config/network/v1/bgp-route-map-redistributions"
+    _scope_in_payload = True
+
+class BgpRedistributionProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/bgp-redistribution-profiles"
     _scope_in_payload = True
 
 class IKECryptoProfile(PanApiHandler):
