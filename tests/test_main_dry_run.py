@@ -281,6 +281,8 @@ class MainDryRunTests(unittest.TestCase):
             "TunnelInterface": [{"name": "tunnel.1", "default_value": "tunnel.1", "ip": [{"name": "169.254.1.1/30"}]}],
             "LoopbackInterface": [{"name": "loopback.1", "ip": ["10.255.0.1/32"]}],
             "LogicalRouter": [{"name": "default", "routing_stack": "advanced", "vrf": [{"name": "default"}]}],
+            "RoutePrefixList": [{"name": "default-export-default-pl", "prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}]}],
+            "BgpRouteMap": [{"name": "default-export-default-rm", "route_map": [{"name": 10, "action": "permit"}]}],
             "IKECryptoProfile": [{"name": "ike-crypto-a", "hash": ["sha256"], "encryption": ["aes-256-cbc"], "dh_group": ["group14"]}],
             "IPsecCryptoProfile": [{"name": "ipsec-crypto-a", "esp": {"encryption": ["aes-256-gcm"]}}],
             "IKEGateway": [{"name": "vpn-gw-a", "protocol": {"ikev2": {"ike_crypto_profile": "ike-crypto-a"}}}],
@@ -296,19 +298,20 @@ class MainDryRunTests(unittest.TestCase):
             with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
                 plan = main.main(
                     AppConfig(),
-                    run_objects="InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,PbfRule,Zones",
+                    run_objects="InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,RoutePrefixList,BgpRouteMap,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,PbfRule,Zones",
                     json_file=str(parsed_path),
                     dry_run=True,
                     network_scope="snippet:Network-Stack",
                 )
 
-        self.assertEqual(plan.summary()["creates"], 17)
+        self.assertEqual(plan.summary()["creates"], 19)
         self.assertEqual(
             [change.object_type for change in plan.creates],
             [
                 "InterfaceManagementProfile", "ZoneProtectionProfile", "DHCPInterface",
                 "AggregateInterface", "EthernetInterface", "Layer2Subinterface", "Layer3Subinterface",
-                "VlanInterface", "TunnelInterface", "LoopbackInterface", "LogicalRouter",
+                "VlanInterface", "TunnelInterface", "LoopbackInterface", "RoutePrefixList",
+                "BgpRouteMap", "LogicalRouter",
                 "IKECryptoProfile", "IPsecCryptoProfile", "IKEGateway", "IPsecTunnel",
                 "PbfRule", "Zones"
             ],
@@ -476,6 +479,28 @@ class MainDryRunTests(unittest.TestCase):
             [change.object_type for change in plan.creates],
             ["IKECryptoProfile", "IPsecCryptoProfile", "IKEGateway", "IPsecTunnel"],
         )
+
+    def test_route_filters_can_use_network_scope_for_dry_run(self):
+        parsed_data = {
+            "RoutePrefixList": [{"name": "default-export-default-pl", "prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}]}],
+            "BgpRouteMap": [{"name": "default-export-default-rm", "route_map": [{"name": 10, "action": "permit"}]}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="RoutePrefixList,BgpRouteMap",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 2)
+        self.assertEqual([change.object_type for change in plan.creates], ["RoutePrefixList", "BgpRouteMap"])
 
     def test_pbf_rules_can_use_network_scope_for_dry_run(self):
         parsed_data = {"PbfRule": [{"name": "send-guest-to-isp2", "action": {"forwarding": {"egress_interface": "ethernet1/2"}}}]}

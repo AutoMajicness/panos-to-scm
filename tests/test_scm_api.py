@@ -93,6 +93,12 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(obj.LogicalRouter.get_endpoint(), "/config/network/v1/logical-routers")
         self.assertTrue(obj.LogicalRouter.uses_payload_scope())
 
+    def test_route_filter_endpoints_are_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.RoutePrefixList.get_endpoint(), "/config/network/v1/route-prefix-lists")
+        self.assertEqual(obj.BgpRouteMap.get_endpoint(), "/config/network/v1/bgp-route-maps")
+        self.assertTrue(obj.RoutePrefixList.uses_payload_scope())
+        self.assertTrue(obj.BgpRouteMap.uses_payload_scope())
+
     def test_vpn_object_endpoints_are_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.IKECryptoProfile.get_endpoint(), "/config/network/v1/ike-crypto-profiles")
         self.assertEqual(obj.IPsecCryptoProfile.get_endpoint(), "/config/network/v1/ipsec-crypto-profiles")
@@ -464,6 +470,56 @@ class ProcessorTests(unittest.TestCase):
                 "name": "default",
                 "routing_stack": "advanced",
                 "vrf": [{"name": "default"}],
+                "snippet": "Network-Stack",
+            },
+        )
+
+    def test_route_prefix_list_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.RoutePrefixList], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&snippet=Network-Stack",
+            [{"name": "default-export-default-pl", "prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}]}],
+            obj.RoutePrefixList,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/network/v1/route-prefix-lists",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {
+                "name": "default-export-default-pl",
+                "prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}],
+                "snippet": "Network-Stack",
+            },
+        )
+
+    def test_bgp_route_map_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.BgpRouteMap], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&snippet=Network-Stack",
+            [{"name": "default-export-default-rm", "route_map": [{"name": 10, "action": "permit"}]}],
+            obj.BgpRouteMap,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/network/v1/bgp-route-maps",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {
+                "name": "default-export-default-rm",
+                "route_map": [{"name": 10, "action": "permit"}],
                 "snippet": "Network-Stack",
             },
         )

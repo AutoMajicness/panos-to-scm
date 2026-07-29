@@ -120,6 +120,8 @@ class XMLParser:
             'TunnelInterface': self._parse_entries(self._tunnel_interface_entries),
             'LoopbackInterface': self._parse_entries(self._loopback_interface_entries),
             'LogicalRouter': self._parse_entries(self._logical_router_entries),
+            'RoutePrefixList': self._parse_entries(self._route_prefix_list_entries),
+            'BgpRouteMap': self._parse_entries(self._bgp_route_map_entries),
             'IKECryptoProfile': self._parse_entries(self._ike_crypto_profile_entries),
             'IPsecCryptoProfile': self._parse_entries(self._ipsec_crypto_profile_entries),
             'IKEGateway': self._parse_entries(self._ike_gateway_entries),
@@ -171,6 +173,8 @@ class XMLParser:
             'TunnelInterface': self._tunnel_interface_entries,
             'LoopbackInterface': self._loopback_interface_entries,
             'LogicalRouter': self._logical_router_entries,
+            'RoutePrefixList': self._route_prefix_list_entries,
+            'BgpRouteMap': self._bgp_route_map_entries,
             'IKECryptoProfile': self._ike_crypto_profile_entries,
             'IPsecCryptoProfile': self._ipsec_crypto_profile_entries,
             'IKEGateway': self._ike_gateway_entries,
@@ -2465,6 +2469,12 @@ class XMLParser:
             routing_table = vrf.setdefault('routing_table', {})
             routing_table['ipv6'] = {'static_route': static_routes_v6}
 
+        export_route_maps = self._bgp_policy_route_map_names(entry, 'export')
+        if export_route_maps:
+            rib_filter = vrf.setdefault('rib_filter', {})
+            ipv4_filter = rib_filter.setdefault('ipv4', {})
+            ipv4_filter['bgp'] = {'route_map': export_route_maps[0]}
+
         return {
             'name': router_name,
             'routing_stack': 'advanced',
@@ -2985,6 +2995,197 @@ class XMLParser:
         disable_if_unreachable = self._child_text(monitor, 'disable-if-unreachable')
         if disable_if_unreachable:
             payload['disable_if_unreachable'] = disable_if_unreachable.lower() == 'yes'
+
+        return payload or None
+
+    def _route_prefix_list_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Route prefix list migration currently supports local firewall XML only.")
+            return []
+
+        prefix_lists = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for direction in ['import', 'export']:
+                for rule_entry in self._bgp_policy_rule_entries(router_entry, direction):
+                    prefixes = self._bgp_policy_rule_prefixes(rule_entry)
+                    if not prefixes:
+                        continue
+
+                    list_name = self._bgp_policy_prefix_list_name(router_entry, direction, rule_entry)
+                    if list_name in seen_names:
+                        continue
+                    seen_names.add(list_name)
+
+                    action = self._bgp_policy_rule_action(rule_entry)
+                    prefix_lists.append(
+                        {
+                            'name': list_name,
+                            'prefix_list': [
+                                self._route_prefix_list_rule(index, prefix, action)
+                                for index, prefix in enumerate(prefixes, start=1)
+                            ],
+                        }
+                    )
+
+        return prefix_lists
+
+    def _bgp_route_map_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("BGP route map migration currently supports local firewall XML only.")
+            return []
+
+        route_maps = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for direction in ['import', 'export']:
+                for sequence, rule_entry in enumerate(self._bgp_policy_rule_entries(router_entry, direction), start=1):
+                    route_map_name = self._bgp_policy_route_map_name(router_entry, direction, rule_entry)
+                    if route_map_name in seen_names:
+                        continue
+                    seen_names.add(route_map_name)
+
+                    rule = {
+                        'name': sequence * 10,
+                        'action': self._bgp_policy_rule_action(rule_entry),
+                    }
+
+                    description = self._child_text(rule_entry, 'description')
+                    if description:
+                        rule['description'] = description
+
+                    prefixes = self._bgp_policy_rule_prefixes(rule_entry)
+                    if prefixes:
+                        rule['match'] = {
+                            'ipv4': {
+                                'address': {
+                                    'prefix_list': self._bgp_policy_prefix_list_name(router_entry, direction, rule_entry)
+                                }
+                            }
+                        }
+
+                    set_payload = self._convert_bgp_policy_set(rule_entry.find('set'))
+                    if set_payload:
+                        rule['set'] = set_payload
+
+                    route_maps.append(
+                        {
+                            'name': route_map_name,
+                            'description': f"Generated from PAN-OS BGP {direction} rule {rule_entry.get('name')}",
+                            'route_map': [rule],
+                        }
+                    )
+
+        return route_maps
+
+    def _bgp_policy_rule_entries(self, router_entry, direction):
+        entries = []
+        for path in [
+            f'protocol/bgp/policy/{direction}/rules/entry',
+            f'protocol/bgp/policy/{direction}/entry',
+        ]:
+            entries.extend(router_entry.findall(path))
+        return entries
+
+    def _bgp_policy_route_map_names(self, router_entry, direction):
+        return [
+            self._bgp_policy_route_map_name(router_entry, direction, rule_entry)
+            for rule_entry in self._bgp_policy_rule_entries(router_entry, direction)
+        ]
+
+    def _bgp_policy_route_map_name(self, router_entry, direction, rule_entry):
+        return self._sanitize_name(f"{router_entry.get('name')}-{direction}-{rule_entry.get('name')}-rm")
+
+    def _bgp_policy_prefix_list_name(self, router_entry, direction, rule_entry):
+        return self._sanitize_name(f"{router_entry.get('name')}-{direction}-{rule_entry.get('name')}-pl")
+
+    def _bgp_policy_rule_action(self, rule_entry):
+        action = self._child_text(rule_entry, 'action')
+        if action in {'allow', 'permit'}:
+            return 'permit'
+        if action == 'deny':
+            return 'deny'
+        return 'permit'
+
+    def _bgp_policy_rule_prefixes(self, rule_entry):
+        prefixes = []
+        for path in [
+            'match/address-prefix',
+            'match/route-table',
+            'match/nlri',
+        ]:
+            prefixes.extend(self._route_prefix_values(rule_entry.find(path)))
+        return prefixes
+
+    def _route_prefix_values(self, entry):
+        if entry is None:
+            return []
+
+        values = []
+        for member in entry.findall('member'):
+            if member.text and member.text.strip():
+                values.append({'prefix': member.text.strip()})
+
+        for child in entry.findall('entry'):
+            prefix = child.get('name') or self._child_text(child, 'prefix')
+            if not prefix:
+                continue
+            payload = {'prefix': prefix}
+            for panos_name, scm_name in [
+                ('exact', 'exact'),
+                ('greater-equal', 'ge'),
+                ('less-equal', 'le'),
+            ]:
+                value = self._child_text(child, panos_name)
+                if not value:
+                    continue
+                if panos_name == 'exact':
+                    payload[scm_name] = value.lower() == 'yes'
+                elif value.isdigit():
+                    payload[scm_name] = int(value)
+                else:
+                    payload[scm_name] = value
+            values.append(payload)
+
+        return values
+
+    @staticmethod
+    def _route_prefix_list_rule(index, prefix, action):
+        rule = {
+            'name': index,
+            'action': action,
+            'prefix': prefix['prefix'],
+        }
+        for optional_key in ['exact', 'ge', 'le']:
+            if optional_key in prefix:
+                rule[optional_key] = prefix[optional_key]
+        return rule
+
+    def _convert_bgp_policy_set(self, set_entry):
+        if set_entry is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('local-preference', 'local_preference'),
+            ('weight', 'weight'),
+            ('tag', 'tag'),
+        ]:
+            value = self._child_text(set_entry, panos_name)
+            if value and value.isdigit():
+                payload[scm_name] = int(value)
+
+        metric = self._child_text(set_entry, 'metric')
+        if metric and metric.isdigit():
+            payload['metric'] = {'action': 'set', 'value': int(metric)}
+
+        origin = self._child_text(set_entry, 'origin')
+        if origin:
+            payload['origin'] = origin
+
+        next_hop = self._child_text(set_entry, 'nexthop')
+        if next_hop:
+            payload['ipv4'] = {'next_hop': next_hop}
 
         return payload or None
 

@@ -77,7 +77,7 @@ python3 main.py \
   --object-scope folder:All \
   --policy-scope folder:All \
   --dry-run \
-  -o InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,PbfRule,Zones
+  -o InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,RoutePrefixList,BgpRouteMap,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,PbfRule,Zones
 ```
 
 The legacy `--scope folder:All` option still works as a fallback for all categories. Prefer the category-specific flags when network snippets and policy folders are different.
@@ -138,6 +138,8 @@ The legacy `--scope folder:All` option still works as a fallback for all categor
 - **VLAN Interfaces**
 - **Tunnel Interfaces**
 - **Loopback Interfaces**
+- **Route Prefix Lists from BGP Import/Export Policy Prefix Matches**
+- **BGP Route Maps from BGP Import/Export Policy Rules**
 - **Logical Routers with IPv4/IPv6 Static Routes**
 - **IKE Crypto Profiles**
 - **IPsec Crypto Profiles**
@@ -150,7 +152,9 @@ Network features currently support local firewall XML only. Panorama templates a
 
 DHCP client mode is supported for Layer 3 ethernet interfaces and Layer 3 ethernet subinterfaces. Static IP mode remains supported for ethernet, aggregate, subinterface, VLAN, tunnel, and loopback interfaces.
 
-PAN-OS local firewall XML stores routes under `network/virtual-router`; this tool maps those source entries into SCM Logical Routers with `routing_stack` set to `advanced` for ARE-enabled firewalls. DHCP interface migration covers common local firewall DHCP server and relay interface settings. Logical router migration includes IPv4/IPv6 static routes, BFD profile references, and static route path-monitor data.
+PAN-OS local firewall XML stores routes under `network/virtual-router`; this tool maps those source entries into SCM Logical Routers with `routing_stack` set to `advanced` for ARE-enabled firewalls. DHCP interface migration covers common local firewall DHCP server and relay interface settings. Logical router migration includes IPv4/IPv6 static routes, BFD profile references, static route path-monitor data, and BGP export route-map references under the Logical Router RIB filter.
+
+BGP import policy rules are converted into route-map objects, but they are not attached to a Logical Router until BGP peer/address-family migration is implemented because SCM applies import policy at BGP peer/address-family depth.
 
 Virtual-wire zone membership is parsed under security zones. Physical ethernet interfaces using virtual-wire mode are detected in the ethernet interface parser, but SCM currently exposes virtual-wire assignment differently than a standalone network object, so validate those dry-run payloads before posting.
 

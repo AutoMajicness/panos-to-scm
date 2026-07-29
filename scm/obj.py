@@ -91,6 +91,14 @@ class LogicalRouter(PanApiHandler):
     _endpoint = "/config/network/v1/logical-routers"
     _scope_in_payload = True
 
+class RoutePrefixList(PanApiHandler):
+    _endpoint = "/config/network/v1/route-prefix-lists"
+    _scope_in_payload = True
+
+class BgpRouteMap(PanApiHandler):
+    _endpoint = "/config/network/v1/bgp-route-maps"
+    _scope_in_payload = True
+
 class IKECryptoProfile(PanApiHandler):
     _endpoint = "/config/network/v1/ike-crypto-profiles"
     _scope_in_payload = True
