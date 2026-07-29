@@ -111,6 +111,7 @@ class XMLParser:
             'Application': self._parse_entries(self._application_entries),
             'InterfaceManagementProfile': self._parse_entries(self._interface_management_profile_entries),
             'ZoneProtectionProfile': self._parse_entries(self._zone_protection_profile_entries),
+            'DHCPInterface': self._parse_entries(self._dhcp_interface_entries),
             'AggregateInterface': self._parse_entries(self._aggregate_interface_entries),
             'EthernetInterface': self._parse_entries(self._ethernet_interface_entries),
             'Layer2Subinterface': self._parse_entries(self._layer2_subinterface_entries),
@@ -123,6 +124,7 @@ class XMLParser:
             'IPsecCryptoProfile': self._parse_entries(self._ipsec_crypto_profile_entries),
             'IKEGateway': self._parse_entries(self._ike_gateway_entries),
             'IPsecTunnel': self._parse_entries(self._ipsec_tunnel_entries),
+            'PbfRule': self._parse_entries(self._pbf_rule_entries),
             'Zones': self._parse_entries(self._zones),
             'DecryptionProfile': self._parse_entries(self._decryption_profiles_entries),
             'decryption_pre_rules': self._parse_entries(self._decryption_pre_rules_entries),
@@ -160,6 +162,7 @@ class XMLParser:
             'Application': self._application_entries,
             'InterfaceManagementProfile': self._interface_management_profile_entries,
             'ZoneProtectionProfile': self._zone_protection_profile_entries,
+            'DHCPInterface': self._dhcp_interface_entries,
             'AggregateInterface': self._aggregate_interface_entries,
             'EthernetInterface': self._ethernet_interface_entries,
             'Layer2Subinterface': self._layer2_subinterface_entries,
@@ -172,6 +175,7 @@ class XMLParser:
             'IPsecCryptoProfile': self._ipsec_crypto_profile_entries,
             'IKEGateway': self._ike_gateway_entries,
             'IPsecTunnel': self._ipsec_tunnel_entries,
+            'PbfRule': self._pbf_rule_entries,
             'Zones': self._zones,
             'DecryptionProfile': self._decryption_profiles_entries,
             'decryption_pre_rules': self._decryption_pre_rules_entries,
@@ -1889,6 +1893,149 @@ class XMLParser:
             return list(entry)[0].tag.replace('-', '_')
         return None
 
+    def _dhcp_interface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("DHCP interface migration currently supports local firewall XML only.")
+            return []
+
+        interfaces = []
+        for entry in self.root.findall('./devices/entry/network/dhcp/interface/entry'):
+            payload = self._convert_dhcp_interface(entry)
+            if payload:
+                interfaces.append(payload)
+
+        return interfaces
+
+    def _convert_dhcp_interface(self, entry):
+        interface_name = entry.get('name')
+        if not interface_name:
+            return None
+
+        payload = {'name': interface_name}
+
+        server = self._convert_dhcp_server(entry.find('server'))
+        if server:
+            payload['server'] = server
+
+        relay = self._convert_dhcp_relay(entry.find('relay'))
+        if relay:
+            payload['relay'] = relay
+
+        if not server and not relay:
+            self.logger.warning(f"Skipping DHCP interface '{interface_name}' because it has no supported server or relay configuration.")
+            return None
+
+        return payload
+
+    def _convert_dhcp_server(self, server):
+        if server is None:
+            return None
+
+        payload = {}
+        mode = self._child_text(server, 'mode')
+        if mode:
+            payload['mode'] = mode
+
+        ip_pool = self._member_or_entry_names(server.find('ip-pool'))
+        if ip_pool:
+            payload['ip_pool'] = ip_pool
+
+        option = self._convert_dhcp_server_option(server.find('option'))
+        if option:
+            payload['option'] = option
+
+        reserved = []
+        for reserved_entry in server.findall('reserved/entry'):
+            reservation = self._convert_dhcp_reservation(reserved_entry)
+            if reservation:
+                reserved.append(reservation)
+        if reserved:
+            payload['reserved'] = reserved
+
+        return payload or None
+
+    def _convert_dhcp_server_option(self, option):
+        if option is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('gateway', 'gateway'),
+            ('subnet-mask', 'subnet_mask'),
+            ('primary-dns', 'primary_dns'),
+            ('secondary-dns', 'secondary_dns'),
+            ('primary-wins', 'primary_wins'),
+            ('secondary-wins', 'secondary_wins'),
+            ('domain', 'domain'),
+        ]:
+            value = self._child_text(option, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        lease = self._convert_dhcp_lease(option.find('lease'))
+        if lease:
+            payload['lease'] = lease
+
+        dns_suffix = self._member_texts(option.find('dns-suffix'))
+        if dns_suffix:
+            payload['dns_suffix'] = dns_suffix
+
+        return payload or None
+
+    def _convert_dhcp_lease(self, lease):
+        if lease is None:
+            return None
+
+        if lease.find('unlimited') is not None:
+            return {'unlimited': {}}
+
+        timeout = lease.find('timeout')
+        if timeout is not None:
+            timeout_payload = self._int_child_map(
+                timeout,
+                {
+                    'days': 'days',
+                    'hours': 'hours',
+                    'minutes': 'minutes',
+                },
+            )
+            if timeout_payload:
+                return {'timeout': timeout_payload}
+
+        return None
+
+    def _convert_dhcp_reservation(self, entry):
+        reservation_name = entry.get('name')
+        if not reservation_name:
+            return None
+
+        payload = {'name': reservation_name}
+        for panos_name, scm_name in [
+            ('mac', 'mac'),
+            ('ip', 'ip'),
+            ('description', 'description'),
+        ]:
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        return payload
+
+    def _convert_dhcp_relay(self, relay):
+        if relay is None:
+            return None
+
+        payload = {}
+        enabled = self._child_text(relay, 'enable')
+        if enabled:
+            payload['enable'] = enabled.lower() == 'yes'
+
+        servers = self._member_texts(relay.find('server'))
+        if servers:
+            payload['server'] = servers
+
+        return payload or None
+
     def _aggregate_interface_entries(self):
         if self.config_type != 'local':
             self.logger.warning("Aggregate interface migration currently supports local firewall XML only.")
@@ -2308,6 +2455,16 @@ class XMLParser:
         if static_routes:
             vrf['routing_table'] = {'ip': {'static_route': static_routes}}
 
+        static_routes_v6 = []
+        for route_entry in entry.findall('routing-table/ipv6/static-route/entry'):
+            route = self._convert_static_route(route_entry)
+            if route:
+                static_routes_v6.append(route)
+
+        if static_routes_v6:
+            routing_table = vrf.setdefault('routing_table', {})
+            routing_table['ipv6'] = {'static_route': static_routes_v6}
+
         return {
             'name': router_name,
             'routing_stack': 'legacy',
@@ -2342,6 +2499,14 @@ class XMLParser:
         if nexthop:
             route['nexthop'] = nexthop
 
+        bfd_profile = self._child_text(entry, 'bfd/profile')
+        if bfd_profile:
+            route['bfd_profile'] = bfd_profile
+
+        path_monitor = self._convert_static_route_path_monitor(entry.find('path-monitor'))
+        if path_monitor:
+            route['path_monitor'] = path_monitor
+
         return route
 
     def _convert_static_route_nexthop(self, nexthop):
@@ -2366,6 +2531,50 @@ class XMLParser:
                 return {empty_field: {}}
 
         return None
+
+    def _convert_static_route_path_monitor(self, path_monitor):
+        if path_monitor is None:
+            return None
+
+        payload = {}
+        enabled = self._child_text(path_monitor, 'enable')
+        if enabled:
+            payload['enable'] = enabled.lower() == 'yes'
+
+        failure_condition = self._child_text(path_monitor, 'failure-condition')
+        if failure_condition:
+            payload['failure_condition'] = failure_condition
+
+        hold_time = self._child_text(path_monitor, 'hold-time')
+        if hold_time and hold_time.isdigit():
+            payload['hold_time'] = int(hold_time)
+
+        destinations = []
+        for destination_entry in path_monitor.findall('monitor-destinations/entry'):
+            destination = {'name': destination_entry.get('name')}
+            for panos_name, scm_name in [
+                ('enable', 'enable'),
+                ('source', 'source'),
+                ('destination', 'destination'),
+                ('interval', 'interval'),
+                ('count', 'count'),
+            ]:
+                value = self._child_text(destination_entry, panos_name)
+                if not value:
+                    continue
+                if panos_name == 'enable':
+                    destination[scm_name] = value.lower() == 'yes'
+                elif value.isdigit():
+                    destination[scm_name] = int(value)
+                else:
+                    destination[scm_name] = value
+            if destination.get('name'):
+                destinations.append(destination)
+
+        if destinations:
+            payload['monitor_destinations'] = destinations
+
+        return payload or None
 
     def _ike_crypto_profile_entries(self):
         if self.config_type != 'local':
@@ -2668,6 +2877,114 @@ class XMLParser:
         proxy_id = self._child_text(tunnel_monitor, 'proxy-id')
         if proxy_id:
             payload['proxy_id'] = proxy_id
+
+        return payload or None
+
+    def _pbf_rule_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("PBF rule migration currently supports local firewall XML only.")
+            return []
+
+        rules = []
+        for entry in self.root.findall('./devices/entry/vsys/entry/rulebase/pbf/rules/entry'):
+            payload = self._convert_pbf_rule(entry)
+            if payload:
+                rules.append(payload)
+
+        return rules
+
+    def _convert_pbf_rule(self, entry):
+        rule_name = entry.get('name')
+        if not rule_name:
+            return None
+
+        payload = {'name': rule_name}
+        description = self._child_text(entry, 'description')
+        if description:
+            payload['description'] = description
+
+        for panos_name, scm_name in [
+            ('from', 'from'),
+            ('source', 'source'),
+            ('source-user', 'source_user'),
+            ('destination', 'destination'),
+            ('application', 'application'),
+            ('service', 'service'),
+        ]:
+            values = self._member_texts(entry.find(panos_name))
+            if values:
+                payload[scm_name] = values
+
+        for panos_name, scm_name in [
+            ('negate-source', 'negate_source'),
+            ('negate-destination', 'negate_destination'),
+            ('disabled', 'disabled'),
+        ]:
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes'
+
+        tags = self._member_texts(entry.find('tag'))
+        if tags:
+            payload['tag'] = tags
+
+        action = self._convert_pbf_action(entry.find('action'))
+        if action:
+            payload['action'] = action
+
+        return payload
+
+    def _convert_pbf_action(self, action):
+        if action is None:
+            return None
+
+        forwarding = action.find('forwarding')
+        if forwarding is not None:
+            forwarding_payload = self._convert_named_text_fields(
+                forwarding,
+                {
+                    'egress-interface': 'egress_interface',
+                },
+            ) or {}
+
+            symmetric_return = self._child_text(forwarding, 'symmetric-return')
+            if symmetric_return:
+                forwarding_payload['symmetric_return'] = symmetric_return.lower() == 'yes'
+
+            nexthop = self._convert_static_route_nexthop(forwarding.find('nexthop'))
+            if nexthop:
+                forwarding_payload['nexthop'] = nexthop
+
+            monitor = self._convert_pbf_monitor(forwarding.find('monitor'))
+            if monitor:
+                forwarding_payload['monitor'] = monitor
+
+            return {'forwarding': forwarding_payload}
+
+        if action.find('no-pbf') is not None:
+            return {'no_pbf': {}}
+
+        if action.find('discard') is not None:
+            return {'discard': {}}
+
+        return None
+
+    def _convert_pbf_monitor(self, monitor):
+        if monitor is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('ip-address', 'ip_address'),
+            ('profile', 'profile'),
+        ]:
+            value = self._child_text(monitor, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        disable_if_unreachable = self._child_text(monitor, 'disable-if-unreachable')
+        if disable_if_unreachable:
+            payload['disable_if_unreachable'] = disable_if_unreachable.lower() == 'yes'
 
         return payload or None
 

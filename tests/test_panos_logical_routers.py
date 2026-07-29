@@ -32,9 +32,38 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
                     <nexthop>
                       <discard />
                     </nexthop>
+                    <bfd>
+                      <profile>default</profile>
+                    </bfd>
+                    <path-monitor>
+                      <enable>yes</enable>
+                      <failure-condition>any</failure-condition>
+                      <hold-time>2</hold-time>
+                      <monitor-destinations>
+                        <entry name="probe1">
+                          <enable>yes</enable>
+                          <source>10.0.0.1</source>
+                          <destination>10.0.0.254</destination>
+                          <interval>3</interval>
+                          <count>5</count>
+                        </entry>
+                      </monitor-destinations>
+                    </path-monitor>
                   </entry>
                 </static-route>
               </ip>
+              <ipv6>
+                <static-route>
+                  <entry name="default-v6">
+                    <destination>::/0</destination>
+                    <interface>ethernet1/1</interface>
+                    <nexthop>
+                      <ipv6-address>2001:db8::1</ipv6-address>
+                    </nexthop>
+                    <metric>20</metric>
+                  </entry>
+                </static-route>
+              </ipv6>
             </routing-table>
           </entry>
         </virtual-router>
@@ -78,9 +107,36 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                             "name": "discard-rfc1918",
                                             "destination": "10.0.0.0/8",
                                             "nexthop": {"discard": {}},
+                                            "bfd_profile": "default",
+                                            "path_monitor": {
+                                                "enable": True,
+                                                "failure_condition": "any",
+                                                "hold_time": 2,
+                                                "monitor_destinations": [
+                                                    {
+                                                        "name": "probe1",
+                                                        "enable": True,
+                                                        "source": "10.0.0.1",
+                                                        "destination": "10.0.0.254",
+                                                        "interval": 3,
+                                                        "count": 5,
+                                                    }
+                                                ],
+                                            },
                                         },
                                     ]
-                                }
+                                },
+                                "ipv6": {
+                                    "static_route": [
+                                        {
+                                            "name": "default-v6",
+                                            "destination": "::/0",
+                                            "interface": "ethernet1/1",
+                                            "metric": 20,
+                                            "nexthop": {"ipv6_address": "2001:db8::1"},
+                                        }
+                                    ]
+                                },
                             },
                         }
                     ],

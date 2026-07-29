@@ -59,6 +59,10 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(obj.ZoneProtectionProfile.get_endpoint(), "/config/network/v1/zone-protection-profiles")
         self.assertTrue(obj.ZoneProtectionProfile.uses_payload_scope())
 
+    def test_dhcp_interface_endpoint_is_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.DHCPInterface.get_endpoint(), "/config/network/v1/dhcp-interfaces")
+        self.assertTrue(obj.DHCPInterface.uses_payload_scope())
+
     def test_aggregate_interface_endpoint_is_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.AggregateInterface.get_endpoint(), "/config/network/v1/aggregate-interfaces")
         self.assertTrue(obj.AggregateInterface.uses_payload_scope())
@@ -98,6 +102,10 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertTrue(obj.IPsecCryptoProfile.uses_payload_scope())
         self.assertTrue(obj.IKEGateway.uses_payload_scope())
         self.assertTrue(obj.IPsecTunnel.uses_payload_scope())
+
+    def test_pbf_rule_endpoint_is_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.PbfRule.get_endpoint(), "/config/network/v1/pbf-rules")
+        self.assertTrue(obj.PbfRule.uses_payload_scope())
 
 
 class PanApiHandlerTests(unittest.TestCase):
@@ -224,6 +232,31 @@ class ProcessorTests(unittest.TestCase):
             {
                 "name": "internet-zpp",
                 "description": "edge",
+                "snippet": "Network-Stack",
+            },
+        )
+
+    def test_dhcp_interface_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.DHCPInterface], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&snippet=Network-Stack",
+            [{"name": "vlan.100", "server": {"ip_pool": ["10.100.0.10-10.100.0.200"]}}],
+            obj.DHCPInterface,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/network/v1/dhcp-interfaces",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {
+                "name": "vlan.100",
+                "server": {"ip_pool": ["10.100.0.10-10.100.0.200"]},
                 "snippet": "Network-Stack",
             },
         )
@@ -469,6 +502,31 @@ class ProcessorTests(unittest.TestCase):
                     "ike_gateway": [{"name": "vpn-gw-a"}],
                     "ipsec_crypto_profile": "ipsec-crypto-a",
                 },
+                "snippet": "Network-Stack",
+            },
+        )
+
+    def test_pbf_rule_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.PbfRule], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&snippet=Network-Stack",
+            [{"name": "send-guest-to-isp2", "action": {"forwarding": {"egress_interface": "ethernet1/2"}}}],
+            obj.PbfRule,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/network/v1/pbf-rules",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {
+                "name": "send-guest-to-isp2",
+                "action": {"forwarding": {"egress_interface": "ethernet1/2"}},
                 "snippet": "Network-Stack",
             },
         )

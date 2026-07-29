@@ -55,6 +55,10 @@ class ZoneProtectionProfile(PanApiHandler):
     _endpoint = "/config/network/v1/zone-protection-profiles"
     _scope_in_payload = True
 
+class DHCPInterface(PanApiHandler):
+    _endpoint = "/config/network/v1/dhcp-interfaces"
+    _scope_in_payload = True
+
 class AggregateInterface(PanApiHandler):
     _endpoint = "/config/network/v1/aggregate-interfaces"
     _scope_in_payload = True
@@ -101,6 +105,10 @@ class IKEGateway(PanApiHandler):
 
 class IPsecTunnel(PanApiHandler):
     _endpoint = "/config/network/v1/ipsec-tunnels"
+    _scope_in_payload = True
+
+class PbfRule(PanApiHandler):
+    _endpoint = "/config/network/v1/pbf-rules"
     _scope_in_payload = True
 
 class Address(PanApiHandler):

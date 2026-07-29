@@ -152,6 +152,7 @@ class MainDryRunTests(unittest.TestCase):
         parsed_data = {
             "InterfaceManagementProfile": [{"name": "allow-mgmt", "ping": True}],
             "ZoneProtectionProfile": [{"name": "internet-zpp", "description": "edge"}],
+            "DHCPInterface": [{"name": "vlan.100", "server": {"ip_pool": ["10.100.0.10-10.100.0.200"]}}],
             "AggregateInterface": [{"name": "$ae1", "default_value": "ae1", "layer3": {}}],
             "EthernetInterface": [
                 {
@@ -265,6 +266,7 @@ class MainDryRunTests(unittest.TestCase):
         parsed_data = {
             "InterfaceManagementProfile": [{"name": "allow-mgmt", "ping": True}],
             "ZoneProtectionProfile": [{"name": "internet-zpp", "description": "edge"}],
+            "DHCPInterface": [{"name": "vlan.100", "server": {"ip_pool": ["10.100.0.10-10.100.0.200"]}}],
             "AggregateInterface": [{"name": "$ae1", "default_value": "ae1", "layer3": {}}],
             "EthernetInterface": [
                 {
@@ -283,6 +285,7 @@ class MainDryRunTests(unittest.TestCase):
             "IPsecCryptoProfile": [{"name": "ipsec-crypto-a", "esp": {"encryption": ["aes-256-gcm"]}}],
             "IKEGateway": [{"name": "vpn-gw-a", "protocol": {"ikev2": {"ike_crypto_profile": "ike-crypto-a"}}}],
             "IPsecTunnel": [{"name": "vpn-tunnel-a", "tunnel_interface": "tunnel.1"}],
+            "PbfRule": [{"name": "send-guest-to-isp2", "action": {"forwarding": {"egress_interface": "ethernet1/2"}}}],
             "Zones": [{"name": "users", "network": {"layer3": ["ethernet1/1.100"]}}],
         }
 
@@ -293,20 +296,21 @@ class MainDryRunTests(unittest.TestCase):
             with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
                 plan = main.main(
                     AppConfig(),
-                    run_objects="InterfaceManagementProfile,ZoneProtectionProfile,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,Zones",
+                    run_objects="InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,PbfRule,Zones",
                     json_file=str(parsed_path),
                     dry_run=True,
                     network_scope="snippet:Network-Stack",
                 )
 
-        self.assertEqual(plan.summary()["creates"], 15)
+        self.assertEqual(plan.summary()["creates"], 17)
         self.assertEqual(
             [change.object_type for change in plan.creates],
             [
-                "InterfaceManagementProfile", "ZoneProtectionProfile", "AggregateInterface",
-                "EthernetInterface", "Layer2Subinterface", "Layer3Subinterface",
+                "InterfaceManagementProfile", "ZoneProtectionProfile", "DHCPInterface",
+                "AggregateInterface", "EthernetInterface", "Layer2Subinterface", "Layer3Subinterface",
                 "VlanInterface", "TunnelInterface", "LoopbackInterface", "LogicalRouter",
-                "IKECryptoProfile", "IPsecCryptoProfile", "IKEGateway", "IPsecTunnel", "Zones"
+                "IKECryptoProfile", "IPsecCryptoProfile", "IKEGateway", "IPsecTunnel",
+                "PbfRule", "Zones"
             ],
         )
 
@@ -347,6 +351,25 @@ class MainDryRunTests(unittest.TestCase):
 
         self.assertEqual(plan.summary()["creates"], 1)
         self.assertEqual(plan.creates[0].object_type, "ZoneProtectionProfile")
+
+    def test_dhcp_interfaces_can_use_network_scope_for_dry_run(self):
+        parsed_data = {"DHCPInterface": [{"name": "vlan.100", "server": {"ip_pool": ["10.100.0.10-10.100.0.200"]}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="DHCPInterface",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "DHCPInterface")
 
     def test_aggregate_interfaces_can_use_network_scope_for_dry_run(self):
         parsed_data = {"AggregateInterface": [{"name": "$ae1", "default_value": "ae1", "layer3": {}}]}
@@ -453,6 +476,25 @@ class MainDryRunTests(unittest.TestCase):
             [change.object_type for change in plan.creates],
             ["IKECryptoProfile", "IPsecCryptoProfile", "IKEGateway", "IPsecTunnel"],
         )
+
+    def test_pbf_rules_can_use_network_scope_for_dry_run(self):
+        parsed_data = {"PbfRule": [{"name": "send-guest-to-isp2", "action": {"forwarding": {"egress_interface": "ethernet1/2"}}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="PbfRule",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "PbfRule")
 
     def test_object_dry_run_falls_back_to_default_scope(self):
         parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
