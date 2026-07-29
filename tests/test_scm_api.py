@@ -105,6 +105,10 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(obj.BgpAddressFamilyProfile.get_endpoint(), "/config/network/v1/bgp-address-family-profiles")
         self.assertTrue(obj.BgpAddressFamilyProfile.uses_payload_scope())
 
+    def test_bgp_filtering_profile_endpoint_is_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.BgpFilteringProfile.get_endpoint(), "/config/network/v1/bgp-filtering-profiles")
+        self.assertTrue(obj.BgpFilteringProfile.uses_payload_scope())
+
     def test_route_filter_endpoints_are_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.RoutePrefixList.get_endpoint(), "/config/network/v1/route-prefix-lists")
         self.assertEqual(obj.RouteAccessList.get_endpoint(), "/config/network/v1/route-access-lists")
@@ -562,6 +566,11 @@ class ProcessorTests(unittest.TestCase):
                 obj.BgpAddressFamilyProfile,
                 "/config/network/v1/bgp-address-family-profiles",
                 {"name": "default-upstream-ipv4-af", "ipv4": {"unicast": {"send_community": {"both": {}}}}},
+            ),
+            (
+                obj.BgpFilteringProfile,
+                "/config/network/v1/bgp-filtering-profiles",
+                {"name": "default-ipv4-bgp-filtering", "ipv4": {"unicast": {"route_maps": {"inbound": "import-rm"}}}},
             ),
             (
                 obj.RouteAccessList,

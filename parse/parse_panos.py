@@ -122,6 +122,7 @@ class XMLParser:
             'OSPFAuthProfile': self._parse_entries(self._ospf_auth_profile_entries),
             'BgpAuthProfile': self._parse_entries(self._bgp_auth_profile_entries),
             'BgpAddressFamilyProfile': self._parse_entries(self._bgp_address_family_profile_entries),
+            'BgpFilteringProfile': self._parse_entries(self._bgp_filtering_profile_entries),
             'LogicalRouter': self._parse_entries(self._logical_router_entries),
             'RoutePrefixList': self._parse_entries(self._route_prefix_list_entries),
             'RouteAccessList': self._parse_entries(self._route_access_list_entries),
@@ -183,6 +184,7 @@ class XMLParser:
             'OSPFAuthProfile': self._ospf_auth_profile_entries,
             'BgpAuthProfile': self._bgp_auth_profile_entries,
             'BgpAddressFamilyProfile': self._bgp_address_family_profile_entries,
+            'BgpFilteringProfile': self._bgp_filtering_profile_entries,
             'LogicalRouter': self._logical_router_entries,
             'RoutePrefixList': self._route_prefix_list_entries,
             'RouteAccessList': self._route_access_list_entries,
@@ -3393,6 +3395,94 @@ class XMLParser:
             return self._sanitize_name(f"{router_name}-{group_name}-{peer_name}-{family}-af")
         return self._sanitize_name(f"{router_name}-{group_name}-{family}-af")
 
+    def _bgp_filtering_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("BGP filtering profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for family in ['ipv4', 'ipv6']:
+                unicast = self._convert_bgp_filtering_profile_unicast(router_entry, family)
+                if not unicast:
+                    continue
+                profiles.append(
+                    {
+                        'name': self._bgp_filtering_profile_name(router_entry, family),
+                        family: {'unicast': unicast},
+                    }
+                )
+        return profiles
+
+    def _convert_bgp_filtering_profile_unicast(self, router_entry, family):
+        payload = {}
+
+        route_maps = {}
+        inbound_route_map = self._first_bgp_policy_artifact(router_entry, 'import', family, self._bgp_policy_route_map_name)
+        if inbound_route_map:
+            route_maps['inbound'] = inbound_route_map
+        outbound_route_map = self._first_bgp_policy_artifact(router_entry, 'export', family, self._bgp_policy_route_map_name)
+        if outbound_route_map:
+            route_maps['outbound'] = outbound_route_map
+        if route_maps:
+            payload['route_maps'] = route_maps
+
+        inbound_filters = self._convert_bgp_filtering_network_filters(router_entry, 'import', family)
+        if inbound_filters:
+            payload['inbound_network_filters'] = inbound_filters
+
+        outbound_filters = self._convert_bgp_filtering_network_filters(router_entry, 'export', family)
+        if outbound_filters:
+            payload['outbound_network_filters'] = outbound_filters
+
+        return payload or None
+
+    def _convert_bgp_filtering_network_filters(self, router_entry, direction, family):
+        filters = {}
+        prefix_list = self._first_bgp_policy_artifact(
+            router_entry,
+            direction,
+            family,
+            self._bgp_policy_prefix_list_name,
+            needs_prefix=True,
+        )
+        if prefix_list:
+            filters['prefix_list'] = prefix_list
+
+        access_list = self._first_bgp_policy_artifact(
+            router_entry,
+            direction,
+            family,
+            self._bgp_policy_access_list_name,
+            needs_access_list=True,
+        )
+        if access_list:
+            filters['distribute_list'] = access_list
+
+        return filters or None
+
+    def _first_bgp_policy_artifact(
+        self,
+        router_entry,
+        direction,
+        family,
+        name_builder,
+        needs_prefix=False,
+        needs_access_list=False,
+    ):
+        for rule_entry in self._bgp_policy_rule_entries(router_entry, direction):
+            if self._bgp_policy_rule_family(rule_entry) != family:
+                continue
+            if needs_prefix and not self._bgp_policy_rule_prefixes(rule_entry):
+                continue
+            if needs_access_list and not self._member_texts(rule_entry.find('match/route-table/access-list')):
+                continue
+            return name_builder(router_entry, direction, rule_entry)
+        return None
+
+    def _bgp_filtering_profile_name(self, router_entry, family):
+        return self._sanitize_name(f"{router_entry.get('name')}-{family}-bgp-filtering")
+
     def _route_prefix_list_entries(self):
         if self.config_type != 'local':
             self.logger.warning("Route prefix list migration currently supports local firewall XML only.")
@@ -3752,12 +3842,14 @@ class XMLParser:
         if import_ipv4_route_maps or export_ipv4_route_maps or import_ipv6_route_maps or export_ipv6_route_maps:
             if import_ipv4_route_maps or export_ipv4_route_maps:
                 address_family.setdefault('ipv4', {'unicast': {}})
+                address_family['ipv4']['unicast']['filtering_profile'] = self._bgp_filtering_profile_name(router_entry, 'ipv4')
                 if import_ipv4_route_maps:
                     address_family['ipv4']['unicast']['import_route_map'] = import_ipv4_route_maps[0]
                 if export_ipv4_route_maps:
                     address_family['ipv4']['unicast']['export_route_map'] = export_ipv4_route_maps[0]
             if import_ipv6_route_maps or export_ipv6_route_maps:
                 address_family.setdefault('ipv6', {'unicast': {}})
+                address_family['ipv6']['unicast']['filtering_profile'] = self._bgp_filtering_profile_name(router_entry, 'ipv6')
                 if import_ipv6_route_maps:
                     address_family['ipv6']['unicast']['import_route_map'] = import_ipv6_route_maps[0]
                 if export_ipv6_route_maps:

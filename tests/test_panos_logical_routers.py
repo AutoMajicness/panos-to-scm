@@ -438,6 +438,7 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                                 "address_family": {
                                                     "ipv4": {
                                                         "unicast": {
+                                                            "filtering_profile": "default-ipv4-bgp-filtering",
                                                             "import_route_map": "default-import-import-private-rm",
                                                             "export_route_map": "default-export-export-default-rm",
                                                         }
@@ -445,6 +446,7 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                                     "ipv6": {
                                                         "unicast": {
                                                             "address_family_profile": "default-upstream-peer-a-ipv6-af",
+                                                            "filtering_profile": "default-ipv6-bgp-filtering",
                                                             "import_route_map": "default-import-import-v6-rm",
                                                             "export_route_map": "default-export-export-v6-rm",
                                                         }
@@ -629,6 +631,7 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                     "OSPFAuthProfile",
                     "BgpAuthProfile",
                     "BgpAddressFamilyProfile",
+                    "BgpFilteringProfile",
                     "RoutePrefixList",
                     "RouteAccessList",
                     "RouteCommunityList",
@@ -692,6 +695,46 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                             },
                             "next_hop": {"self": {}},
                             "remove_private_AS": {"replace_AS": {}},
+                        }
+                    },
+                },
+            ],
+        )
+        self.assertEqual(
+            parsed["BgpFilteringProfile"],
+            [
+                {
+                    "name": "default-ipv4-bgp-filtering",
+                    "ipv4": {
+                        "unicast": {
+                            "route_maps": {
+                                "inbound": "default-import-import-private-rm",
+                                "outbound": "default-export-export-default-rm",
+                            },
+                            "inbound_network_filters": {
+                                "prefix_list": "default-import-import-private-pl",
+                                "distribute_list": "default-import-import-access-list-acl",
+                            },
+                            "outbound_network_filters": {
+                                "prefix_list": "default-export-export-default-pl",
+                            },
+                        }
+                    },
+                },
+                {
+                    "name": "default-ipv6-bgp-filtering",
+                    "ipv6": {
+                        "unicast": {
+                            "route_maps": {
+                                "inbound": "default-import-import-v6-rm",
+                                "outbound": "default-export-export-v6-rm",
+                            },
+                            "inbound_network_filters": {
+                                "prefix_list": "default-import-import-v6-pl",
+                            },
+                            "outbound_network_filters": {
+                                "prefix_list": "default-export-export-v6-pl",
+                            },
                         }
                     },
                 },

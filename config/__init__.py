@@ -25,6 +25,7 @@ class AppConfig:
             obj.EthernetInterface, obj.Layer2Subinterface, obj.Layer3Subinterface,
             obj.VlanInterface, obj.TunnelInterface, obj.LoopbackInterface,
             obj.OSPFAuthProfile, obj.BgpAuthProfile, obj.BgpAddressFamilyProfile,
+            obj.BgpFilteringProfile,
             obj.RoutePrefixList, obj.RouteAccessList, obj.RouteCommunityList,
             obj.RoutePathAccessList, obj.BgpRouteMap, obj.BgpRouteMapRedistribution,
             obj.BgpRedistributionProfile, obj.LogicalRouter,
