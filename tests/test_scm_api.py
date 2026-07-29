@@ -59,6 +59,10 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(obj.Layer3Subinterface.get_endpoint(), "/config/network/v1/layer3-subinterfaces")
         self.assertTrue(obj.Layer3Subinterface.uses_payload_scope())
 
+    def test_logical_router_endpoint_is_modern_network_api_and_payload_scoped(self):
+        self.assertEqual(obj.LogicalRouter.get_endpoint(), "/config/network/v1/logical-routers")
+        self.assertTrue(obj.LogicalRouter.uses_payload_scope())
+
 
 class PanApiHandlerTests(unittest.TestCase):
     def test_get_uses_strata_base_url_and_query_params(self):
@@ -185,6 +189,32 @@ class ProcessorTests(unittest.TestCase):
                 "name": "ethernet1/1.100",
                 "parent_interface": "ethernet1/1",
                 "tag": 100,
+                "snippet": "Network-Stack",
+            },
+        )
+
+    def test_logical_router_post_puts_scope_in_payload_not_url(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.LogicalRouter], obj.SecurityRule, obj.NatRule)
+
+        manager.configure.post_entries(
+            "&snippet=Network-Stack",
+            [{"name": "default", "routing_stack": "legacy", "vrf": [{"name": "default"}]}],
+            obj.LogicalRouter,
+            extra_query_params="",
+        )
+
+        self.assertEqual(
+            session.post_calls[0]["url"],
+            "https://api.strata.paloaltonetworks.com/config/network/v1/logical-routers",
+        )
+        self.assertEqual(
+            session.post_calls[0]["json"],
+            {
+                "name": "default",
+                "routing_stack": "legacy",
+                "vrf": [{"name": "default"}],
                 "snippet": "Network-Stack",
             },
         )

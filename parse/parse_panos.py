@@ -111,6 +111,7 @@ class XMLParser:
             'Application': self._parse_entries(self._application_entries),
             'EthernetInterface': self._parse_entries(self._ethernet_interface_entries),
             'Layer3Subinterface': self._parse_entries(self._layer3_subinterface_entries),
+            'LogicalRouter': self._parse_entries(self._logical_router_entries),
             'Zones': self._parse_entries(self._zones),
             'DecryptionProfile': self._parse_entries(self._decryption_profiles_entries),
             'decryption_pre_rules': self._parse_entries(self._decryption_pre_rules_entries),
@@ -148,6 +149,7 @@ class XMLParser:
             'Application': self._application_entries,
             'EthernetInterface': self._ethernet_interface_entries,
             'Layer3Subinterface': self._layer3_subinterface_entries,
+            'LogicalRouter': self._logical_router_entries,
             'Zones': self._zones,
             'DecryptionProfile': self._decryption_profiles_entries,
             'decryption_pre_rules': self._decryption_pre_rules_entries,
@@ -1821,6 +1823,101 @@ class XMLParser:
             payload['ip'] = [{'name': ip_address} for ip_address in ip_entries]
 
         return payload
+
+    def _logical_router_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Logical router migration currently supports local firewall XML only.")
+            return []
+
+        logical_routers = []
+        for entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            payload = self._convert_virtual_router(entry)
+            if payload:
+                logical_routers.append(payload)
+
+        return logical_routers
+
+    def _convert_virtual_router(self, entry):
+        router_name = entry.get('name')
+        if not router_name:
+            return None
+
+        vrf = {'name': 'default'}
+        interfaces = [
+            member.text.strip()
+            for member in entry.findall('interface/member')
+            if member.text and member.text.strip()
+        ]
+        if interfaces:
+            vrf['interface'] = interfaces
+
+        static_routes = []
+        for route_entry in entry.findall('routing-table/ip/static-route/entry'):
+            route = self._convert_static_route(route_entry)
+            if route:
+                static_routes.append(route)
+
+        if static_routes:
+            vrf['routing_table'] = {'ip': {'static_route': static_routes}}
+
+        return {
+            'name': router_name,
+            'routing_stack': 'legacy',
+            'vrf': [vrf],
+        }
+
+    def _convert_static_route(self, entry):
+        route_name = entry.get('name')
+        if not route_name:
+            return None
+
+        route = {'name': route_name}
+        field_map = {
+            'destination': 'destination',
+            'interface': 'interface',
+        }
+        for panos_name, scm_name in field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value:
+                route[scm_name] = value
+
+        int_field_map = {
+            'metric': 'metric',
+            'admin-dist': 'admin_dist',
+        }
+        for panos_name, scm_name in int_field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value and value.isdigit():
+                route[scm_name] = int(value)
+
+        nexthop = self._convert_static_route_nexthop(entry.find('nexthop'))
+        if nexthop:
+            route['nexthop'] = nexthop
+
+        return route
+
+    def _convert_static_route_nexthop(self, nexthop):
+        if nexthop is None:
+            return None
+
+        text_fields = {
+            'ip-address': 'ip_address',
+            'ipv6-address': 'ipv6_address',
+            'fqdn': 'fqdn',
+            'next-vr': 'next_vr',
+            'next-lr': 'next_lr',
+            'tunnel': 'tunnel',
+        }
+        for panos_name, scm_name in text_fields.items():
+            value = self._child_text(nexthop, panos_name)
+            if value:
+                return {scm_name: value}
+
+        for empty_field in ['receive', 'discard']:
+            if nexthop.find(empty_field) is not None:
+                return {empty_field: {}}
+
+        return None
 
     @staticmethod
     def _child_text(entry, path):

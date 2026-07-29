@@ -19,7 +19,7 @@ class AppConfig:
             obj.DNSSecurityProfile, obj.ProfileGroup, obj.ApplicationFilter, obj.ApplicationGroup,
             obj.Schedule, obj.DecryptionProfile, obj.HipObject, obj.HipProfile
         ]
-        self.network_obj_types = [obj.EthernetInterface, obj.Layer3Subinterface, obj.Zones]
+        self.network_obj_types = [obj.EthernetInterface, obj.Layer3Subinterface, obj.LogicalRouter, obj.Zones]
         self.sec_obj = obj.SecurityRule
         self.nat_obj = obj.NatRule
         self.app_override_obj = obj.ApplicationOverrideRule

@@ -55,6 +55,10 @@ class Layer3Subinterface(PanApiHandler):
     _endpoint = "/config/network/v1/layer3-subinterfaces"
     _scope_in_payload = True
 
+class LogicalRouter(PanApiHandler):
+    _endpoint = "/config/network/v1/logical-routers"
+    _scope_in_payload = True
+
 class Address(PanApiHandler):
     "An address object"
     _endpoint = "/config/objects/v1/addresses"
