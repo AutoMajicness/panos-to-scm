@@ -6,6 +6,56 @@ from urllib.parse import urlencode
 
 from scm.scope import Scope
 
+
+NETWORK_OBJECT_DEPENDENCY_ORDER = [
+    "InterfaceManagementProfile",
+    "ZoneProtectionProfile",
+    "AggregateInterface",
+    "EthernetInterface",
+    "Layer2Subinterface",
+    "Layer3Subinterface",
+    "VlanInterface",
+    "TunnelInterface",
+    "LoopbackInterface",
+    "DHCPInterface",
+    "Zones",
+    "OSPFAuthProfile",
+    "BgpAuthProfile",
+    "BgpAddressFamilyProfile",
+    "RoutePrefixList",
+    "RouteAccessList",
+    "RouteCommunityList",
+    "RoutePathAccessList",
+    "BgpRouteMap",
+    "BgpRouteMapRedistribution",
+    "BgpFilteringProfile",
+    "BgpRedistributionProfile",
+    "IKECryptoProfile",
+    "IPsecCryptoProfile",
+    "IKEGateway",
+    "IPsecTunnel",
+    "LogicalRouter",
+    "PbfRule",
+]
+
+_NETWORK_OBJECT_ORDER_INDEX = {
+    object_type: index
+    for index, object_type in enumerate(NETWORK_OBJECT_DEPENDENCY_ORDER)
+}
+
+
+def order_object_types_for_dependencies(obj_types):
+    """Return object classes in a safe posting order while preserving unknown types."""
+
+    return sorted(
+        obj_types,
+        key=lambda obj_type: (
+            0 if obj_type.__name__ in _NETWORK_OBJECT_ORDER_INDEX else 1,
+            _NETWORK_OBJECT_ORDER_INDEX.get(obj_type.__name__, len(_NETWORK_OBJECT_ORDER_INDEX)),
+        ),
+    )
+
+
 class Processor:
     def __init__(self, api_handler, max_workers: int, obj_module, scm_object_manager):
         self.api_handler = api_handler
@@ -146,7 +196,7 @@ class SCMObjectManager:
         self.scope = Scope.from_param(scope_param)
         self.configure = Processor(api_handler, 6, obj_module, self)
         self.obj = obj_module
-        self.obj_types = obj_types
+        self.obj_types = order_object_types_for_dependencies(obj_types)
         self.sec_obj = sec_obj
         self.nat_obj = nat_obj        
         self.logger = logging.getLogger(__name__)

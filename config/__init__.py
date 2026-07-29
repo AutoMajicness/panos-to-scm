@@ -20,17 +20,17 @@ class AppConfig:
             obj.Schedule, obj.DecryptionProfile, obj.HipObject, obj.HipProfile
         ]
         self.network_obj_types = [
-            obj.InterfaceManagementProfile, obj.ZoneProtectionProfile, obj.DHCPInterface,
+            obj.InterfaceManagementProfile, obj.ZoneProtectionProfile,
             obj.AggregateInterface,
             obj.EthernetInterface, obj.Layer2Subinterface, obj.Layer3Subinterface,
             obj.VlanInterface, obj.TunnelInterface, obj.LoopbackInterface,
+            obj.DHCPInterface, obj.Zones,
             obj.OSPFAuthProfile, obj.BgpAuthProfile, obj.BgpAddressFamilyProfile,
-            obj.BgpFilteringProfile,
             obj.RoutePrefixList, obj.RouteAccessList, obj.RouteCommunityList,
             obj.RoutePathAccessList, obj.BgpRouteMap, obj.BgpRouteMapRedistribution,
-            obj.BgpRedistributionProfile, obj.LogicalRouter,
+            obj.BgpFilteringProfile, obj.BgpRedistributionProfile,
             obj.IKECryptoProfile, obj.IPsecCryptoProfile,
-            obj.IKEGateway, obj.IPsecTunnel, obj.PbfRule, obj.Zones
+            obj.IKEGateway, obj.IPsecTunnel, obj.LogicalRouter, obj.PbfRule
         ]
         self.sec_obj = obj.SecurityRule
         self.nat_obj = obj.NatRule

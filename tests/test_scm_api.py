@@ -2,7 +2,7 @@ import unittest
 
 import scm.obj as obj
 from scm import PanApiHandler
-from scm.process import Processor, SCMObjectManager
+from scm.process import Processor, SCMObjectManager, order_object_types_for_dependencies
 
 
 class FakeResponse:
@@ -46,6 +46,55 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(obj.Tag.get_endpoint(), "/config/objects/v1/tags")
         self.assertTrue(obj.Address.uses_payload_scope())
         self.assertTrue(obj.ServiceGroup.uses_payload_scope())
+
+    def test_network_object_types_are_ordered_for_post_dependencies(self):
+        unordered = [
+            obj.LogicalRouter,
+            obj.BgpFilteringProfile,
+            obj.BgpRouteMap,
+            obj.RoutePrefixList,
+            obj.IPsecTunnel,
+            obj.IKEGateway,
+            obj.IKECryptoProfile,
+            obj.EthernetInterface,
+            obj.DHCPInterface,
+            obj.Zones,
+        ]
+
+        ordered = order_object_types_for_dependencies(unordered)
+
+        self.assertEqual(
+            [object_type.__name__ for object_type in ordered],
+            [
+                "EthernetInterface",
+                "DHCPInterface",
+                "Zones",
+                "RoutePrefixList",
+                "BgpRouteMap",
+                "BgpFilteringProfile",
+                "IKECryptoProfile",
+                "IKEGateway",
+                "IPsecTunnel",
+                "LogicalRouter",
+            ],
+        )
+
+    def test_scm_object_manager_applies_network_dependency_order(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(
+            handler,
+            "&snippet=Network-Stack",
+            obj,
+            [obj.LogicalRouter, obj.IPsecTunnel, obj.IKEGateway, obj.EthernetInterface],
+            obj.SecurityRule,
+            obj.NatRule,
+        )
+
+        self.assertEqual(
+            [object_type.__name__ for object_type in manager.obj_types],
+            ["EthernetInterface", "IKEGateway", "IPsecTunnel", "LogicalRouter"],
+        )
 
     def test_zones_endpoint_is_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.Zones.get_endpoint(), "/config/network/v1/zones")

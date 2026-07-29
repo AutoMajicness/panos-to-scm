@@ -346,6 +346,49 @@ class MainDryRunTests(unittest.TestCase):
             ["EthernetInterface", "Layer3Subinterface", "Zones"],
         )
 
+    def test_unordered_network_selection_uses_dependency_order(self):
+        parsed_data = {
+            "LogicalRouter": [{"name": "default", "routing_stack": "advanced", "vrf": [{"name": "default"}]}],
+            "BgpFilteringProfile": [{"name": "default-ipv4-bgp-filtering"}],
+            "BgpRouteMap": [{"name": "default-import-rm", "route_map": [{"name": 10, "action": "permit"}]}],
+            "RoutePrefixList": [{"name": "default-prefixes", "prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}]}],
+            "IPsecTunnel": [{"name": "vpn-tunnel-a", "tunnel_interface": "tunnel.1"}],
+            "IKEGateway": [{"name": "vpn-gw-a"}],
+            "IKECryptoProfile": [{"name": "ike-crypto-a", "hash": ["sha256"]}],
+            "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1", "layer3": {}}],
+            "DHCPInterface": [{"name": "ethernet1/1", "server": {"ip_pool": ["10.0.0.10-10.0.0.20"]}}],
+            "Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="LogicalRouter,IPsecTunnel,IKEGateway,IKECryptoProfile,BgpFilteringProfile,BgpRouteMap,RoutePrefixList,Zones,DHCPInterface,EthernetInterface",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(
+            [change.object_type for change in plan.creates],
+            [
+                "EthernetInterface",
+                "DHCPInterface",
+                "Zones",
+                "RoutePrefixList",
+                "BgpRouteMap",
+                "BgpFilteringProfile",
+                "IKECryptoProfile",
+                "IKEGateway",
+                "IPsecTunnel",
+                "LogicalRouter",
+            ],
+        )
+
     def test_logical_routers_can_use_network_scope_for_dry_run(self):
         parsed_data = {
             "LogicalRouter": [
@@ -428,14 +471,14 @@ class MainDryRunTests(unittest.TestCase):
         self.assertEqual(
             [change.object_type for change in plan.creates],
             [
-                "InterfaceManagementProfile", "ZoneProtectionProfile", "DHCPInterface",
+                "InterfaceManagementProfile", "ZoneProtectionProfile",
                 "AggregateInterface", "EthernetInterface", "Layer2Subinterface", "Layer3Subinterface",
-                "VlanInterface", "TunnelInterface", "LoopbackInterface", "OSPFAuthProfile",
-                "BgpAuthProfile", "BgpAddressFamilyProfile", "BgpFilteringProfile", "RoutePrefixList",
-                "RouteAccessList", "RouteCommunityList", "RoutePathAccessList", "BgpRouteMap",
-                "BgpRouteMapRedistribution", "BgpRedistributionProfile", "LogicalRouter",
-                "IKECryptoProfile", "IPsecCryptoProfile", "IKEGateway", "IPsecTunnel",
-                "PbfRule", "Zones"
+                "VlanInterface", "TunnelInterface", "LoopbackInterface", "DHCPInterface",
+                "Zones", "OSPFAuthProfile", "BgpAuthProfile", "BgpAddressFamilyProfile",
+                "RoutePrefixList", "RouteAccessList", "RouteCommunityList", "RoutePathAccessList",
+                "BgpRouteMap", "BgpRouteMapRedistribution", "BgpFilteringProfile",
+                "BgpRedistributionProfile", "IKECryptoProfile", "IPsecCryptoProfile",
+                "IKEGateway", "IPsecTunnel", "LogicalRouter", "PbfRule"
             ],
         )
 
@@ -637,13 +680,13 @@ class MainDryRunTests(unittest.TestCase):
                 "OSPFAuthProfile",
                 "BgpAuthProfile",
                 "BgpAddressFamilyProfile",
-                "BgpFilteringProfile",
                 "RoutePrefixList",
                 "RouteAccessList",
                 "RouteCommunityList",
                 "RoutePathAccessList",
                 "BgpRouteMap",
                 "BgpRouteMapRedistribution",
+                "BgpFilteringProfile",
                 "BgpRedistributionProfile",
             ],
         )
