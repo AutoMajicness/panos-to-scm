@@ -94,6 +94,108 @@
     "ApplicationFilter": [],
     "ApplicationGroup": [],
     "Schedule": [],
+    "InterfaceManagementProfile": [
+        {
+            "name": "ping-only",
+            "ping": true
+        }
+    ],
+    "EthernetInterface": [
+        {
+            "name": "$ethernet1-1",
+            "default_value": "ethernet1/1",
+            "layer3": {
+                "ip": [
+                    {
+                        "name": "203.0.113.2/30"
+                    }
+                ],
+                "interface_management_profile": "ping-only"
+            }
+        },
+        {
+            "name": "$ethernet1-2",
+            "default_value": "ethernet1/2",
+            "layer3": {
+                "ip": [
+                    {
+                        "name": "10.10.5.1/24"
+                    }
+                ]
+            }
+        }
+    ],
+    "TunnelInterface": [
+        {
+            "name": "$tunnel1",
+            "default_value": "tunnel.1",
+            "ip": [
+                {
+                    "name": "10.255.0.1/30"
+                }
+            ]
+        },
+        {
+            "name": "$tunnel2",
+            "default_value": "tunnel.2",
+            "ip": [
+                {
+                    "name": "10.255.0.5/30"
+                }
+            ]
+        }
+    ],
+    "Zones": [
+        {
+            "name": "trust",
+            "network": {
+                "layer3": [
+                    "ethernet1/2"
+                ]
+            }
+        },
+        {
+            "name": "untrust",
+            "network": {
+                "layer3": [
+                    "ethernet1/1"
+                ]
+            }
+        },
+        {
+            "name": "vpn-it",
+            "network": {
+                "layer3": [
+                    "tunnel.1"
+                ]
+            }
+        },
+        {
+            "name": "vpn-zone",
+            "network": {
+                "layer3": [
+                    "tunnel.2"
+                ]
+            }
+        }
+    ],
+    "LogicalRouter": [
+        {
+            "name": "default",
+            "routing_stack": "advanced",
+            "vrf": [
+                {
+                    "name": "default",
+                    "interface": [
+                        "ethernet1/1",
+                        "ethernet1/2",
+                        "tunnel.1",
+                        "tunnel.2"
+                    ]
+                }
+            ]
+        }
+    ],
     "security_pre_rules": [
         {
             "name": "test-scm",
