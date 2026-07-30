@@ -185,7 +185,9 @@ Use `--limit 1` for a quick parser smoke or repeat `--config-file path/to/config
 - Provide current SCM data for offline comparisons: `--current-data current.json`
 - Review schema-sensitive and missing-reference network warnings in dry-run summary/output before posting generated routing payloads.
 
-`--plan-output` includes a `posting_preview` section with dependency-ordered create/update batches by object type. Use this to review the order SCM posts would follow without exposing full payload details in the terminal summary.
+`--plan-output` includes a `posting_preview` section with dependency-ordered create/update batches by object type. Use this to review the order SCM posts would follow without exposing full payload details in the terminal summary. During live posting, the same flag writes a `live-post` validation bundle keyed by phase (`objects`, `network`, `policy`) so the exact pre-post validation inputs are preserved.
+
+`--report-output` writes the network-only offline report when used with `--network-report`. During live posting, it writes a live migration report with validation summaries, final SCM snapshot counts for the selected object categories, rule-order verification results, and any SCM fetch failures that limited verification.
 
 `--current-data` expects a JSON object keyed by SCM object type name. Each value is a list of current tenant objects; at minimum, include `name` for reference validation, and include full payload fields when you want dry-run conflict comparison. A minimal network reference snapshot looks like:
 
@@ -222,7 +224,7 @@ python3 main.py \
   --network-scope snippet:Network-Stack
 ```
 
-Use `--remediation-output /tmp/remediation.json` with `--validate-only`, `--dry-run`, or `--network-report` to write grouped warning actions with examples. This output is intended for review and ticketing; it omits full object payloads.
+Use `--remediation-output /tmp/remediation.json` with `--validate-only`, `--dry-run`, or `--network-report` to write grouped warning actions with examples. This output is intended for review and ticketing; it omits full object payloads. During live posting, the same flag writes the validation remediation items grouped by phase so the remaining review work for a real import is captured alongside the live run.
 
 Live posting is guarded by category. Selected object/profile types require `--post-objects`, selected policy/NAT rulebases require `--post-policy`, and selected network object types require `--post-network`; before posting, the tool builds a local plan and refuses to continue if validation blockers are present. Combine this with `--warnings-as-errors` and `--warning-codes` when you want missing references or parser warnings to stop posting.
 
@@ -256,8 +258,13 @@ python3 main.py \
   --current-data /tmp/current-network.json \
   --strict-local-firewall \
   --post-network \
+  --plan-output /tmp/live-network-plan.json \
+  --remediation-output /tmp/live-network-remediation.json \
+  --report-output /tmp/live-network-report.json \
   -o InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,Zones,LogicalRouter
 ```
+
+For full acceptance on a local firewall import, treat the live report as the proof artifact: validation summaries must show zero blockers, final snapshot counts should match the intended posted object types, and any `rule_order_verification` entries should show `verified: true`. Non-empty `fetch_failures` means SCM accepted the post but the tool could not fully prove final state for the affected endpoint.
 
 ### Currently Supported PAN-OS Migration Features:
 

@@ -247,6 +247,96 @@ class MainDryRunTests(unittest.TestCase):
         self.assertEqual(remediation[0]["object_types"], {"Zones": 1})
         self.assertIn("Include the referenced network object type", remediation[0]["action"])
 
+    def test_live_network_post_writes_validation_and_report_outputs(self):
+        class LiveSession:
+            def __init__(self):
+                self.posts = []
+
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                if url.endswith("/ethernet-interfaces"):
+                    payload = {"data": [{"name": "$ethernet1-1", "default_value": "ethernet1/1"}]} if self.posts else {"data": []}
+                elif url.endswith("/zones"):
+                    payload = {"data": [{"name": "trust", "network": {"layer3": ["$ethernet1-1"]}, "snippet": "Network-Stack"}]} if self.posts else {"data": []}
+                else:
+                    payload = {"data": []}
+
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return payload
+
+                return Response()
+
+            def post(self, url, json=None, timeout=20):
+                self.posts.append({"url": url, "json": json})
+
+                class Response:
+                    status_code = 201
+                    text = ""
+
+                    def json(self):
+                        return {"id": "created"}
+
+                return Response()
+
+            def put(self, url, json=None, timeout=20):
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return {"id": "updated"}
+
+                return Response()
+
+        parsed_data = {
+            "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1"}],
+            "Zones": [{"name": "trust", "network": {"layer3": ["$ethernet1-1"]}}],
+            "_migration_warnings": [],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            plan_path = Path(directory) / "live-plan.json"
+            remediation_path = Path(directory) / "live-remediation.json"
+            report_path = Path(directory) / "live-report.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+            session = LiveSession()
+
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch.object(main, "initialize_api_session", return_value=session),
+            ):
+                report = main.main(
+                    AppConfig(),
+                    run_objects="EthernetInterface,Zones",
+                    json_file=str(parsed_path),
+                    network_scope="snippet:Network-Stack",
+                    post_network=True,
+                    plan_output=str(plan_path),
+                    remediation_output=str(remediation_path),
+                    report_output=str(report_path),
+                )
+
+            plan_output = json.loads(plan_path.read_text(encoding="utf-8"))
+            remediation_output = json.loads(remediation_path.read_text(encoding="utf-8"))
+            report_output = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["mode"], "live-post")
+        self.assertEqual(plan_output["mode"], "live-post")
+        self.assertEqual(list(plan_output["validation_plans"]), ["network"])
+        self.assertEqual(remediation_output, [])
+        self.assertEqual(report_output["final_snapshots"]["network"]["EthernetInterface"], 1)
+        self.assertEqual(report_output["final_snapshots"]["network"]["Zones"], 1)
+        self.assertEqual(report_output["summary"]["fetch_failures"], 0)
+        self.assertEqual(report_output["summary"]["rule_order_checks"], 0)
+
     def test_network_report_honors_selected_network_objects(self):
         parsed_data = {
             "LogicalRouter": [{"name": "default", "routing_stack": "advanced", "vrf": [{"name": "default"}]}],

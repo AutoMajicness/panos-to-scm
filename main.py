@@ -247,7 +247,7 @@ def setup_scm_object_manager(session, obj_types, sec_obj, nat_obj, scope_param, 
 
 def process_obj_types(api_session, selected_obj_types, parsed_data, scope_param, device_group_name, config, conflict_policy="fail", interactive=False):
     if not selected_obj_types:
-        return
+        return None
     scm_obj_manager = setup_scm_object_manager(
         api_session,
         selected_obj_types,
@@ -258,6 +258,7 @@ def process_obj_types(api_session, selected_obj_types, parsed_data, scope_param,
         interactive=interactive,
     )
     scm_obj_manager.process_objects(parsed_data, scope_param, device_group_name, max_workers=6, limit=config.limit)
+    return scm_obj_manager
 
 
 def selected_type_names_for_plan(
@@ -521,6 +522,112 @@ def validate_post_plan(
         sys.exit(1)
     return plan
 
+
+def write_live_plan_output(validation_plans, plan_output):
+    if not plan_output:
+        return
+    payload = {
+        "mode": "live-post",
+        "validation_plans": {
+            label: plan.to_dict()
+            for label, plan in validation_plans.items()
+        },
+    }
+    write_json_file(plan_output, payload, "Live validation plan")
+
+
+def write_live_remediation_output(validation_plans, remediation_output):
+    if not remediation_output:
+        return
+    remediation = []
+    for label, plan in validation_plans.items():
+        for item in plan.to_dict()["remediation"]:
+            remediation.append({"phase": label, **item})
+    write_json_file(remediation_output, remediation, "Live remediation report")
+
+
+def build_snapshot_summary(api_session, selected_obj_types, scope_param, config):
+    if not selected_obj_types:
+        return {"counts": {}, "fetch_failures": []}
+    manager = setup_scm_object_manager(
+        api_session,
+        selected_obj_types,
+        config.sec_obj,
+        config.nat_obj,
+        scope_param,
+    )
+    current_objects = manager.get_current_objects(manager.obj_types, max_workers=6, limit=config.limit)
+    return {
+        "counts": {
+            obj_type.__name__: len(current_objects.get(obj_type, []))
+            for obj_type in manager.obj_types
+        },
+        "fetch_failures": manager.fetch_failures,
+    }
+
+
+def build_live_report(
+    *,
+    api_session,
+    config,
+    file_path,
+    scopes,
+    selected_regular_obj_types,
+    selected_network_obj_types,
+    validation_plans,
+    managers,
+):
+    object_snapshot = build_snapshot_summary(
+        api_session,
+        selected_regular_obj_types,
+        scopes.get("object"),
+        config,
+    )
+    network_snapshot = build_snapshot_summary(
+        api_session,
+        selected_network_obj_types,
+        scopes.get("network"),
+        config,
+    )
+    rule_order_verification = []
+    fetch_failures = []
+    for manager in managers:
+        if not manager:
+            continue
+        rule_order_verification.extend(manager.rule_order_verification)
+        fetch_failures.extend(manager.fetch_failures)
+    fetch_failures.extend(object_snapshot["fetch_failures"])
+    fetch_failures.extend(network_snapshot["fetch_failures"])
+
+    summary = {
+        "validation_phases": len(validation_plans),
+        "object_snapshot_types": len(object_snapshot["counts"]),
+        "network_snapshot_types": len(network_snapshot["counts"]),
+        "rule_order_checks": len(rule_order_verification),
+        "rule_order_verified": sum(1 for item in rule_order_verification if item["verified"]),
+        "rule_order_unverified": sum(1 for item in rule_order_verification if not item["verified"]),
+        "fetch_failures": len(fetch_failures),
+    }
+    return {
+        "mode": "live-post",
+        "source_config": file_path,
+        "scopes": scopes,
+        "summary": summary,
+        "validation": {
+            label: {
+                "summary": validation_summary(plan),
+                "warning_summary": plan.to_dict()["warning_summary"],
+            }
+            for label, plan in validation_plans.items()
+        },
+        "final_snapshots": {
+            "objects": object_snapshot["counts"],
+            "network": network_snapshot["counts"],
+        },
+        "rule_order_verification": rule_order_verification,
+        "fetch_failures": fetch_failures,
+    }
+
 def main(
     config,
     run_objects=None,
@@ -566,6 +673,7 @@ def main(
 ):
     try:
         start_time = time.time()
+        file_path = json_file or config_file
         logger.info(f"Script started at {time.ctime(start_time)}")
         warnings_as_errors, warning_code_filter = strict_local_firewall_warning_settings(
             warnings_as_errors,
@@ -825,6 +933,7 @@ def main(
 
         current_data = None
 
+        validation_plans = {}
         if selected_regular_obj_types:
             if not post_objects:
                 raise CliError(
@@ -832,7 +941,7 @@ def main(
                     "or add --post-objects to acknowledge live SCM object changes."
                 )
             current_data = load_current_data(current_data_file)
-            validate_post_plan(
+            validation_plans["objects"] = validate_post_plan(
                 parsed_data,
                 current_data,
                 [obj_type.__name__ for obj_type in selected_regular_obj_types],
@@ -850,7 +959,7 @@ def main(
                 )
             if current_data is None:
                 current_data = load_current_data(current_data_file)
-            validate_post_plan(
+            validation_plans["policy"] = validate_post_plan(
                 parsed_data,
                 current_data,
                 selected_policy_type_names(
@@ -875,7 +984,7 @@ def main(
             if current_data is None:
                 current_data = load_current_data(current_data_file)
             network_type_names = [obj_type.__name__ for obj_type in selected_network_obj_types]
-            validate_post_plan(
+            validation_plans["network"] = validate_post_plan(
                 parsed_data,
                 current_data,
                 network_type_names,
@@ -888,36 +997,65 @@ def main(
         from scm import PanApiHandler
 
         api_session = PanApiHandler(initialize_api_session())
+        managers = []
 
         if run_all:
-            process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
-            process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+            regular_manager = process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+            network_manager = process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+            managers.extend([regular_manager, network_manager])
             policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'], conflict_policy=conflict_policy, interactive=interactive)
             policy_manager.process_rules(config.sec_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='security')
             policy_manager.process_rules(config.app_override_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='application-override')
             policy_manager.process_rules(config.decryption_rule_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='decryption')
             policy_manager.configure.set_max_workers(1)  # Set max workers to 1 for NAT rules
             policy_manager.process_rules(config.nat_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='nat')
+            managers.append(policy_manager)
         elif run_objects:
-            process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
-            process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+            regular_manager = process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+            network_manager = process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+            managers.extend([regular_manager, network_manager])
         else:
             if run_security:
                 policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'], conflict_policy=conflict_policy, interactive=interactive)
                 policy_manager.process_rules(config.sec_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='security')
+                managers.append(policy_manager)
             elif run_app_override:
                 policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'], conflict_policy=conflict_policy, interactive=interactive)
                 policy_manager.process_rules(config.app_override_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='application-override')
+                managers.append(policy_manager)
             elif run_decrypt_rules:
                 policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'], conflict_policy=conflict_policy, interactive=interactive)
                 policy_manager.process_rules(config.decryption_rule_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='decryption')
+                managers.append(policy_manager)
             elif run_nat:
                 policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'], conflict_policy=conflict_policy, interactive=interactive)
                 policy_manager.configure.set_max_workers(1)  # Set max workers to 1 for NAT rules
                 policy_manager.process_rules(config.nat_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='nat')
+                managers.append(policy_manager)
             else:
-                process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
-                process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+                regular_manager = process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+                network_manager = process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+                managers.extend([regular_manager, network_manager])
+
+        if validation_plans:
+            write_live_plan_output(validation_plans, plan_output)
+            write_live_remediation_output(validation_plans, remediation_output)
+
+        if report_output:
+            live_report = build_live_report(
+                api_session=api_session,
+                config=config,
+                file_path=file_path,
+                scopes=scopes,
+                selected_regular_obj_types=selected_regular_obj_types,
+                selected_network_obj_types=selected_network_obj_types,
+                validation_plans=validation_plans,
+                managers=managers,
+            )
+            write_json_file(report_output, live_report, "Live migration report")
+            logger.info(f"Live migration report summary: {json.dumps(live_report['summary'], sort_keys=True)}")
+            print(json.dumps(live_report["summary"], indent=2, sort_keys=True))
+            return live_report
 
         end_time = time.time()
         logger.info(f"Script execution time: {end_time - start_time:.2f} seconds")

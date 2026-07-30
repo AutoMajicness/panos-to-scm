@@ -171,8 +171,10 @@ class Processor:
 
     def reorder_rules(self, obj_type, endpoint, scope_param, original_rules, current_rules, limit, position):
         current_rule_ids = {rule['name']: rule['id'] for rule in current_rules}
-        current_order = [rule['name'] for rule in current_rules]
-        desired_order = [rule['name'] for rule in original_rules if rule['name'] in current_rule_ids]
+        current_order = self._rule_names_without_default(current_rules)
+        desired_order = [rule['name'] for rule in original_rules if rule['name'] in current_rule_ids and rule['name'] != 'default']
+        move_attempts = 0
+        move_failures = []
 
         for _ in range(10000):  # Max 10000 attempts
             moves = []
@@ -186,36 +188,103 @@ class Processor:
 
             if not moves:
                 break
+            move_attempts += len(moves)
 
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 futures = [executor.submit(self.api_handler.post, endpoint, move_data) for endpoint, move_data in moves]
                 for future in as_completed(futures):
-                    if future.result()['status'] != 'success':
-                        self.logger.error(f"Error moving rule: {future.result()}")
+                    result = future.result()
+                    if not self._is_success_result(result):
+                        move_failures.append(result)
+                        self.logger.error(f"Error moving rule: {result}")
 
             # Use the fetch_rules method from SCMObjectManager
             current_rules = self.scm_object_manager.fetch_rules(obj_type, limit=limit, position=position)
-            current_order = [rule['name'] for rule in current_rules if rule['name'] != 'default']
+            current_order = self._rule_names_without_default(current_rules)
 
-        return current_rules  # Return the final state of the rules
+        return current_rules, move_attempts, move_failures
 
     def check_and_reorder_rules(self, obj_type, scope_param, original_rules, limit, position):
         start_time = time.time()
         endpoint = obj_type.get_endpoint().replace('?', '')
+        desired_order = self._rule_names_without_default(original_rules)
+        report = {
+            "rule_type": obj_type.__name__,
+            "position": position,
+            "desired_order": desired_order,
+            "desired_count": len(desired_order),
+            "current_order_before": [],
+            "current_order_after": [],
+            "current_count_before": 0,
+            "current_count_after": 0,
+            "move_attempts": 0,
+            "move_failures": [],
+            "reordered": False,
+            "verified": False,
+            "fetch_failed": False,
+            "error": "",
+        }
 
-        # Use the fetch_rules method to get the current rules
-        current_rules = self.scm_object_manager.fetch_rules(obj_type, limit=limit, position=position)
-        
-        # Extract the current and desired order of rules, excluding 'default' rules
-        current_order = [rule['name'] for rule in current_rules if rule['name'] != 'default']
-        desired_order = [rule['name'] for rule in original_rules if rule['name'] != 'default']
+        try:
+            current_rules = self.scm_object_manager.fetch_rules(obj_type, limit=limit, position=position)
+            current_order = self._rule_names_without_default(current_rules)
+            report["current_order_before"] = current_order
+            report["current_count_before"] = len(current_order)
 
-        # Compare the current order with the desired order
-        if current_order != desired_order:
-            self.logger.info("Reordering rules now..")
-            self.reorder_rules(obj_type, endpoint, scope_param, original_rules, current_rules, limit, position)
+            if current_order != desired_order:
+                self.logger.info("Reordering rules now..")
+                current_rules, move_attempts, move_failures = self.reorder_rules(
+                    obj_type,
+                    endpoint,
+                    scope_param,
+                    original_rules,
+                    current_rules,
+                    limit,
+                    position,
+                )
+                report["reordered"] = True
+                report["move_attempts"] = move_attempts
+                report["move_failures"] = move_failures
+
+            final_order = self._rule_names_without_default(current_rules)
+            report["current_order_after"] = final_order
+            report["current_count_after"] = len(final_order)
+            report["verified"] = final_order == desired_order
+            if report["verified"]:
+                self.logger.info(
+                    "Verified %s %s rule order: %d rules match the source order.",
+                    position,
+                    obj_type.__name__,
+                    len(final_order),
+                )
+            else:
+                self.logger.warning(
+                    "Unable to verify %s %s rule order. Desired=%s Final=%s",
+                    position,
+                    obj_type.__name__,
+                    desired_order,
+                    final_order,
+                )
+        except Exception as exc:
+            report["fetch_failed"] = True
+            report["error"] = str(exc)
+            self.logger.error(
+                "Unable to verify %s %s rule order after posting: %s",
+                position,
+                obj_type.__name__,
+                exc,
+            )
 
         self.logger.info(f"Time taken for reordering rules: {time.time() - start_time:.2f} seconds")
+        return report
+
+    @staticmethod
+    def _rule_names_without_default(rules):
+        return [rule['name'] for rule in rules if rule.get('name') != 'default']
+
+    @staticmethod
+    def _is_success_result(result):
+        return result.get('status') in {'success', 'created', 'updated'}
 
 
 class SCMObjectManager:
@@ -232,6 +301,8 @@ class SCMObjectManager:
         self.scope_type, self.scope_value = self.scope.scope_type, self.scope.scope_value
         self.conflict_policy = conflict_policy
         self.interactive = interactive
+        self.fetch_failures = []
+        self.rule_order_verification = []
 
     def parse_scope_param(self, scope_param):
         scope_type, scope_value = scope_param.lstrip('&').split('=')
@@ -310,6 +381,13 @@ class SCMObjectManager:
                 try:
                     current_objects[obj_type] = future.result()
                 except Exception as exc:
+                    self.fetch_failures.append(
+                        {
+                            "object_type": obj_type.__name__,
+                            "scope": self.scope_param,
+                            "error": str(exc),
+                        }
+                    )
                     self.logger.error(
                         "Unable to fetch current %s objects from SCM; continuing with an empty current set: %s",
                         obj_type.__name__,
@@ -609,12 +687,38 @@ class SCMObjectManager:
 
     def reorder_rules_if_needed(self, rule_obj, desired_rules, current_rules, limit, position):
         if not self.is_rule_order_correct(current_rules, desired_rules, limit):
-            self.configure.check_and_reorder_rules(rule_obj, self.scope_param, desired_rules, limit='10000', position=position)
+            report = self.configure.check_and_reorder_rules(rule_obj, self.scope_param, desired_rules, limit='10000', position=position)
+        else:
+            current_order = Processor._rule_names_without_default(current_rules)
+            desired_order = Processor._rule_names_without_default(desired_rules)
+            report = {
+                "rule_type": rule_obj.__name__,
+                "position": position,
+                "desired_order": desired_order,
+                "desired_count": len(desired_order),
+                "current_order_before": current_order,
+                "current_order_after": current_order,
+                "current_count_before": len(current_order),
+                "current_count_after": len(current_order),
+                "move_attempts": 0,
+                "move_failures": [],
+                "reordered": False,
+                "verified": True,
+                "fetch_failed": False,
+                "error": "",
+            }
+            self.logger.info(
+                "%s %s rule order already matches the source order.",
+                position,
+                rule_obj.__name__,
+            )
+        self.rule_order_verification.append(report)
+        return report
 
     @staticmethod
     def is_rule_order_correct(current_rules, desired_rules, limit):
-        current_rule_names = [rule['name'] for rule in current_rules]
-        desired_rule_names = [rule['name'] for rule in desired_rules]
+        current_rule_names = Processor._rule_names_without_default(current_rules)
+        desired_rule_names = Processor._rule_names_without_default(desired_rules)
         return current_rule_names == desired_rule_names
 
     @staticmethod

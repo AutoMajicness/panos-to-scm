@@ -47,6 +47,28 @@ class FailingObjectFetchHandler:
         return [{"name": "existing-object"}]
 
 
+class RuleMoveHandler:
+    def __init__(self):
+        self.post_calls = []
+        self.fetch_count = 0
+
+    def get(self, endpoint, params=None):
+        self.fetch_count += 1
+        if self.fetch_count == 1:
+            return [
+                {"id": "rule-b", "name": "rule-b", "folder": "All"},
+                {"id": "rule-a", "name": "rule-a", "folder": "All"},
+            ]
+        return [
+            {"id": "rule-a", "name": "rule-a", "folder": "All"},
+            {"id": "rule-b", "name": "rule-b", "folder": "All"},
+        ]
+
+    def post(self, endpoint, item_data, retries=2, delay=0.5):
+        self.post_calls.append({"endpoint": endpoint, "item_data": item_data})
+        return {"status": "created", "message": "Object created", "name": None}
+
+
 class EndpointRegistryTests(unittest.TestCase):
     def test_core_object_endpoints_are_modern_and_payload_scoped(self):
         self.assertEqual(obj.Address.get_endpoint(), "/config/objects/v1/addresses")
@@ -117,6 +139,7 @@ class EndpointRegistryTests(unittest.TestCase):
 
         self.assertEqual(current_objects[obj.Address], [{"name": "existing-object"}])
         self.assertEqual(current_objects[obj.Application], [])
+        self.assertEqual(manager.fetch_failures[0]["object_type"], "Application")
 
     def test_noninteractive_conflict_uses_replace_policy(self):
         manager = SCMObjectManager(
@@ -136,6 +159,29 @@ class EndpointRegistryTests(unittest.TestCase):
         )
 
         self.assertEqual(resolved, {"name": "addr-a", "ip_netmask": "192.0.2.10"})
+
+    def test_rule_reorder_verification_accepts_created_move_response(self):
+        manager = SCMObjectManager(
+            RuleMoveHandler(),
+            "&folder=All",
+            obj,
+            [],
+            obj.SecurityRule,
+            obj.NatRule,
+        )
+
+        report = manager.configure.check_and_reorder_rules(
+            obj.SecurityRule,
+            "&folder=All",
+            [{"name": "rule-a"}, {"name": "rule-b"}],
+            limit="10000",
+            position="pre",
+        )
+
+        self.assertTrue(report["reordered"])
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["move_attempts"], 1)
+        self.assertEqual(report["move_failures"], [])
 
     def test_zones_endpoint_is_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.Zones.get_endpoint(), "/config/network/v1/zones")
