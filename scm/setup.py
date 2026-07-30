@@ -16,7 +16,7 @@ SNIPPETS_ENDPOINT = "/config/setup/v1/snippets"
 class SetupTargetRequest:
     folder_name: str
     snippet_name: str
-    parent_folder: str = "All"
+    parent_folder: str = "ngfw-shared"
     associate_snippet: bool = True
     create: bool = False
 
@@ -40,7 +40,7 @@ def ensure_setup_target(api_handler, request: SetupTargetRequest) -> dict[str, A
         actions.append({"resource": "snippet", "name": request.snippet_name, "action": "exists"})
     elif request.create:
         snippet = create_snippet(api_handler, request.snippet_name)
-        actions.append({"resource": "snippet", "name": request.snippet_name, "action": "created"})
+        actions.append({"resource": "snippet", "name": request.snippet_name, "action": snippet.get("status", "created")})
     else:
         actions.append({"resource": "snippet", "name": request.snippet_name, "action": "missing"})
 

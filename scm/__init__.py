@@ -65,7 +65,7 @@ class PanApiHandler:
                     }
 
                 error_response = self._safe_json(response)
-                if response.status_code in [400, 409] and "object already exists" in str(error_response).lower():
+                if response.status_code in [400, 409] and self._is_already_exists_error(error_response):
                     return {
                         "status": "exists",
                         "message": "Object already exists",
@@ -120,6 +120,16 @@ class PanApiHandler:
             return response.json()
         except ValueError:
             return {"text": response.text}
+
+    @staticmethod
+    def _is_already_exists_error(error_response):
+        error_text = str(error_response).lower()
+        return (
+            "object already exists" in error_text
+            or "already exists" in error_text
+            or "same name" in error_text
+            or "name not unique" in error_text
+        )
 
     def _response_error(self, response):
         return f"API Error: {self._safe_json(response)}, Status Code: {response.status_code}"

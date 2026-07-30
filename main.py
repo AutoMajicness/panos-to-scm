@@ -522,7 +522,7 @@ def main(
     create_scm_target=False,
     target_folder="",
     target_snippet="",
-    parent_folder="All",
+    parent_folder="ngfw-shared",
     associate_snippet=True,
     post_objects=False,
     post_policy=False,
@@ -952,7 +952,7 @@ if __name__ == "__main__":
     parser.add_argument('--create-scm-target', action='store_true', help="With --setup-scm-target, create missing folder/snippet setup resources")
     parser.add_argument('--target-folder', action='store', default="", help="Target SCM folder name for migrated objects and policies")
     parser.add_argument('--target-snippet', action='store', default="", help="Target SCM snippet name for migrated network stack objects")
-    parser.add_argument('--parent-folder', action='store', default="All", help="Parent folder for --setup-scm-target creation")
+    parser.add_argument('--parent-folder', action='store', default="ngfw-shared", help="Parent folder for --setup-scm-target creation. Defaults to ngfw-shared, the API value for All Firewalls.")
     parser.add_argument('--no-associate-snippet', action='store_true', help="Do not associate the target snippet when creating the target folder")
     parser.add_argument('--post-objects', action='store_true', help="Allow live object/profile posting after validation blockers are checked")
     parser.add_argument('--post-policy', action='store_true', help="Allow live policy/NAT posting after validation blockers are checked")

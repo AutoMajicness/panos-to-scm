@@ -99,10 +99,10 @@ python3 main.py \
   --create-scm-target \
   --target-folder FW1-GEJ \
   --target-snippet FW1-GEJ-network \
-  --parent-folder All
+  --parent-folder ngfw-shared
 ```
 
-The command prints the follow-on scopes to use for migration: `folder:<target>` for objects/policies and `snippet:<target-network>` for network stack objects.
+The command prints the follow-on scopes to use for migration: `folder:<target>` for objects/policies and `snippet:<target-network>` for network stack objects. SCM displays the NGFW root as All Firewalls, but the setup API parent value is `ngfw-shared`.
 
 For CI-style local validation that does not require SCM authentication or scope prompts:
 

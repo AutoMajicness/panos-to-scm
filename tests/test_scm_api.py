@@ -218,6 +218,27 @@ class PanApiHandlerTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "created")
 
+    def test_post_treats_scm_name_not_unique_as_exists(self):
+        session = FakeSession()
+        session.post_response = FakeResponse(
+            409,
+            {
+                "_errors": [
+                    {
+                        "details": {
+                            "errorType": "Name Not Unique",
+                            "message": "snippet with the same name already exists",
+                        }
+                    }
+                ]
+            },
+        )
+        handler = PanApiHandler(session)
+
+        result = handler.post("/config/setup/v1/snippets", {"name": "FW1-network"})
+
+        self.assertEqual(result["status"], "exists")
+
 
 class ProcessorTests(unittest.TestCase):
     def test_core_object_post_puts_scope_in_payload_not_url(self):
