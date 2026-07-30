@@ -263,6 +263,7 @@ class SCMObjectManager:
 
     def get_current_objects(self, obj_types, max_workers=6, limit='10000', **kwargs):
         self.logger.info(f"Running with {max_workers} workers.")
+        current_objects = {}
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_obj_type = {
                 executor.submit(
@@ -272,7 +273,18 @@ class SCMObjectManager:
                     **kwargs.get(obj_type.__name__, {})
                 ): obj_type for obj_type in obj_types
             }
-            return {obj_type: future.result() for future, obj_type in future_to_obj_type.items()}
+            for future in as_completed(future_to_obj_type):
+                obj_type = future_to_obj_type[future]
+                try:
+                    current_objects[obj_type] = future.result()
+                except Exception as exc:
+                    self.logger.error(
+                        "Unable to fetch current %s objects from SCM; continuing with an empty current set: %s",
+                        obj_type.__name__,
+                        exc,
+                    )
+                    current_objects[obj_type] = []
+        return current_objects
 
     def get_new_and_updated_entries(self, parsed_data, current_objects):
         new_entries = {}

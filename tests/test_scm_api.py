@@ -1,7 +1,7 @@
 import unittest
 
 import scm.obj as obj
-from scm import PanApiHandler
+from scm import ApiRequestError, PanApiHandler
 from scm.process import Processor, SCMObjectManager, order_object_types_for_dependencies
 
 
@@ -38,6 +38,13 @@ class FakeSession:
     def put(self, url, json=None, timeout=20):
         self.put_calls.append({"url": url, "json": json, "timeout": timeout})
         return self.put_response
+
+
+class FailingObjectFetchHandler:
+    def get(self, endpoint, params=None):
+        if endpoint == obj.Application.get_endpoint():
+            raise ApiRequestError("applications endpoint failed")
+        return [{"name": "existing-object"}]
 
 
 class EndpointRegistryTests(unittest.TestCase):
@@ -95,6 +102,21 @@ class EndpointRegistryTests(unittest.TestCase):
             [object_type.__name__ for object_type in manager.obj_types],
             ["EthernetInterface", "IKEGateway", "IPsecTunnel", "LogicalRouter"],
         )
+
+    def test_current_object_fetch_continues_when_one_object_type_fails(self):
+        manager = SCMObjectManager(
+            FailingObjectFetchHandler(),
+            "&folder=All",
+            obj,
+            [obj.Address, obj.Application],
+            obj.SecurityRule,
+            obj.NatRule,
+        )
+
+        current_objects = manager.get_current_objects(manager.obj_types, max_workers=2)
+
+        self.assertEqual(current_objects[obj.Address], [{"name": "existing-object"}])
+        self.assertEqual(current_objects[obj.Application], [])
 
     def test_zones_endpoint_is_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.Zones.get_endpoint(), "/config/network/v1/zones")
