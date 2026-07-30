@@ -752,6 +752,30 @@ class BuildPlanTests(unittest.TestCase):
         self.assertEqual(plan.summary()["conflicts"], 0)
         self.assertEqual(plan.summary()["skips"], 1)
 
+    def test_build_plan_skips_zone_protection_profile_when_scm_omits_reconnaissance_on_readback(self):
+        parsed_data = {
+            "ZoneProtectionProfile": [
+                {
+                    "name": "internet-zpp",
+                    "reconnaissance": {
+                        "8001": {"action": "alert", "interval": 2, "threshold": 100},
+                    },
+                }
+            ]
+        }
+        current_data = {
+            "ZoneProtectionProfile": [
+                {
+                    "name": "internet-zpp",
+                }
+            ]
+        }
+
+        plan = build_plan(parsed_data, current_data=current_data)
+
+        self.assertEqual(plan.summary()["conflicts"], 0)
+        self.assertEqual(plan.summary()["skips"], 1)
+
     def test_build_plan_treats_external_dynamic_lists_as_valid_policy_address_references(self):
         parsed_data = {
             "security_pre_rules": [

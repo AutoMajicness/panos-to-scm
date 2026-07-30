@@ -598,6 +598,7 @@ def build_live_report(
         fetch_failures.extend(manager.fetch_failures)
     fetch_failures.extend(object_snapshot["fetch_failures"])
     fetch_failures.extend(network_snapshot["fetch_failures"])
+    fetch_failures = dedupe_fetch_failures(fetch_failures)
 
     summary = {
         "validation_phases": len(validation_plans),
@@ -627,6 +628,22 @@ def build_live_report(
         "rule_order_verification": rule_order_verification,
         "fetch_failures": fetch_failures,
     }
+
+
+def dedupe_fetch_failures(fetch_failures):
+    deduped = []
+    seen = set()
+    for item in fetch_failures:
+        key = (
+            item.get("object_type"),
+            item.get("scope"),
+            item.get("error"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 def main(
     config,

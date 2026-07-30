@@ -337,6 +337,36 @@ class MainDryRunTests(unittest.TestCase):
         self.assertEqual(report_output["summary"]["fetch_failures"], 0)
         self.assertEqual(report_output["summary"]["rule_order_checks"], 0)
 
+    def test_live_report_dedupes_repeated_fetch_failures(self):
+        report = main.build_live_report(
+            api_session=None,
+            config=AppConfig(),
+            file_path="parsed.json",
+            scopes={"object": "folder:All", "network": "snippet:Network-Stack"},
+            selected_regular_obj_types=[],
+            selected_network_obj_types=[],
+            validation_plans={},
+            managers=[
+                type(
+                    "Manager",
+                    (),
+                    {
+                        "rule_order_verification": [],
+                        "fetch_failures": [
+                            {"object_type": "RoutePrefixList", "scope": "&snippet=Network-Stack", "error": "500"},
+                            {"object_type": "RoutePrefixList", "scope": "&snippet=Network-Stack", "error": "500"},
+                        ],
+                    },
+                )()
+            ],
+        )
+
+        self.assertEqual(report["summary"]["fetch_failures"], 1)
+        self.assertEqual(
+            report["fetch_failures"],
+            [{"object_type": "RoutePrefixList", "scope": "&snippet=Network-Stack", "error": "500"}],
+        )
+
     def test_network_report_honors_selected_network_objects(self):
         parsed_data = {
             "LogicalRouter": [{"name": "default", "routing_stack": "advanced", "vrf": [{"name": "default"}]}],

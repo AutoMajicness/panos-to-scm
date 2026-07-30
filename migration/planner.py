@@ -242,7 +242,7 @@ def build_plan(
                 warnings.extend(_schema_warnings_for_entry(object_type, name, desired))
                 continue
 
-            if _normalize(desired) == _normalize(current):
+            if _normalize_for_object_type(object_type, desired) == _normalize_for_object_type(object_type, current):
                 skips.append(Change("skip", object_type, name, desired=desired, current=current))
                 warnings.extend(_schema_warnings_for_entry(object_type, name, desired))
             elif conflict_policy == "replace":
@@ -348,6 +348,14 @@ def _normalize(value: Any, path: str = "") -> Any:
         if _is_interface_reference_path(path):
             return normalize_scm_interface_name(value)
     return value
+
+
+def _normalize_for_object_type(object_type: str, value: Any) -> Any:
+    normalized = _normalize(value)
+    if object_type == "ZoneProtectionProfile" and isinstance(normalized, dict):
+        normalized = dict(normalized)
+        normalized.pop("reconnaissance", None)
+    return normalized
 
 
 def _is_interface_reference_path(path: str) -> bool:
