@@ -10,6 +10,60 @@ from config import AppConfig
 
 
 class MainDryRunTests(unittest.TestCase):
+    def test_local_xml_without_selection_defaults_to_full_import(self):
+        self.assertTrue(
+            main.should_default_full_import(
+                parser_type="panos",
+                config_file="running_config.xml",
+                fetch_panos_config=False,
+                run_objects="",
+                run_security=False,
+                run_app_override=False,
+                run_decrypt_rules=False,
+                run_nat=False,
+                run_all=False,
+            )
+        )
+        self.assertFalse(
+            main.should_default_full_import(
+                parser_type="panos",
+                config_file="running_config.xml",
+                fetch_panos_config=False,
+                run_objects="Address",
+                run_security=False,
+                run_app_override=False,
+                run_decrypt_rules=False,
+                run_nat=False,
+                run_all=False,
+            )
+        )
+
+    def test_live_xml_import_writes_markdown_report_beside_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "running_config.xml"
+            source_path.write_text("<config />", encoding="utf-8")
+            plan = main.build_plan({"Address": [{"name": "web"}]}, object_types=["Address"])
+            live_report = {
+                "summary": {"fetch_failures": 0},
+                "final_snapshots": {"objects": {"Address": 1}, "network": {}},
+                "fetch_failures": [],
+            }
+
+            output_path = main.write_markdown_import_report(
+                file_path=str(source_path),
+                parsed_data={"Address": [{"name": "web"}]},
+                scopes={"object": "folder:FW1"},
+                validation_plans={"objects": plan},
+                live_report=live_report,
+            )
+
+            report = Path(output_path).read_text(encoding="utf-8")
+
+        self.assertEqual(output_path, str(source_path.with_suffix(".md")))
+        self.assertIn("# PAN-OS to Strata Cloud Manager Import Report", report)
+        self.assertIn("## Manual Follow-up", report)
+        self.assertIn("web", report)
+
     def test_setup_scm_target_exits_when_missing_without_create(self):
         class SetupSession:
             def ensure_valid_token(self):

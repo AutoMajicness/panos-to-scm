@@ -66,7 +66,7 @@ palo_api_token: xxxxxxxxxxxxxxxxxxxxxx
 
 ### Recommended Local Firewall Workflow
 
-Use dry-run first. Network configuration should normally target a snippet, while objects and policies usually target a folder.
+Use dry-run first. Network configuration should normally target a snippet, while objects and policies usually target a folder. A local PAN-OS XML import with no selection flags defaults to the complete supported standalone configuration: objects, network configuration, security/decryption/application-override/NAT rules, and parsed dependencies. Live posting still requires the explicit `--post-objects`, `--post-network`, and `--post-policy` acknowledgements.
 
 ```bash
 python3 main.py \
@@ -161,7 +161,7 @@ Use `--limit 1` for a quick parser smoke or repeat `--config-file path/to/config
 - Run Decryption Rules Only: `python main.py -d`
 - Run NAT Rules Only: `python main.py -n`
 - Run All Objects, Security, App Override, Decryption and NAT Rules: `python main.py -a`
-- Default Behavior: Running `python main.py` without any options will run all objects only(no policies).
+- Default Behavior: Running a local PAN-OS XML import without selection flags plans the full supported standalone configuration, including objects, network configuration, and policy/NAT rulebases. Use `-o` or individual rule flags to narrow the migration.
 - Set a default SCM destination scope: `--scope folder:All`
 - Set object/profile destination scope: `--object-scope folder:All`
 - Set policy destination scope: `--policy-scope folder:All`
@@ -182,12 +182,13 @@ Use `--limit 1` for a quick parser smoke or repeat `--config-file path/to/config
 - Write a full dry-run plan: `--plan-output /tmp/plan.json`
 - Write a full network report: `--report-output /tmp/network-report.json`
 - Write grouped warning remediation without full payloads: `--remediation-output /tmp/remediation.json`
+- Write an LLM-ready Markdown import report beside the source XML automatically after live import, for example `running_config.md`.
 - Provide current SCM data for offline comparisons: `--current-data current.json`
 - Review schema-sensitive and missing-reference network warnings in dry-run summary/output before posting generated routing payloads.
 
 `--plan-output` includes a `posting_preview` section with dependency-ordered create/update batches by object type. Use this to review the order SCM posts would follow without exposing full payload details in the terminal summary. During live posting, the same flag writes a `live-post` validation bundle keyed by phase (`objects`, `network`, `policy`) so the exact pre-post validation inputs are preserved.
 
-`--report-output` writes the network-only offline report when used with `--network-report`. During live posting, it writes a live migration report with validation summaries, final SCM snapshot counts for the selected object categories, rule-order verification results, and any SCM fetch failures that limited verification.
+`--report-output` writes the network-only offline report when used with `--network-report`. During live posting, it writes a live migration report with validation summaries, final SCM snapshot counts for the selected object categories, rule-order verification results, and any SCM fetch failures that limited verification. Live XML imports also always write a Markdown report beside the source XML containing parsed counts, change lists, unsupported items, warning details, remediation actions, target scopes, and final SCM verification results for LLM-driven documentation or manual remediation.
 
 `--current-data` expects a JSON object keyed by SCM object type name. Each value is a list of current tenant objects; at minimum, include `name` for reference validation, and include full payload fields when you want dry-run conflict comparison. A minimal network reference snapshot looks like:
 

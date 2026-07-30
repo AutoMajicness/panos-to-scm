@@ -12,6 +12,7 @@ import argparse
 import json
 import sys
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -245,7 +246,7 @@ def setup_scm_object_manager(session, obj_types, sec_obj, nat_obj, scope_param, 
         interactive=interactive,
     )
 
-def process_obj_types(api_session, selected_obj_types, parsed_data, scope_param, device_group_name, config, conflict_policy="fail", interactive=False):
+def process_obj_types(api_session, selected_obj_types, parsed_data, scope_param, device_group_name, config, conflict_policy="fail", interactive=False, current_data=None):
     if not selected_obj_types:
         return None
     scm_obj_manager = setup_scm_object_manager(
@@ -257,7 +258,14 @@ def process_obj_types(api_session, selected_obj_types, parsed_data, scope_param,
         conflict_policy=conflict_policy,
         interactive=interactive,
     )
-    scm_obj_manager.process_objects(parsed_data, scope_param, device_group_name, max_workers=6, limit=config.limit)
+    scm_obj_manager.process_objects(
+        parsed_data,
+        scope_param,
+        device_group_name,
+        max_workers=6,
+        limit=config.limit,
+        current_data=current_data,
+    )
     return scm_obj_manager
 
 
@@ -494,6 +502,27 @@ def selected_policy_type_names(
     return selected
 
 
+def should_default_full_import(
+    *,
+    parser_type,
+    config_file,
+    fetch_panos_config,
+    run_objects,
+    run_security,
+    run_app_override,
+    run_decrypt_rules,
+    run_nat,
+    run_all,
+):
+    """Use the complete local-firewall migration when no selection was supplied."""
+
+    if run_objects or run_security or run_app_override or run_decrypt_rules or run_nat or run_all:
+        return False
+    if parser_type not in (None, "panos"):
+        return False
+    return fetch_panos_config or config_file.lower().endswith(".xml")
+
+
 def validate_post_plan(
     parsed_data,
     current_data,
@@ -630,6 +659,134 @@ def build_live_report(
     }
 
 
+def markdown_report_path(file_path):
+    if not file_path or not file_path.lower().endswith(".xml"):
+        return ""
+    return os.path.splitext(file_path)[0] + ".md"
+
+
+def _markdown_table(rows, headers):
+    lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join("---" for _ in headers) + " |"]
+    for row in rows:
+        values = [str(row.get(header, "")).replace("|", "\\|").replace("\n", " ") for header in headers]
+        lines.append("| " + " | ".join(values) + " |")
+    return lines
+
+
+def write_markdown_import_report(
+    *,
+    file_path,
+    parsed_data,
+    scopes,
+    validation_plans,
+    live_report,
+):
+    """Write an LLM-friendly import record beside the source XML."""
+
+    output_path = markdown_report_path(file_path)
+    if not output_path:
+        return ""
+
+    lines = [
+        "# PAN-OS to Strata Cloud Manager Import Report",
+        "",
+        f"- Source configuration: `{file_path}`",
+        f"- Generated: `{datetime.now(timezone.utc).isoformat()}`",
+        "- Import mode: live SCM migration",
+        "",
+        "## Outcome",
+        "",
+    ]
+    summary = live_report.get("summary", {})
+    lines.extend(_markdown_table(
+        [{"Metric": key, "Value": value} for key, value in sorted(summary.items())],
+        ["Metric", "Value"],
+    ))
+    lines.extend(["", "## SCM Scopes", ""])
+    lines.extend(_markdown_table(
+        [{"Category": key, "Scope": value} for key, value in sorted(scopes.items())],
+        ["Category", "Scope"],
+    ))
+
+    lines.extend(["", "## Parsed Configuration", ""])
+    parsed_counts = [
+        {"Object type": key, "Count": len(value)}
+        for key, value in sorted(parsed_data.items())
+        if key != "_migration_warnings" and isinstance(value, list) and value
+    ]
+    lines.extend(_markdown_table(parsed_counts, ["Object type", "Count"]) if parsed_counts else ["No parsed entries were present."])
+
+    lines.extend(["", "## Validation and Changes", ""])
+    for phase, plan in validation_plans.items():
+        lines.extend([f"### {phase.title()}", ""])
+        lines.extend(_markdown_table(
+            [{"Metric": key, "Value": value} for key, value in sorted(plan.summary().items())],
+            ["Metric", "Value"],
+        ))
+        for label, changes in (("Created", plan.creates), ("Updated", plan.updates), ("Skipped", plan.skips), ("Conflicts", plan.conflicts), ("Unsupported", plan.unsupported)):
+            if not changes:
+                continue
+            lines.extend(["", f"#### {label}", ""])
+            lines.extend(_markdown_table(
+                [{"Object type": item.object_type, "Name": item.name, "Reason": item.reason} for item in changes],
+                ["Object type", "Name", "Reason"],
+            ))
+
+        if plan.warnings:
+            lines.extend(["", "#### Warnings", ""])
+            lines.extend(_markdown_table(
+                [{
+                    "Code": warning.code,
+                    "Classification": warning.classification,
+                    "Object type": warning.object_type,
+                    "Name": warning.name,
+                    "Path": warning.path,
+                    "Message": warning.message,
+                } for warning in plan.warnings],
+                ["Code", "Classification", "Object type", "Name", "Path", "Message"],
+            ))
+
+    lines.extend(["", "## Manual Follow-up", ""])
+    remediation_items = []
+    for plan in validation_plans.values():
+        remediation_items.extend(plan.to_dict()["remediation"])
+    if remediation_items:
+        lines.extend(_markdown_table(
+            [{
+                "Code": item["code"],
+                "Classification": item["classification"],
+                "Count": item["count"],
+                "Action": item["action"],
+                "Examples": "; ".join(example["name"] for example in item["examples"]),
+            } for item in remediation_items],
+            ["Code", "Classification", "Count", "Action", "Examples"],
+        ))
+    else:
+        lines.append("No validation remediation items were generated.")
+
+    lines.extend(["", "## SCM Verification", ""])
+    lines.extend(_markdown_table(
+        [{"Category": category, "Object type": object_type, "Count": count}
+         for category, objects in live_report.get("final_snapshots", {}).items()
+         for object_type, count in sorted(objects.items())],
+        ["Category", "Object type", "Count"],
+    ) or ["No final SCM snapshot counts were available."])
+    fetch_failures = live_report.get("fetch_failures", [])
+    if fetch_failures:
+        lines.extend(["", "### SCM Fetch Failures", ""])
+        lines.extend(_markdown_table(fetch_failures, ["object_type", "scope", "error"]))
+    lines.extend(["", "## Notes", "", "This report is designed as source material for LLM-generated PPTX, DOCX, remediation plans, and manual configuration checklists.", ""])
+
+    try:
+        with open(output_path, "w") as file:
+            file.write("\n".join(lines))
+    except OSError as err:
+        logger.error(f"Error while writing Markdown import report {err}")
+        return ""
+    logger.info(f"Markdown import report written to {output_path}")
+    return output_path
+
+
 def dedupe_fetch_failures(fetch_failures):
     deduped = []
     seen = set()
@@ -703,6 +860,20 @@ def main(
             logger.info(f'Running specific objects: {run_objects_list}')
         else:
             run_objects_list = []  # Initialize as empty list
+
+        if should_default_full_import(
+            parser_type=parser_type,
+            config_file=config_file,
+            fetch_panos_config=fetch_panos_config,
+            run_objects=run_objects,
+            run_security=run_security,
+            run_app_override=run_app_override,
+            run_decrypt_rules=run_decrypt_rules,
+            run_nat=run_nat,
+            run_all=run_all,
+        ):
+            run_all = True
+            logger.info("No selection flags supplied for local PAN-OS XML; defaulting to a full standalone import.")
 
         if snapshot_policy_dependencies:
             dependency_names = set(POLICY_DEPENDENCY_OBJECT_TYPE_NAMES)
@@ -847,6 +1018,10 @@ def main(
             logger.debug(f"Parsed data keys: {list(parsed_data.keys())}")
 
         has_rule_flag = any([run_security, run_app_override, run_decrypt_rules, run_nat])
+        if has_rule_flag and not run_all and not run_objects:
+            selected_regular_obj_types = []
+            selected_network_obj_types = []
+            selected_obj_types = []
         needs_object_scope = bool(selected_regular_obj_types) and (bool(run_objects) or not has_rule_flag)
         needs_network_scope = bool(selected_network_obj_types) and (bool(run_objects) or not has_rule_flag)
         needs_policy_scope = run_all or run_security or run_app_override or run_decrypt_rules or run_nat
@@ -1017,8 +1192,8 @@ def main(
         managers = []
 
         if run_all:
-            regular_manager = process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
-            network_manager = process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+            regular_manager = process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive, current_data=current_data)
+            network_manager = process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive, current_data=current_data)
             managers.extend([regular_manager, network_manager])
             policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'], conflict_policy=conflict_policy, interactive=interactive)
             policy_manager.process_rules(config.sec_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='security')
@@ -1028,8 +1203,8 @@ def main(
             policy_manager.process_rules(config.nat_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='nat')
             managers.append(policy_manager)
         elif run_objects:
-            regular_manager = process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
-            network_manager = process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+            regular_manager = process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive, current_data=current_data)
+            network_manager = process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive, current_data=current_data)
             managers.extend([regular_manager, network_manager])
         else:
             if run_security:
@@ -1050,29 +1225,42 @@ def main(
                 policy_manager.process_rules(config.nat_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='nat')
                 managers.append(policy_manager)
             else:
-                regular_manager = process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
-                network_manager = process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+                regular_manager = process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive, current_data=current_data)
+                network_manager = process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive, current_data=current_data)
                 managers.extend([regular_manager, network_manager])
 
         if validation_plans:
             write_live_plan_output(validation_plans, plan_output)
             write_live_remediation_output(validation_plans, remediation_output)
 
+        live_report = build_live_report(
+            api_session=api_session,
+            config=config,
+            file_path=file_path,
+            scopes=scopes,
+            selected_regular_obj_types=selected_regular_obj_types,
+            selected_network_obj_types=selected_network_obj_types,
+            validation_plans=validation_plans,
+            managers=managers,
+        )
+        markdown_path = write_markdown_import_report(
+            file_path=file_path,
+            parsed_data=parsed_data,
+            scopes=scopes,
+            validation_plans=validation_plans,
+            live_report=live_report,
+        )
+        live_report["markdown_report"] = markdown_path
+
         if report_output:
-            live_report = build_live_report(
-                api_session=api_session,
-                config=config,
-                file_path=file_path,
-                scopes=scopes,
-                selected_regular_obj_types=selected_regular_obj_types,
-                selected_network_obj_types=selected_network_obj_types,
-                validation_plans=validation_plans,
-                managers=managers,
-            )
             write_json_file(report_output, live_report, "Live migration report")
             logger.info(f"Live migration report summary: {json.dumps(live_report['summary'], sort_keys=True)}")
             print(json.dumps(live_report["summary"], indent=2, sort_keys=True))
             return live_report
+
+        logger.info(f"Live migration report summary: {json.dumps(live_report['summary'], sort_keys=True)}")
+        print(json.dumps(live_report["summary"], indent=2, sort_keys=True))
+        return live_report
 
         end_time = time.time()
         logger.info(f"Script execution time: {end_time - start_time:.2f} seconds")
