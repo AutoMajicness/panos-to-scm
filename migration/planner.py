@@ -171,7 +171,7 @@ def build_plan(
     conflicts: list[Change] = []
     unsupported: list[Change] = []
     warnings: list[PlanWarning] = []
-    warnings.extend(_parser_warnings(parsed_data.get("_migration_warnings", [])))
+    warnings.extend(_parser_warnings(parsed_data.get("_migration_warnings", []), selected_types))
     warnings.extend(_network_reference_warnings(parsed_data, current_data, selected_types))
 
     for object_type in selected_types:
@@ -305,7 +305,7 @@ def build_network_report(
         for object_type in object_types
         if object_type != "_migration_warnings"
     }
-    warnings = _parser_warnings(parsed_data.get("_migration_warnings", []))
+    warnings = _parser_warnings(parsed_data.get("_migration_warnings", []), object_types)
     warnings.extend(_network_reference_warnings(parsed_data, current_data, object_types))
     for object_type, entries in network_objects.items():
         if not isinstance(entries, list):
@@ -541,17 +541,21 @@ def _posting_sort_key(object_type: str) -> tuple[int, int, str]:
     return (1, len(_POSTING_ORDER_INDEX), object_type)
 
 
-def _parser_warnings(entries: Any) -> list[PlanWarning]:
+def _parser_warnings(entries: Any, selected_types: list[str] | set[str] | None = None) -> list[PlanWarning]:
     if not isinstance(entries, list):
         return []
 
+    selected_type_names = set(selected_types or [])
     warnings = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
+        object_type = entry.get("object_type", "")
+        if selected_type_names and object_type and object_type not in selected_type_names:
+            continue
         warnings.append(
             PlanWarning(
-                object_type=entry.get("object_type", ""),
+                object_type=object_type,
                 name=entry.get("name", ""),
                 path=entry.get("path", ""),
                 code=entry.get("code", "parser-warning"),
