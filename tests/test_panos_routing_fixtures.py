@@ -56,7 +56,8 @@ class PanosRoutingFixtureTests(unittest.TestCase):
             parsed["Layer3Subinterface"],
             [
                 {
-                    "name": "ethernet1/2.10",
+                    "name": "$ethernet1-2.10",
+                    "default_value": "ethernet1/2.10",
                     "parent_interface": "ethernet1/2",
                     "tag": 10,
                     "comment": "Users",
@@ -64,7 +65,8 @@ class PanosRoutingFixtureTests(unittest.TestCase):
                     "ip": [{"name": "10.10.10.1/24"}],
                 },
                 {
-                    "name": "ethernet1/2.20",
+                    "name": "$ethernet1-2.20",
+                    "default_value": "ethernet1/2.20",
                     "parent_interface": "ethernet1/2",
                     "tag": 20,
                     "comment": "Voice",
@@ -101,7 +103,7 @@ class PanosRoutingFixtureTests(unittest.TestCase):
             parsed["TunnelInterface"],
             [
                 {
-                    "name": "tunnel.1",
+                    "name": "$tunnel1",
                     "default_value": "tunnel.1",
                     "comment": "Data center VPN",
                     "ip": [{"name": "169.254.10.2/30"}],

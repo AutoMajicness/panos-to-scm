@@ -79,7 +79,7 @@ class PanosVlanTunnelInterfaceParserTests(unittest.TestCase):
             tunnels,
             [
                 {
-                    "name": "tunnel.1",
+                    "name": "$tunnel1",
                     "default_value": "tunnel.1",
                     "comment": "VPN tunnel",
                     "interface_management_profile": "allow-ping",

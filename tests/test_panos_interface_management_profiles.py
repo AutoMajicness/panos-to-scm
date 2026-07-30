@@ -51,7 +51,10 @@ class PanosInterfaceManagementProfileParserTests(unittest.TestCase):
                     "snmp": False,
                     "response_pages": False,
                     "userid_service": True,
-                    "permitted_ip": ["198.51.100.10/32", "192.0.2.0/24"],
+                    "permitted_ip": [
+                        {"name": "198.51.100.10/32"},
+                        {"name": "192.0.2.0/24"},
+                    ],
                 }
             ],
         )

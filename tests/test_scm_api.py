@@ -118,6 +118,25 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(current_objects[obj.Address], [{"name": "existing-object"}])
         self.assertEqual(current_objects[obj.Application], [])
 
+    def test_noninteractive_conflict_uses_replace_policy(self):
+        manager = SCMObjectManager(
+            FailingObjectFetchHandler(),
+            "&folder=All",
+            obj,
+            [obj.Address],
+            obj.SecurityRule,
+            obj.NatRule,
+            conflict_policy="replace",
+            interactive=False,
+        )
+
+        resolved = manager.resolve_conflicts(
+            {"name": "addr-a", "ip_netmask": "192.0.2.10"},
+            {"name": "addr-a", "ip_netmask": "192.0.2.11"},
+        )
+
+        self.assertEqual(resolved, {"name": "addr-a", "ip_netmask": "192.0.2.10"})
+
     def test_zones_endpoint_is_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.Zones.get_endpoint(), "/config/network/v1/zones")
         self.assertTrue(obj.Zones.uses_payload_scope())
@@ -324,7 +343,7 @@ class ProcessorTests(unittest.TestCase):
 
         manager.configure.post_entries(
             "&snippet=Network-Stack",
-            [{"name": "allow-mgmt", "ping": True, "permitted_ip": ["192.0.2.0/24"]}],
+            [{"name": "allow-mgmt", "ping": True, "permitted_ip": [{"name": "192.0.2.0/24"}]}],
             obj.InterfaceManagementProfile,
             extra_query_params="",
         )
@@ -338,7 +357,7 @@ class ProcessorTests(unittest.TestCase):
             {
                 "name": "allow-mgmt",
                 "ping": True,
-                "permitted_ip": ["192.0.2.0/24"],
+                "permitted_ip": [{"name": "192.0.2.0/24"}],
                 "snippet": "Network-Stack",
             },
         )
@@ -452,7 +471,7 @@ class ProcessorTests(unittest.TestCase):
 
         manager.configure.post_entries(
             "&snippet=Network-Stack",
-            [{"name": "ethernet1/1.100", "parent_interface": "ethernet1/1", "tag": 100}],
+            [{"name": "$ethernet1-1.100", "parent_interface": "ethernet1/1", "tag": 100}],
             obj.Layer3Subinterface,
             extra_query_params="",
         )
@@ -464,7 +483,7 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(
             session.post_calls[0]["json"],
             {
-                "name": "ethernet1/1.100",
+                "name": "$ethernet1-1.100",
                 "parent_interface": "ethernet1/1",
                 "tag": 100,
                 "snippet": "Network-Stack",
@@ -478,7 +497,7 @@ class ProcessorTests(unittest.TestCase):
 
         manager.configure.post_entries(
             "&snippet=Network-Stack",
-            [{"name": "ethernet1/6.200", "parent_interface": "ethernet1/6", "tag": 200}],
+            [{"name": "$ethernet1-6.200", "parent_interface": "ethernet1/6", "tag": 200}],
             obj.Layer2Subinterface,
             extra_query_params="",
         )
@@ -490,7 +509,7 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(
             session.post_calls[0]["json"],
             {
-                "name": "ethernet1/6.200",
+                "name": "$ethernet1-6.200",
                 "parent_interface": "ethernet1/6",
                 "tag": 200,
                 "snippet": "Network-Stack",
@@ -530,7 +549,7 @@ class ProcessorTests(unittest.TestCase):
 
         manager.configure.post_entries(
             "&snippet=Network-Stack",
-            [{"name": "tunnel.1", "default_value": "tunnel.1", "ip": [{"name": "169.254.1.1/30"}]}],
+            [{"name": "$tunnel1", "default_value": "tunnel.1", "ip": [{"name": "169.254.1.1/30"}]}],
             obj.TunnelInterface,
             extra_query_params="",
         )
@@ -542,11 +561,90 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(
             session.post_calls[0]["json"],
             {
-                "name": "tunnel.1",
+                "name": "$tunnel1",
                 "default_value": "tunnel.1",
                 "ip": [{"name": "169.254.1.1/30"}],
                 "snippet": "Network-Stack",
             },
+        )
+
+    def test_interface_management_profile_normalizes_permitted_ip_entries(self):
+        manager = SCMObjectManager(FailingObjectFetchHandler(), "&snippet=Network-Stack", obj, [], obj.SecurityRule, obj.NatRule)
+
+        normalized = manager._normalize_entry_for_post(
+            "InterfaceManagementProfile",
+            {"name": "allow-mgmt", "permitted_ip": ["192.0.2.0/24"]},
+            {},
+        )
+
+        self.assertEqual(
+            normalized["permitted_ip"],
+            [{"name": "192.0.2.0/24"}],
+        )
+
+    def test_network_object_normalization_rewrites_interface_references(self):
+        manager = SCMObjectManager(FailingObjectFetchHandler(), "&snippet=Network-Stack", obj, [], obj.SecurityRule, obj.NatRule)
+        aliases = {
+            "ethernet1/1": "$ethernet1-1",
+            "ethernet1/4": "$ethernet1-4",
+            "ethernet1/4.2": "$ethernet1-4.2",
+            "tunnel.1": "$tunnel1",
+        }
+
+        subinterface = manager._normalize_entry_for_post(
+            "Layer3Subinterface",
+            {"name": "$ethernet1-4.2", "parent_interface": "ethernet1/4", "tag": 2},
+            aliases,
+        )
+        zone = manager._normalize_entry_for_post(
+            "Zones",
+            {"name": "Trust", "network": {"layer3": ["ethernet1/1", "ethernet1/4.2", "tunnel.1"]}},
+            aliases,
+        )
+        ike_gateway = manager._normalize_entry_for_post(
+            "IKEGateway",
+            {"name": "gw-a", "local_address": {"interface": "ethernet1/1", "ip": "203.0.113.10/29"}},
+            aliases,
+        )
+        ipsec_tunnel = manager._normalize_entry_for_post(
+            "IPsecTunnel",
+            {"name": "vpn-a", "tunnel_interface": "tunnel.1"},
+            aliases,
+        )
+        logical_router = manager._normalize_entry_for_post(
+            "LogicalRouter",
+            {
+                "name": "default",
+                "vrf": [
+                    {
+                        "name": "default",
+                        "interface": ["ethernet1/1", "ethernet1/4.2", "tunnel.1"],
+                        "routing_table": {
+                            "ip": {
+                                "static_route": [
+                                    {"name": "default-route", "interface": "ethernet1/1"},
+                                    {"name": "vpn-route", "interface": "tunnel.1"},
+                                ]
+                            }
+                        },
+                    }
+                ],
+            },
+            aliases,
+        )
+
+        self.assertEqual(subinterface["name"], "$ethernet1-4.2")
+        self.assertEqual(subinterface["parent_interface"], "$ethernet1-4")
+        self.assertEqual(zone["network"]["layer3"], ["$ethernet1-1", "$ethernet1-4.2", "$tunnel1"])
+        self.assertEqual(ike_gateway["local_address"]["interface"], "$ethernet1-1")
+        self.assertEqual(ipsec_tunnel["tunnel_interface"], "$tunnel1")
+        self.assertEqual(
+            logical_router["vrf"][0]["interface"],
+            ["$ethernet1-1", "$ethernet1-4.2", "$tunnel1"],
+        )
+        self.assertEqual(
+            [route["interface"] for route in logical_router["vrf"][0]["routing_table"]["ip"]["static_route"]],
+            ["$ethernet1-1", "$tunnel1"],
         )
 
     def test_loopback_interface_post_puts_scope_in_payload_not_url(self):

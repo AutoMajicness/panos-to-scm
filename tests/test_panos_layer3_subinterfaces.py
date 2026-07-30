@@ -55,7 +55,8 @@ class PanosLayer3SubinterfaceParserTests(unittest.TestCase):
             subinterfaces,
             [
                 {
-                    "name": "ethernet1/1.100",
+                    "name": "$ethernet1-1.100",
+                    "default_value": "ethernet1/1.100",
                     "parent_interface": "ethernet1/1",
                     "tag": 100,
                     "comment": "Users VLAN",
@@ -68,7 +69,8 @@ class PanosLayer3SubinterfaceParserTests(unittest.TestCase):
                     ],
                 },
                 {
-                    "name": "ethernet1/1.200",
+                    "name": "$ethernet1-1.200",
+                    "default_value": "ethernet1/1.200",
                     "parent_interface": "ethernet1/1",
                     "tag": 200,
                     "ip": [{"name": "10.200.0.1/24"}],

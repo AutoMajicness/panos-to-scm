@@ -85,7 +85,8 @@ class PanosDhcpInterfaceParserTests(unittest.TestCase):
             subinterfaces,
             [
                 {
-                    "name": "ethernet1/2.100",
+                    "name": "$ethernet1-2.100",
+                    "default_value": "ethernet1/2.100",
                     "parent_interface": "ethernet1/2",
                     "tag": 100,
                     "dhcp_client": {

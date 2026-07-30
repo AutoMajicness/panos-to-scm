@@ -34,6 +34,18 @@ class XMLParser:
         sanitized_name = re.sub(r'[^a-zA-Z0-9._-]', '-', name)
         return sanitized_name[:63]
 
+    def _scm_interface_object_name(self, interface_name: str) -> str:
+        if not interface_name:
+            return interface_name
+        if interface_name.startswith('$'):
+            return interface_name
+        if re.match(r'^tunnel\.\d+$', interface_name):
+            suffix = interface_name.split('.', 1)[1]
+            return f"$tunnel{suffix}"
+        if re.match(r'^(ethernet\d+/\d+(\.\d+)?|ae\d+)$', interface_name):
+            return f"${self._sanitize_name(interface_name)}"
+        return interface_name
+
     def parse_config_and_set_scope(self, xml_file_path):
         tree = ET.parse(xml_file_path)
         root = tree.getroot()
@@ -1905,7 +1917,7 @@ class XMLParser:
 
         permitted_ips = self._member_or_entry_names(entry.find('permitted-ip'))
         if permitted_ips:
-            payload['permitted_ip'] = permitted_ips
+            payload['permitted_ip'] = [{'name': permitted_ip} for permitted_ip in permitted_ips]
 
         return payload
 
@@ -2216,7 +2228,7 @@ class XMLParser:
             return None
 
         payload = {
-            'name': f"${self._sanitize_name(aggregate_name)}",
+            'name': self._scm_interface_object_name(aggregate_name),
             'default_value': aggregate_name,
         }
 
@@ -2278,7 +2290,7 @@ class XMLParser:
             return None
 
         payload = {
-            'name': f"${self._sanitize_name(physical_name)}",
+            'name': self._scm_interface_object_name(physical_name),
             'default_value': physical_name,
         }
 
@@ -2444,7 +2456,8 @@ class XMLParser:
             return None
 
         payload = {
-            'name': subinterface_name,
+            'name': self._scm_interface_object_name(subinterface_name),
+            'default_value': subinterface_name,
             'parent_interface': parent_name,
         }
 
@@ -2478,7 +2491,8 @@ class XMLParser:
             return None
 
         payload = {
-            'name': subinterface_name,
+            'name': self._scm_interface_object_name(subinterface_name),
+            'default_value': subinterface_name,
             'parent_interface': parent_name,
         }
 
@@ -2532,7 +2546,7 @@ class XMLParser:
             return None
 
         payload = {
-            'name': interface_name,
+            'name': self._scm_interface_object_name(interface_name),
             'default_value': interface_name,
         }
 
@@ -2661,7 +2675,7 @@ class XMLParser:
         if not route_name:
             return None
 
-        route = {'name': route_name}
+        route = {'name': self._sanitize_name(route_name)}
         field_map = {
             'destination': 'destination',
             'interface': 'interface',

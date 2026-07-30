@@ -233,13 +233,30 @@ def initialize_api_session():
     session.authenticate()
     return session
 
-def setup_scm_object_manager(session, obj_types, sec_obj, nat_obj, scope_param):
-    return SCMObjectManager(session, scope_param, obj, obj_types, sec_obj, nat_obj)
+def setup_scm_object_manager(session, obj_types, sec_obj, nat_obj, scope_param, conflict_policy="fail", interactive=False):
+    return SCMObjectManager(
+        session,
+        scope_param,
+        obj,
+        obj_types,
+        sec_obj,
+        nat_obj,
+        conflict_policy=conflict_policy,
+        interactive=interactive,
+    )
 
-def process_obj_types(api_session, selected_obj_types, parsed_data, scope_param, device_group_name, config):
+def process_obj_types(api_session, selected_obj_types, parsed_data, scope_param, device_group_name, config, conflict_policy="fail", interactive=False):
     if not selected_obj_types:
         return
-    scm_obj_manager = setup_scm_object_manager(api_session, selected_obj_types, config.sec_obj, config.nat_obj, scope_param)
+    scm_obj_manager = setup_scm_object_manager(
+        api_session,
+        selected_obj_types,
+        config.sec_obj,
+        config.nat_obj,
+        scope_param,
+        conflict_policy=conflict_policy,
+        interactive=interactive,
+    )
     scm_obj_manager.process_objects(parsed_data, scope_param, device_group_name, max_workers=6, limit=config.limit)
 
 
@@ -873,34 +890,34 @@ def main(
         api_session = PanApiHandler(initialize_api_session())
 
         if run_all:
-            process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config)
-            process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config)
-            policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'])
+            process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+            process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+            policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'], conflict_policy=conflict_policy, interactive=interactive)
             policy_manager.process_rules(config.sec_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='security')
             policy_manager.process_rules(config.app_override_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='application-override')
             policy_manager.process_rules(config.decryption_rule_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='decryption')
             policy_manager.configure.set_max_workers(1)  # Set max workers to 1 for NAT rules
             policy_manager.process_rules(config.nat_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='nat')
         elif run_objects:
-            process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config)
-            process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config)
+            process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+            process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
         else:
             if run_security:
-                policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'])
+                policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'], conflict_policy=conflict_policy, interactive=interactive)
                 policy_manager.process_rules(config.sec_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='security')
             elif run_app_override:
-                policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'])
+                policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'], conflict_policy=conflict_policy, interactive=interactive)
                 policy_manager.process_rules(config.app_override_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='application-override')
             elif run_decrypt_rules:
-                policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'])
+                policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'], conflict_policy=conflict_policy, interactive=interactive)
                 policy_manager.process_rules(config.decryption_rule_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='decryption')
             elif run_nat:
-                policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'])
+                policy_manager = setup_scm_object_manager(api_session, [], config.sec_obj, config.nat_obj, scopes['policy'], conflict_policy=conflict_policy, interactive=interactive)
                 policy_manager.configure.set_max_workers(1)  # Set max workers to 1 for NAT rules
                 policy_manager.process_rules(config.nat_obj, parsed_data, scopes['policy'], limit=config.limit, rule_type='nat')
             else:
-                process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config)
-                process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config)
+                process_obj_types(api_session, selected_regular_obj_types, parsed_data, scopes.get('object'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
+                process_obj_types(api_session, selected_network_obj_types, parsed_data, scopes.get('network'), device_group_name, config, conflict_policy=conflict_policy, interactive=interactive)
 
         end_time = time.time()
         logger.info(f"Script execution time: {end_time - start_time:.2f} seconds")

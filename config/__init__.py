@@ -15,7 +15,7 @@ class AppConfig:
             obj.ServiceGroup, obj.ExternalDynamicList, obj.URLCategory, 
             obj.URLAccessProfile, obj.VulnerabilityProtectionProfile, 
             obj.AntiSpywareProfile, obj.FileBlockingProfile,
-            # obj.WildFireAntivirusProfile,
+            obj.WildFireAntivirusProfile,
             obj.DNSSecurityProfile, obj.ProfileGroup, obj.ApplicationFilter, obj.ApplicationGroup,
             obj.Schedule, obj.DecryptionProfile, obj.HipObject, obj.HipProfile
         ]

@@ -1,8 +1,10 @@
 import logging
 import time
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, List, Tuple, Dict
 from urllib.parse import urlencode
+import re
 
 from scm.scope import Scope
 
@@ -43,6 +45,11 @@ _NETWORK_OBJECT_ORDER_INDEX = {
     for index, object_type in enumerate(NETWORK_OBJECT_DEPENDENCY_ORDER)
 }
 
+_PHYSICAL_ETHERNET_PATTERN = re.compile(r"^ethernet\d+/\d+$")
+_ETHERNET_SUBINTERFACE_PATTERN = re.compile(r"^ethernet\d+/\d+\.\d+$")
+_AGGREGATE_INTERFACE_PATTERN = re.compile(r"^ae\d+$")
+_TUNNEL_INTERFACE_PATTERN = re.compile(r"^tunnel\.\d+$")
+
 
 def order_object_types_for_dependencies(obj_types):
     """Return object classes in a safe posting order while preserving unknown types."""
@@ -54,6 +61,28 @@ def order_object_types_for_dependencies(obj_types):
             _NETWORK_OBJECT_ORDER_INDEX.get(obj_type.__name__, len(_NETWORK_OBJECT_ORDER_INDEX)),
         ),
     )
+
+
+def normalize_scm_interface_name(interface_name: str) -> str:
+    """Convert PAN-OS interface identifiers into SCM variable-style names."""
+
+    if not isinstance(interface_name, str) or not interface_name:
+        return interface_name
+    if interface_name.startswith("$"):
+        return interface_name
+    if (
+        _PHYSICAL_ETHERNET_PATTERN.match(interface_name)
+        or _ETHERNET_SUBINTERFACE_PATTERN.match(interface_name)
+        or _AGGREGATE_INTERFACE_PATTERN.match(interface_name)
+    ):
+        sanitized = "".join(
+            character if character.isalnum() or character in "._-" else "-"
+            for character in interface_name
+        )
+        return f"${sanitized}"
+    if _TUNNEL_INTERFACE_PATTERN.match(interface_name):
+        return f"$tunnel{interface_name.split('.', 1)[1]}"
+    return interface_name
 
 
 class Processor:
@@ -190,7 +219,7 @@ class Processor:
 
 
 class SCMObjectManager:
-    def __init__(self, api_handler, scope_param, obj_module, obj_types, sec_obj, nat_obj):
+    def __init__(self, api_handler, scope_param, obj_module, obj_types, sec_obj, nat_obj, conflict_policy="fail", interactive=False):
         self.api_handler = api_handler
         self.scope_param = scope_param
         self.scope = Scope.from_param(scope_param)
@@ -201,6 +230,8 @@ class SCMObjectManager:
         self.nat_obj = nat_obj        
         self.logger = logging.getLogger(__name__)
         self.scope_type, self.scope_value = self.scope.scope_type, self.scope.scope_value
+        self.conflict_policy = conflict_policy
+        self.interactive = interactive
 
     def parse_scope_param(self, scope_param):
         scope_type, scope_value = scope_param.lstrip('&').split('=')
@@ -255,11 +286,12 @@ class SCMObjectManager:
         self.logger.info(f'Workers grabbing objects: {max_workers}')
         current_objects = self.get_current_objects(self.obj_types, max_workers, limit)
         new_entries, updated_entries = self.get_new_and_updated_entries(parsed_data, current_objects)
+        reference_aliases = self._build_reference_aliases(parsed_data, current_objects)
 
         if any(new_entries.values()):
-            self.post_new_entries(new_entries, scope_param, device_group_name)
+            self.post_new_entries(new_entries, scope_param, device_group_name, reference_aliases)
 
-        self.update_existing_entries(updated_entries, scope_param, device_group_name, limit)
+        self.update_existing_entries(updated_entries, scope_param, device_group_name, limit, reference_aliases)
 
     def get_current_objects(self, obj_types, max_workers=6, limit='10000', **kwargs):
         self.logger.info(f"Running with {max_workers} workers.")
@@ -318,6 +350,25 @@ class SCMObjectManager:
             self.logger.debug(f"Objects '{new_object['name']}' are identical after normalization. Skipping conflict resolution.")
             return current_object
 
+        if not self.interactive:
+            if self.conflict_policy == 'replace':
+                self.logger.info(
+                    "Replacing existing %s object '%s' during non-interactive migration.",
+                    new_object.get('type', 'SCM'),
+                    new_object['name'],
+                )
+                return new_object
+            if self.conflict_policy == 'ignore':
+                self.logger.info(
+                    "Ignoring differing existing object '%s' during non-interactive migration.",
+                    new_object['name'],
+                )
+                return current_object
+            raise RuntimeError(
+                f"Conflict detected for object '{new_object['name']}' during non-interactive migration. "
+                "Re-run with --conflict-policy replace or --conflict-policy ignore."
+            )
+
         print(f"Conflict detected for object '{new_object['name']}'")
         print(f"SCM Object: {normalized_current}")
         print(f"New Object: {normalized_new}")
@@ -353,7 +404,7 @@ class SCMObjectManager:
         normalized_current = SCMObjectManager.normalize(current_object)
         return normalized_new != normalized_current
 
-    def update_existing_entries(self, updated_entries, scope_param, device_group_name, limit):
+    def update_existing_entries(self, updated_entries, scope_param, device_group_name, limit, reference_aliases=None):
         for obj_type in self.obj_types:
             entry_type_name = obj_type.__name__
             if entry_type_name not in updated_entries:
@@ -361,6 +412,7 @@ class SCMObjectManager:
 
             entry_class = getattr(self.obj, entry_type_name)
             for entry in updated_entries[entry_type_name]:
+                entry = self._normalize_entry_for_post(entry_type_name, entry, reference_aliases or {})
                 object_id = entry.pop('id', None)
                 if not object_id:
                     self.logger.warning(f"Warning: Object ID not found for {entry['name']} in {entry_type_name}. Skipping update.")
@@ -390,18 +442,136 @@ class SCMObjectManager:
     def _generate_key_name(self, entry_type_name):
         return entry_type_name.replace(' ', '-')
 
-    def post_new_entries(self, new_entries, scope_param, device_group_name):
+    def post_new_entries(self, new_entries, scope_param, device_group_name, reference_aliases=None):
         for obj_type in self.obj_types:
             entry_type_name = obj_type.__name__
             if entry_type_name in new_entries and new_entries[entry_type_name]:
                 entry_class = getattr(self.obj, entry_type_name)
-                self.configure.post_entries(scope_param, new_entries[entry_type_name], entry_class, extra_query_params='')
+                normalized_entries = [
+                    self._normalize_entry_for_post(entry_type_name, entry, reference_aliases or {})
+                    for entry in new_entries[entry_type_name]
+                ]
+                self.configure.post_entries(scope_param, normalized_entries, entry_class, extra_query_params='')
             else:
                 message = f"No new {entry_type_name} entries to create from parsed data"
                 if device_group_name:
                     message += f" (Device Group: {device_group_name})"
                 message += f" for SCM {self.scope_param.split('=')[0]}: {self.scope_param.split('=')[1]}."
                 self.logger.info(message)
+
+    @staticmethod
+    def _build_reference_aliases(parsed_data, current_objects):
+        aliases = {}
+
+        def collect(entries):
+            if not isinstance(entries, list):
+                return
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get('name')
+                default_value = entry.get('default_value')
+                if isinstance(name, str):
+                    aliases.setdefault(name, name)
+                if isinstance(default_value, str) and isinstance(name, str):
+                    aliases[default_value] = name
+
+        for entries in parsed_data.values():
+            collect(entries)
+        for entries in current_objects.values():
+            collect(entries)
+
+        return aliases
+
+    def _normalize_entry_for_post(self, entry_type_name, entry, reference_aliases):
+        normalized = deepcopy(entry)
+
+        if entry_type_name == "InterfaceManagementProfile":
+            permitted_ip = normalized.get("permitted_ip")
+            if isinstance(permitted_ip, list):
+                normalized["permitted_ip"] = [
+                    item if isinstance(item, dict) else {"name": item}
+                    for item in permitted_ip
+                    if item
+                ]
+            return normalized
+
+        if entry_type_name == "DHCPInterface":
+            interface_name = normalized.get("name")
+            if isinstance(interface_name, str):
+                normalized["name"] = self._resolve_interface_reference(interface_name, reference_aliases)
+            return normalized
+
+        if entry_type_name in {"Layer2Subinterface", "Layer3Subinterface"}:
+            normalized.pop("default_value", None)
+            parent_interface = normalized.get("parent_interface")
+            if isinstance(parent_interface, str):
+                normalized["parent_interface"] = self._resolve_interface_reference(parent_interface, reference_aliases)
+            return normalized
+
+        if entry_type_name == "Zones":
+            network = normalized.get("network")
+            if isinstance(network, dict):
+                for network_type in ("layer2", "layer3", "tap", "virtual_wire"):
+                    references = network.get(network_type)
+                    if isinstance(references, list):
+                        network[network_type] = [
+                            self._resolve_interface_reference(reference, reference_aliases)
+                            if isinstance(reference, str) else reference
+                            for reference in references
+                        ]
+            return normalized
+
+        if entry_type_name == "LogicalRouter":
+            for vrf in normalized.get("vrf", []):
+                interfaces = vrf.get("interface")
+                if isinstance(interfaces, list):
+                    vrf["interface"] = [
+                        self._resolve_interface_reference(interface_name, reference_aliases)
+                        if isinstance(interface_name, str) else interface_name
+                        for interface_name in interfaces
+                    ]
+                routing_table = vrf.get("routing_table", {})
+                for address_family in ("ip", "ipv6"):
+                    static_routes = routing_table.get(address_family, {}).get("static_route", [])
+                    for route in static_routes:
+                        interface_name = route.get("interface")
+                        if isinstance(interface_name, str):
+                            route["interface"] = self._resolve_interface_reference(interface_name, reference_aliases)
+                        nexthop = route.get("nexthop")
+                        if isinstance(nexthop, dict) and isinstance(nexthop.get("tunnel"), str):
+                            nexthop["tunnel"] = self._resolve_interface_reference(nexthop["tunnel"], reference_aliases)
+            return normalized
+
+        if entry_type_name == "IKEGateway":
+            local_address = normalized.get("local_address")
+            if isinstance(local_address, dict) and isinstance(local_address.get("interface"), str):
+                local_address["interface"] = self._resolve_interface_reference(local_address["interface"], reference_aliases)
+            return normalized
+
+        if entry_type_name == "IPsecTunnel":
+            tunnel_interface = normalized.get("tunnel_interface")
+            if isinstance(tunnel_interface, str):
+                normalized["tunnel_interface"] = self._resolve_interface_reference(tunnel_interface, reference_aliases)
+            return normalized
+
+        if entry_type_name == "PbfRule":
+            forwarding = normalized.get("action", {}).get("forwarding")
+            if isinstance(forwarding, dict):
+                for key in ("egress_interface", "symmetric_return_interface"):
+                    value = forwarding.get(key)
+                    if isinstance(value, str):
+                        forwarding[key] = self._resolve_interface_reference(value, reference_aliases)
+            return normalized
+
+        return normalized
+
+    @staticmethod
+    def _resolve_interface_reference(interface_name, reference_aliases):
+        resolved = reference_aliases.get(interface_name)
+        if resolved:
+            return resolved
+        return normalize_scm_interface_name(interface_name)
 
     def process_rules(self, rule_obj, parsed_data, scope_param, rule_type='security', limit='10000'):
         rule_data = {

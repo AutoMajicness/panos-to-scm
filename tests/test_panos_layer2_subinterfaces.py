@@ -43,7 +43,8 @@ class PanosLayer2SubinterfaceParserTests(unittest.TestCase):
             subinterfaces,
             [
                 {
-                    "name": "ethernet1/6.200",
+                    "name": "$ethernet1-6.200",
+                    "default_value": "ethernet1/6.200",
                     "parent_interface": "ethernet1/6",
                     "tag": 200,
                     "comment": "Users L2 VLAN",

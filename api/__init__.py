@@ -136,3 +136,22 @@ class PanApiSession:
         except requests.exceptions.RequestException as e:
             logging.error(f"Error during POST to {url}: {e}")
             raise
+
+    def put(self, endpoint, data=None, headers=None, timeout=20, json=None):
+        self.authenticate()
+
+        if endpoint.startswith('http'):
+            url = endpoint
+        else:
+            endpoint = endpoint.rstrip('?')
+            url = f"{self.config['api_url']}{endpoint}"
+
+        try:
+            if json is not None:
+                response = self.session.put(url, json=json, headers=headers, timeout=timeout)
+            else:
+                response = self.session.put(url, json=data, headers=headers, timeout=timeout)
+            return response
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error during PUT to {url}: {e}")
+            raise
