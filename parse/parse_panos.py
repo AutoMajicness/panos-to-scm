@@ -1131,6 +1131,18 @@ class XMLParser:
 
         return addresses
 
+    def _resolve_panos_ip(self, value):
+        if not value:
+            return value
+
+        for address_entry in self.root.findall('./devices/entry/vsys/entry/address/entry'):
+            if address_entry.get('name') != value:
+                continue
+            ip_netmask = self._child_text(address_entry, 'ip-netmask')
+            return ip_netmask or value
+
+        return value
+
     def _address_group_entries(self):
         base_xpath_dict = {
             'local': './devices/entry/vsys/entry/address-group/entry',
@@ -2344,7 +2356,7 @@ class XMLParser:
             layer3_payload['dhcp_client'] = dhcp_client
         else:
             ip_entries = [
-                ip_entry.get('name')
+                self._resolve_panos_ip(ip_entry.get('name'))
                 for ip_entry in layer3.findall('ip/entry')
                 if ip_entry.get('name')
             ]
@@ -2395,7 +2407,7 @@ class XMLParser:
 
     def _static_ip_entries(self, entry):
         ip_entries = [
-            ip_entry.get('name')
+            self._resolve_panos_ip(ip_entry.get('name'))
             for ip_entry in entry.findall('ip/entry')
             if ip_entry.get('name')
         ]
@@ -2614,7 +2626,7 @@ class XMLParser:
             payload['mtu'] = int(mtu)
 
         ip_entries = [
-            ip_entry.get('name')
+            self._resolve_panos_ip(ip_entry.get('name'))
             for ip_entry in entry.findall('ip/entry')
             if ip_entry.get('name')
         ]
@@ -2668,18 +2680,6 @@ class XMLParser:
         if static_routes_v6:
             routing_table = vrf.setdefault('routing_table', {})
             routing_table['ipv6'] = {'static_route': static_routes_v6}
-
-        export_ipv4_route_maps = self._bgp_policy_route_map_names(entry, 'export', family='ipv4')
-        if export_ipv4_route_maps:
-            rib_filter = vrf.setdefault('rib_filter', {})
-            ipv4_filter = rib_filter.setdefault('ipv4', {})
-            ipv4_filter['bgp'] = {'route_map': export_ipv4_route_maps[0]}
-
-        export_ipv6_route_maps = self._bgp_policy_route_map_names(entry, 'export', family='ipv6')
-        if export_ipv6_route_maps:
-            rib_filter = vrf.setdefault('rib_filter', {})
-            ipv6_filter = rib_filter.setdefault('ipv6', {})
-            ipv6_filter['bgp'] = {'route_map': export_ipv6_route_maps[0]}
 
         bgp = self._convert_bgp(entry.find('protocol/bgp'), entry)
         if bgp:
@@ -2775,13 +2775,15 @@ class XMLParser:
             'ip-address': 'ip_address',
             'ipv6-address': 'ipv6_address',
             'fqdn': 'fqdn',
-            'next-vr': 'next_vr',
+            'next-vr': 'next_lr',
             'next-lr': 'next_lr',
             'tunnel': 'tunnel',
         }
         for panos_name, scm_name in text_fields.items():
             value = self._child_text(nexthop, panos_name)
             if value:
+                if scm_name in {'ip_address', 'ipv6_address'}:
+                    value = self._resolve_panos_ip(value)
                 return {scm_name: value}
 
         for empty_field in ['receive', 'discard']:
@@ -2947,6 +2949,8 @@ class XMLParser:
             },
         )
         if local_address:
+            if 'ip' in local_address:
+                local_address['ip'] = self._resolve_panos_ip(local_address['ip'])
             payload['local_address'] = local_address
 
         peer_address = self._convert_named_text_fields(
@@ -3360,7 +3364,19 @@ class XMLParser:
                 group_name = group_entry.get('name')
                 if not group_name:
                     continue
-                for family, af_entry in self._bgp_address_family_entries(group_entry):
+                group_entries = self._bgp_address_family_entries(group_entry)
+                peer_has_families = any(
+                    self._bgp_address_family_entries(peer_entry)
+                    for peer_entry in group_entry.findall('peer/entry')
+                )
+                group_families = [family for family, _ in group_entries]
+                if not group_families and not peer_has_families:
+                    group_families = ['ipv4']
+                for family in group_families:
+                    af_entry = next(
+                        (entry for item_family, entry in group_entries if item_family == family),
+                        None,
+                    )
                     profile = self._convert_bgp_address_family_profile(
                         self._bgp_address_family_profile_name(router_name, group_name, None, family),
                         family,
@@ -3410,6 +3426,8 @@ class XMLParser:
         return entries
 
     def _convert_bgp_address_family_profile(self, profile_name, family, af_entry):
+        if af_entry is None:
+            return {'name': profile_name, family: {'unicast': {}}}
         unicast = self._convert_bgp_address_family_unicast(af_entry)
         if not unicast:
             return None
@@ -3576,6 +3594,12 @@ class XMLParser:
         if peer_name:
             return self._sanitize_name(f"{router_name}-{group_name}-{peer_name}-{family}-af")
         return self._sanitize_name(f"{router_name}-{group_name}-{family}-af")
+
+    def _bgp_group_families(self, group_entry):
+        families = {family for family, _ in self._bgp_address_family_entries(group_entry)}
+        for peer_entry in group_entry.findall('peer/entry'):
+            families.update(family for family, _ in self._bgp_address_family_entries(peer_entry))
+        return sorted(families or {'ipv4'})
 
     def _bgp_filtering_profile_entries(self):
         if self.config_type != 'local':
@@ -4022,6 +4046,13 @@ class XMLParser:
         )
         if address_family:
             payload['address_family'] = address_family
+        else:
+            payload['address_family'] = {
+                family: self._bgp_address_family_profile_name(
+                    router_entry.get('name'), group_name, None, family
+                )
+                for family in self._bgp_group_families(group_entry)
+            }
 
         filtering_profile = {}
         for family in ('ipv4', 'ipv6'):
@@ -4050,19 +4081,28 @@ class XMLParser:
         if not peer_name:
             return None
 
-        payload = {'name': peer_name}
+        payload = {'name': self._sanitize_name(peer_name)}
         for panos_name, scm_name in [
             ('enable', 'enable'),
             ('peer-as', 'peer_as'),
-            ('local-address/interface', 'local_interface'),
-            ('local-address/ip', 'local_address'),
             ('peer-address/ip', 'peer_address'),
             ('auth-profile', 'authentication_profile'),
             ('authentication-profile', 'authentication_profile'),
         ]:
             value = self._child_text(peer_entry, panos_name)
             if value:
+                if panos_name == 'peer-address/ip':
+                    value = self._resolve_panos_ip(value)
                 payload[scm_name] = value.lower() == 'yes' if panos_name == 'enable' else value
+
+        local_address = self._convert_named_text_fields(
+            peer_entry.find('local-address'),
+            {'interface': 'interface', 'ip': 'ip'},
+        )
+        if local_address:
+            if 'ip' in local_address:
+                local_address['ip'] = self._resolve_panos_ip(local_address['ip'])
+            payload['local_address'] = local_address
 
         timers = self._convert_bgp_timers(peer_entry.find('timers'))
         if timers:

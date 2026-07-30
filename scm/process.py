@@ -769,8 +769,17 @@ class SCMObjectManager:
                         if isinstance(interface_name, str):
                             route["interface"] = self._resolve_interface_reference(interface_name, reference_aliases)
                         nexthop = route.get("nexthop")
-                        if isinstance(nexthop, dict) and isinstance(nexthop.get("tunnel"), str):
-                            nexthop["tunnel"] = self._resolve_interface_reference(nexthop["tunnel"], reference_aliases)
+                        if isinstance(nexthop, dict):
+                            if isinstance(nexthop.get("tunnel"), str):
+                                nexthop["tunnel"] = self._resolve_interface_reference(nexthop["tunnel"], reference_aliases)
+                            if "next_lr" in nexthop:
+                                nexthop.pop("next_lr")
+                            if not nexthop:
+                                route.pop("nexthop", None)
+                    routing_table.get(address_family, {})["static_route"] = [
+                        route for route in static_routes
+                        if route.get("interface") or route.get("nexthop")
+                    ]
                 bgp = vrf.get("bgp")
                 if isinstance(bgp, dict):
                     self._normalize_bgp_for_post(bgp)
@@ -779,6 +788,19 @@ class SCMObjectManager:
                             local_interface = peer.get("local_interface")
                             if isinstance(local_interface, str):
                                 peer["local_interface"] = self._resolve_interface_reference(local_interface, reference_aliases)
+                            local_address = peer.get("local_address")
+                            if isinstance(local_address, dict) and isinstance(local_address.get("interface"), str):
+                                local_address["interface"] = self._resolve_interface_reference(
+                                    local_address["interface"], reference_aliases
+                                )
+                            if isinstance(local_address, dict) and isinstance(local_address.get("ip"), str):
+                                local_address.pop("ip", None)
+                            peer_address = peer.get("peer_address")
+                            if isinstance(peer_address, str):
+                                if re.match(r"^[0-9a-fA-F:.]+(?:/\d+)?$", peer_address):
+                                    peer["peer_address"] = {"ip": peer_address.split("/", 1)[0]}
+                                else:
+                                    peer["peer_address"] = {"fqdn": peer_address}
             return normalized
 
         if entry_type_name == "IKEGateway":

@@ -379,18 +379,6 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                         {
                             "name": "default",
                             "interface": ["ethernet1/1", "ethernet1/1.100"],
-                            "rib_filter": {
-                                "ipv4": {
-                                    "bgp": {
-                                        "route_map": "default-export-export-default-rm",
-                                    }
-                                },
-                                "ipv6": {
-                                    "bgp": {
-                                        "route_map": "default-export-export-v6-rm",
-                                    }
-                                },
-                            },
                             "bgp": {
                                 "enable": True,
                                 "router_id": "192.0.2.1",
@@ -418,8 +406,10 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                                 "enable": True,
                                                 "peer_as": "65002",
                                                 "authentication_profile": "bgp-md5",
-                                                "local_interface": "ethernet1/1",
-                                                "local_address": "192.0.2.1/24",
+                                                "local_address": {
+                                                    "interface": "ethernet1/1",
+                                                    "ip": "192.0.2.1/24",
+                                                },
                                                 "peer_address": "192.0.2.2",
                                                 "timers": {
                                                     "keep_alive_interval": 20,
