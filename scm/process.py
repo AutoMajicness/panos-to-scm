@@ -221,6 +221,8 @@ class Processor:
             "move_failures": [],
             "reordered": False,
             "verified": False,
+            "verification_mode": "relative-subsequence",
+            "matched_rule_count": 0,
             "fetch_failed": False,
             "error": "",
         }
@@ -231,7 +233,7 @@ class Processor:
             report["current_order_before"] = current_order
             report["current_count_before"] = len(current_order)
 
-            if current_order != desired_order:
+            if not self._contains_rule_subsequence(current_order, desired_order):
                 self.logger.info("Reordering rules now..")
                 current_rules, move_attempts, move_failures = self.reorder_rules(
                     obj_type,
@@ -249,19 +251,24 @@ class Processor:
             final_order = self._rule_names_without_default(current_rules)
             report["current_order_after"] = final_order
             report["current_count_after"] = len(final_order)
-            report["verified"] = final_order == desired_order
+            report["matched_rule_count"] = len(
+                [rule_name for rule_name in final_order if rule_name in desired_order]
+            )
+            report["verified"] = self._contains_rule_subsequence(final_order, desired_order)
             if report["verified"]:
                 self.logger.info(
-                    "Verified %s %s rule order: %d rules match the source order.",
+                    "Verified %s %s rule order using %s check: %d migrated rules match the source order.",
                     position,
                     obj_type.__name__,
-                    len(final_order),
+                    report["verification_mode"],
+                    report["matched_rule_count"],
                 )
             else:
                 self.logger.warning(
-                    "Unable to verify %s %s rule order. Desired=%s Final=%s",
+                    "Unable to verify %s %s rule order using %s check. Desired=%s Final=%s",
                     position,
                     obj_type.__name__,
+                    report["verification_mode"],
                     desired_order,
                     final_order,
                 )
@@ -281,6 +288,19 @@ class Processor:
     @staticmethod
     def _rule_names_without_default(rules):
         return [rule['name'] for rule in rules if rule.get('name') != 'default']
+
+    @staticmethod
+    def _contains_rule_subsequence(current_order, desired_order):
+        if not desired_order:
+            return True
+        desired_index = 0
+        for rule_name in current_order:
+            if rule_name != desired_order[desired_index]:
+                continue
+            desired_index += 1
+            if desired_index == len(desired_order):
+                return True
+        return False
 
     @staticmethod
     def _is_success_result(result):
@@ -704,6 +724,8 @@ class SCMObjectManager:
                 "move_failures": [],
                 "reordered": False,
                 "verified": True,
+                "verification_mode": "relative-subsequence",
+                "matched_rule_count": len([rule_name for rule_name in current_order if rule_name in desired_order]),
                 "fetch_failed": False,
                 "error": "",
             }
@@ -719,7 +741,7 @@ class SCMObjectManager:
     def is_rule_order_correct(current_rules, desired_rules, limit):
         current_rule_names = Processor._rule_names_without_default(current_rules)
         desired_rule_names = Processor._rule_names_without_default(desired_rules)
-        return current_rule_names == desired_rule_names
+        return Processor._contains_rule_subsequence(current_rule_names, desired_rule_names)
 
     @staticmethod
     def normalize(obj):

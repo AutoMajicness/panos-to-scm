@@ -69,6 +69,16 @@ class RuleMoveHandler:
         return {"status": "created", "message": "Object created", "name": None}
 
 
+class MixedRulebaseHandler:
+    def get(self, endpoint, params=None):
+        return [
+            {"id": "default-a", "name": "Web-Security-Default", "folder": "All"},
+            {"id": "default-b", "name": "hip-default", "folder": "All"},
+            {"id": "rule-a", "name": "rule-a", "folder": "All"},
+            {"id": "rule-b", "name": "rule-b", "folder": "All"},
+        ]
+
+
 class EndpointRegistryTests(unittest.TestCase):
     def test_core_object_endpoints_are_modern_and_payload_scoped(self):
         self.assertEqual(obj.Address.get_endpoint(), "/config/objects/v1/addresses")
@@ -182,6 +192,29 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertTrue(report["verified"])
         self.assertEqual(report["move_attempts"], 1)
         self.assertEqual(report["move_failures"], [])
+
+    def test_rule_order_verification_accepts_migrated_rules_after_system_rules(self):
+        manager = SCMObjectManager(
+            MixedRulebaseHandler(),
+            "&folder=All",
+            obj,
+            [],
+            obj.SecurityRule,
+            obj.NatRule,
+        )
+
+        report = manager.configure.check_and_reorder_rules(
+            obj.SecurityRule,
+            "&folder=All",
+            [{"name": "rule-a"}, {"name": "rule-b"}],
+            limit="10000",
+            position="pre",
+        )
+
+        self.assertTrue(report["verified"])
+        self.assertFalse(report["reordered"])
+        self.assertEqual(report["verification_mode"], "relative-subsequence")
+        self.assertEqual(report["matched_rule_count"], 2)
 
     def test_zones_endpoint_is_modern_network_api_and_payload_scoped(self):
         self.assertEqual(obj.Zones.get_endpoint(), "/config/network/v1/zones")
