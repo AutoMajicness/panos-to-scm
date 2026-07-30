@@ -79,6 +79,20 @@ class MixedRulebaseHandler:
         ]
 
 
+class FallbackFetchSession:
+    def __init__(self):
+        self.get_calls = []
+
+    def ensure_valid_token(self):
+        pass
+
+    def get(self, url, params=None, timeout=20):
+        self.get_calls.append({"url": url, "params": dict(params or {}), "timeout": timeout})
+        if params and params.get("limit", 0) > 500:
+            return FakeResponse(502, {"fault": {"faultstring": "Body buffer overflow"}}, "too big")
+        return FakeResponse(200, {"data": [{"name": "tenant-object"}]})
+
+
 class EndpointRegistryTests(unittest.TestCase):
     def test_core_object_endpoints_are_modern_and_payload_scoped(self):
         self.assertEqual(obj.Address.get_endpoint(), "/config/objects/v1/addresses")
@@ -393,6 +407,16 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(objects, [{"name": "addr", "folder": "All"}])
         self.assertEqual(session.get_calls[0]["params"]["folder"], "All")
         self.assertNotIn("folder", session.get_calls[0]["url"])
+
+    def test_fetch_objects_retries_with_smaller_page_size_after_large_response_failure(self):
+        session = FallbackFetchSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&folder=All", obj, [obj.Address], obj.SecurityRule, obj.NatRule)
+
+        objects = manager.fetch_objects(obj.Address, limit="1000")
+
+        self.assertEqual(objects, [{"name": "tenant-object"}])
+        self.assertEqual([call["params"]["limit"] for call in session.get_calls], [1000, 1000, 500])
 
     def test_zone_post_puts_scope_in_payload_not_url(self):
         session = FakeSession()

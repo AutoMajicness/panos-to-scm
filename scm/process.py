@@ -49,6 +49,12 @@ _PHYSICAL_ETHERNET_PATTERN = re.compile(r"^ethernet\d+/\d+$")
 _ETHERNET_SUBINTERFACE_PATTERN = re.compile(r"^ethernet\d+/\d+\.\d+$")
 _AGGREGATE_INTERFACE_PATTERN = re.compile(r"^ae\d+$")
 _TUNNEL_INTERFACE_PATTERN = re.compile(r"^tunnel\.\d+$")
+_FETCH_LIMIT_OVERRIDES = {
+    "Application": 500,
+    "RoutePrefixList": 500,
+    "RouteAccessList": 500,
+}
+_FETCH_LIMIT_FALLBACKS = (5000, 1000, 500, 200, 100, 50)
 
 
 def order_object_types_for_dependencies(obj_types):
@@ -330,20 +336,24 @@ class SCMObjectManager:
 
     def fetch_objects(self, obj_type, limit='10000', position=''):
         endpoint = obj_type.get_endpoint()
-        max_limit = 5000  # Maximum limit allowed by the API - atleast for GET on address objects
+        initial_limit = _FETCH_LIMIT_OVERRIDES.get(obj_type.__name__, 5000)
         total_limit = int(limit)  # Convert the limit to an integer
         offset = 0  # Start offset for pagination
         all_objects = []  # Initialize list to store all fetched objects
 
         while offset < total_limit:
             # Calculate the limit for the current batch, ensuring it does not exceed max_limit
-            current_limit = min(max_limit, total_limit - offset)
-            params = {**self.scope.as_query_params(), 'limit': current_limit, 'offset': offset}
+            current_limit = min(initial_limit, total_limit - offset)
+            current_objects, effective_limit = self._fetch_batch_with_fallback(
+                endpoint,
+                obj_type.__name__,
+                current_limit,
+                offset,
+                position,
+            )
+            params = {**self.scope.as_query_params(), 'limit': effective_limit, 'offset': offset}
             if position:
                 params['position'] = position
-            
-            # Fetch the current batch of objects
-            current_objects = self.api_handler.get(endpoint, params=params)
             self.logger.debug(f'Fetched batch with offset {offset}: {current_objects}')
             if current_objects is None:
                 raise RuntimeError(f"Failed to fetch objects for endpoint {endpoint}")
@@ -352,14 +362,14 @@ class SCMObjectManager:
             all_objects.extend(current_objects)
 
             # Update offset for the next batch
-            offset += current_limit
+            offset += effective_limit
             
             # Debug statement to log the count of objects
             object_count = len([obj for obj in current_objects if 'name' in obj])
             self.logger.debug(f'Number of objects in current batch with "name" key: {object_count}')
 
             # Stop fetching if the number of objects returned is less than requested for the batch
-            if len(current_objects) < current_limit:
+            if len(current_objects) < effective_limit:
                 self.logger.debug('Fetched fewer objects than requested for the batch, no more objects to fetch.')
                 break
 
@@ -368,6 +378,35 @@ class SCMObjectManager:
         self.logger.debug(f'Total number of objects fetched: {total_object_count}')
 
         return all_objects
+
+    def _fetch_batch_with_fallback(self, endpoint, object_type_name, requested_limit, offset, position):
+        candidate_limits = [
+            candidate
+            for candidate in _FETCH_LIMIT_FALLBACKS
+            if candidate <= requested_limit
+        ]
+        if requested_limit not in candidate_limits:
+            candidate_limits.insert(0, requested_limit)
+
+        last_error = None
+        for candidate_limit in candidate_limits:
+            params = {**self.scope.as_query_params(), 'limit': candidate_limit, 'offset': offset}
+            if position:
+                params['position'] = position
+            try:
+                return self.api_handler.get(endpoint, params=params), candidate_limit
+            except Exception as exc:
+                last_error = exc
+                if candidate_limit == candidate_limits[-1]:
+                    break
+                self.logger.warning(
+                    "Fetch for %s failed at limit %s offset %s; retrying with a smaller page size: %s",
+                    object_type_name,
+                    candidate_limit,
+                    offset,
+                    exc,
+                )
+        raise last_error
 
     def fetch_rules(self, obj_type, limit='10000', position=''):
         rules = self.fetch_objects(obj_type, limit, position)
