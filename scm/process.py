@@ -48,13 +48,16 @@ _NETWORK_OBJECT_ORDER_INDEX = {
 _PHYSICAL_ETHERNET_PATTERN = re.compile(r"^ethernet\d+/\d+$")
 _ETHERNET_SUBINTERFACE_PATTERN = re.compile(r"^ethernet\d+/\d+\.\d+$")
 _AGGREGATE_INTERFACE_PATTERN = re.compile(r"^ae\d+$")
+_AGGREGATE_SUBINTERFACE_PATTERN = re.compile(r"^ae\d+\.\d+$")
 _TUNNEL_INTERFACE_PATTERN = re.compile(r"^tunnel\.\d+$")
+_LOOPBACK_INTERFACE_PATTERN = re.compile(r"^loopback\.\d+$")
 _FETCH_LIMIT_OVERRIDES = {
     "Application": 500,
     "RoutePrefixList": 500,
     "RouteAccessList": 500,
 }
 _FETCH_LIMIT_FALLBACKS = (5000, 1000, 500, 200, 100, 50)
+_SINGLE_PAGE_FETCH_OBJECTS = {"Application"}
 
 
 def order_object_types_for_dependencies(obj_types):
@@ -80,6 +83,7 @@ def normalize_scm_interface_name(interface_name: str) -> str:
         _PHYSICAL_ETHERNET_PATTERN.match(interface_name)
         or _ETHERNET_SUBINTERFACE_PATTERN.match(interface_name)
         or _AGGREGATE_INTERFACE_PATTERN.match(interface_name)
+        or _AGGREGATE_SUBINTERFACE_PATTERN.match(interface_name)
     ):
         sanitized = "".join(
             character if character.isalnum() or character in "._-" else "-"
@@ -88,6 +92,8 @@ def normalize_scm_interface_name(interface_name: str) -> str:
         return f"${sanitized}"
     if _TUNNEL_INTERFACE_PATTERN.match(interface_name):
         return f"$tunnel{interface_name.split('.', 1)[1]}"
+    if _LOOPBACK_INTERFACE_PATTERN.match(interface_name):
+        return f"$loopback{interface_name.split('.', 1)[1]}"
     return interface_name
 
 
@@ -340,6 +346,10 @@ class SCMObjectManager:
         total_limit = int(limit)  # Convert the limit to an integer
         offset = 0  # Start offset for pagination
         all_objects = []  # Initialize list to store all fetched objects
+        single_page_only = (
+            obj_type.__name__ in _SINGLE_PAGE_FETCH_OBJECTS
+            and self.scope.scope_type == "folder"
+        )
 
         while offset < total_limit:
             # Calculate the limit for the current batch, ensuring it does not exceed max_limit
@@ -371,6 +381,12 @@ class SCMObjectManager:
             # Stop fetching if the number of objects returned is less than requested for the batch
             if len(current_objects) < effective_limit:
                 self.logger.debug('Fetched fewer objects than requested for the batch, no more objects to fetch.')
+                break
+            if single_page_only:
+                self.logger.info(
+                    "Stopping current-state fetch for %s after the first page in folder scope to avoid walking the full SCM application catalog.",
+                    obj_type.__name__,
+                )
                 break
 
         # Log the total number of objects fetched
@@ -412,18 +428,21 @@ class SCMObjectManager:
         rules = self.fetch_objects(obj_type, limit, position)
         return [o for o in rules if 'name' in o and ('folder' in o or 'snippet' in o)]
 
-    def process_objects(self, parsed_data, scope_param, device_group_name, max_workers=6, limit='10000'):
+    def process_objects(self, parsed_data, scope_param, device_group_name, max_workers=6, limit='10000', current_data=None):
         self.logger.info(f'Workers grabbing objects: {max_workers}')
-        current_objects = self.get_current_objects(self.obj_types, max_workers, limit)
+        current_objects = self.get_current_objects(self.obj_types, max_workers, limit, parsed_data=parsed_data)
         new_entries, updated_entries = self.get_new_and_updated_entries(parsed_data, current_objects)
-        reference_aliases = self._build_reference_aliases(parsed_data, current_objects)
+        alias_source = dict(current_objects)
+        if isinstance(current_data, dict):
+            alias_source.update(current_data)
+        reference_aliases = self._build_reference_aliases(parsed_data, alias_source)
 
         if any(new_entries.values()):
             self.post_new_entries(new_entries, scope_param, device_group_name, reference_aliases)
 
         self.update_existing_entries(updated_entries, scope_param, device_group_name, limit, reference_aliases)
 
-    def get_current_objects(self, obj_types, max_workers=6, limit='10000', **kwargs):
+    def get_current_objects(self, obj_types, max_workers=6, limit='10000', parsed_data=None, **kwargs):
         self.logger.info(f"Running with {max_workers} workers.")
         current_objects = {}
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -440,6 +459,15 @@ class SCMObjectManager:
                 try:
                     current_objects[obj_type] = future.result()
                 except Exception as exc:
+                    fallback = self._fetch_named_route_lists(obj_type, parsed_data)
+                    if fallback is not None:
+                        current_objects[obj_type] = fallback
+                        self.logger.warning(
+                            "Used name-scoped fallback for %s after collection fetch failure: %d objects.",
+                            obj_type.__name__,
+                            len(fallback),
+                        )
+                        continue
                     self.fetch_failures.append(
                         {
                             "object_type": obj_type.__name__,
@@ -454,6 +482,34 @@ class SCMObjectManager:
                     )
                     current_objects[obj_type] = []
         return current_objects
+
+    def _fetch_named_route_lists(self, obj_type, parsed_data):
+        if obj_type.__name__ not in {"RoutePrefixList", "RouteAccessList"}:
+            return None
+        if not isinstance(parsed_data, dict):
+            return None
+
+        desired = parsed_data.get(obj_type.__name__, [])
+        names = [entry.get("name") for entry in desired if isinstance(entry, dict) and entry.get("name")]
+        if not names:
+            return None
+
+        found = []
+        endpoint = obj_type.get_endpoint()
+        for name in names:
+            try:
+                matches = self.api_handler.get(
+                    endpoint,
+                    params={**self.scope.as_query_params(), "name": name},
+                )
+            except Exception as exc:
+                self.logger.warning("Name-scoped fallback failed for %s %s: %s", obj_type.__name__, name, exc)
+                continue
+            if isinstance(matches, list):
+                found.extend(item for item in matches if isinstance(item, dict))
+            elif isinstance(matches, dict):
+                found.append(matches)
+        return found
 
     def get_new_and_updated_entries(self, parsed_data, current_objects):
         new_entries = {}
@@ -612,6 +668,9 @@ class SCMObjectManager:
                     aliases.setdefault(name, name)
                 if isinstance(default_value, str) and isinstance(name, str):
                     aliases[default_value] = name
+                ip_netmask = entry.get('ip_netmask')
+                if isinstance(name, str) and isinstance(ip_netmask, str):
+                    aliases[name] = ip_netmask
 
         for entries in parsed_data.values():
             collect(entries)
@@ -639,11 +698,39 @@ class SCMObjectManager:
                 normalized["name"] = self._resolve_interface_reference(interface_name, reference_aliases)
             return normalized
 
+        if entry_type_name == "LoopbackInterface":
+            normalized.pop("default_value", None)
+            interface_name = normalized.get("name")
+            if isinstance(interface_name, str):
+                normalized["name"] = self._resolve_interface_reference(interface_name, reference_aliases)
+            ip_entries = normalized.get("ip")
+            if isinstance(ip_entries, list):
+                normalized["ip"] = self._normalize_ip_entries(ip_entries, reference_aliases)
+            return normalized
+
+        if entry_type_name == "EthernetInterface":
+            aggregate_group = normalized.get("aggregate_group")
+            if isinstance(aggregate_group, str):
+                normalized["aggregate_group"] = self._resolve_interface_reference(aggregate_group, reference_aliases)
+            layer3 = normalized.get("layer3")
+            if isinstance(layer3, dict) and isinstance(layer3.get("ip"), list):
+                layer3["ip"] = self._normalize_ip_entries(layer3["ip"], reference_aliases)
+            return normalized
+
         if entry_type_name in {"Layer2Subinterface", "Layer3Subinterface"}:
             normalized.pop("default_value", None)
             parent_interface = normalized.get("parent_interface")
             if isinstance(parent_interface, str):
                 normalized["parent_interface"] = self._resolve_interface_reference(parent_interface, reference_aliases)
+            if entry_type_name == "Layer3Subinterface" and isinstance(normalized.get("ip"), list):
+                normalized["ip"] = self._normalize_ip_entries(normalized["ip"], reference_aliases)
+            return normalized
+
+        if entry_type_name in {"VlanInterface", "TunnelInterface"}:
+            if isinstance(normalized.get("ip"), list):
+                normalized["ip"] = self._normalize_ip_entries(normalized["ip"], reference_aliases)
+            if entry_type_name == "TunnelInterface":
+                normalized.pop("default_value", None)
             return normalized
 
         if entry_type_name == "Zones":
@@ -658,6 +745,12 @@ class SCMObjectManager:
                             for reference in references
                         ]
             return normalized
+
+        if entry_type_name == "RoutePrefixList":
+            return self._normalize_route_prefix_list(normalized)
+
+        if entry_type_name == "RouteAccessList":
+            return self._normalize_route_access_list(normalized)
 
         if entry_type_name == "LogicalRouter":
             for vrf in normalized.get("vrf", []):
@@ -678,6 +771,14 @@ class SCMObjectManager:
                         nexthop = route.get("nexthop")
                         if isinstance(nexthop, dict) and isinstance(nexthop.get("tunnel"), str):
                             nexthop["tunnel"] = self._resolve_interface_reference(nexthop["tunnel"], reference_aliases)
+                bgp = vrf.get("bgp")
+                if isinstance(bgp, dict):
+                    self._normalize_bgp_for_post(bgp)
+                    for peer_group in bgp.get("peer_group", []):
+                        for peer in peer_group.get("peer", []):
+                            local_interface = peer.get("local_interface")
+                            if isinstance(local_interface, str):
+                                peer["local_interface"] = self._resolve_interface_reference(local_interface, reference_aliases)
             return normalized
 
         if entry_type_name == "IKEGateway":
@@ -704,11 +805,119 @@ class SCMObjectManager:
         return normalized
 
     @staticmethod
+    def _normalize_route_prefix_list(entry):
+        if "type" in entry:
+            return entry
+        for family in ("ipv4", "ipv6"):
+            rules = entry.pop(family, {}).get("prefix_list", [])
+            if not rules:
+                continue
+            family_entry = []
+            for rule in rules:
+                normalized_rule = {
+                    "name": rule.get("name"),
+                    "action": rule.get("action", "permit"),
+                    "prefix": {"entry": {"network": rule.get("prefix")}},
+                }
+                for key in ("exact", "ge", "le"):
+                    if key in rule:
+                        normalized_rule["prefix"]["entry"][key] = rule[key]
+                family_entry.append(normalized_rule)
+            entry["type"] = {family: {f"{family}_entry": family_entry}}
+            break
+        return entry
+
+    @staticmethod
+    def _normalize_route_access_list(entry):
+        if "type" in entry:
+            return entry
+        rules = entry.pop("access_list", [])
+        if not rules:
+            return entry
+        family = "ipv6" if any(":" in str(rule.get("source", "")) for rule in rules) else "ipv4"
+        family_entry = []
+        for rule in rules:
+            family_entry.append(
+                {
+                    "name": rule.get("name"),
+                    "action": rule.get("action", "permit"),
+                    "source_address": {"address": rule.get("source", "any")},
+                    "destination_address": {"address": rule.get("destination", "any")},
+                }
+            )
+        entry["type"] = {family: {f"{family}_entry": family_entry}}
+        return entry
+
+    @staticmethod
+    def _normalize_bgp_for_post(bgp):
+        redistribution_profile = bgp.get("redistribution_profile")
+        if isinstance(redistribution_profile, str):
+            bgp["redistribution_profile"] = {
+                "ipv4": {"unicast": redistribution_profile},
+                "ipv6": {},
+            }
+
+        for peer_group in bgp.get("peer_group", []):
+            if not isinstance(peer_group, dict):
+                continue
+            peer_group_type = peer_group.get("type")
+            if isinstance(peer_group_type, str) and peer_group_type in {"ebgp", "ibgp"}:
+                peer_group["type"] = {peer_group_type: {}}
+            peer_group["address_family"] = SCMObjectManager._normalize_bgp_family_references(
+                peer_group.get("address_family", {})
+            )
+            filtering_profile = peer_group.get("filtering_profile", {})
+            if not isinstance(filtering_profile, dict):
+                filtering_profile = {}
+            for peer in peer_group.get("peer", []):
+                if not isinstance(peer, dict):
+                    continue
+                peer_family = peer.get("address_family", {})
+                for family, family_payload in peer_family.items():
+                    if not isinstance(family_payload, dict):
+                        continue
+                    unicast = family_payload.get("unicast", {})
+                    if isinstance(unicast, dict) and unicast.get("filtering_profile"):
+                        filtering_profile[family] = unicast["filtering_profile"]
+                peer["address_family"] = SCMObjectManager._normalize_bgp_family_references(peer_family)
+            if filtering_profile:
+                peer_group["filtering_profile"] = filtering_profile
+
+    @staticmethod
+    def _normalize_bgp_family_references(address_family):
+        normalized = {}
+        if not isinstance(address_family, dict):
+            return normalized
+        for family, family_payload in address_family.items():
+            if isinstance(family_payload, str):
+                normalized[family] = family_payload
+                continue
+            if not isinstance(family_payload, dict):
+                continue
+            unicast = family_payload.get("unicast", {})
+            if isinstance(unicast, dict) and unicast.get("address_family_profile"):
+                normalized[family] = unicast["address_family_profile"]
+        return normalized
+
+    @staticmethod
     def _resolve_interface_reference(interface_name, reference_aliases):
         resolved = reference_aliases.get(interface_name)
         if resolved:
             return resolved
         return normalize_scm_interface_name(interface_name)
+
+    @staticmethod
+    def _normalize_ip_entries(ip_entries, reference_aliases):
+        normalized_entries = []
+        for ip_entry in ip_entries:
+            if isinstance(ip_entry, dict):
+                value = ip_entry.get("name")
+            else:
+                value = ip_entry
+            if not value:
+                continue
+            normalized_entries.append({"name": reference_aliases.get(value, value)})
+        return normalized_entries
 
     def process_rules(self, rule_obj, parsed_data, scope_param, rule_type='security', limit='10000'):
         rule_data = {

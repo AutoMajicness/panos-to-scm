@@ -209,12 +209,12 @@ class MainDryRunTests(unittest.TestCase):
             output = json.loads(output_path.read_text(encoding="utf-8"))
 
         self.assertEqual(report.summary()["LogicalRouter"], 1)
-        self.assertEqual(report.summary()["warnings"], 9)
+        self.assertEqual(report.summary()["warnings"], 8)
         self.assertEqual(output["summary"]["LogicalRouter"], 1)
-        self.assertEqual(output["summary"]["warnings"], 9)
+        self.assertEqual(output["summary"]["warnings"], 8)
         self.assertIn("LogicalRouter", output["objects"])
         warning_codes = [warning["code"] for warning in output["warnings"]]
-        self.assertEqual(warning_codes.count("unsupported-panos-routing-node"), 8)
+        self.assertEqual(warning_codes.count("unsupported-panos-routing-node"), 7)
         self.assertEqual(warning_codes.count("missing-network-reference"), 1)
 
     def test_validate_only_writes_remediation_output(self):
@@ -336,6 +336,65 @@ class MainDryRunTests(unittest.TestCase):
         self.assertEqual(report_output["final_snapshots"]["network"]["Zones"], 1)
         self.assertEqual(report_output["summary"]["fetch_failures"], 0)
         self.assertEqual(report_output["summary"]["rule_order_checks"], 0)
+
+    def test_live_policy_only_run_does_not_require_post_objects(self):
+        class LiveSession:
+            def ensure_valid_token(self):
+                pass
+
+        class PolicyManager:
+            def __init__(self):
+                self.calls = []
+                self.rule_order_verification = []
+                self.fetch_failures = []
+                self.configure = type(
+                    "Configure",
+                    (),
+                    {"set_max_workers": lambda self, workers: None},
+                )()
+
+            def process_rules(self, rule_obj, parsed_data, scope, limit=None, rule_type=None):
+                self.calls.append(
+                    {
+                        "rule_obj": rule_obj,
+                        "parsed_data": parsed_data,
+                        "scope": scope,
+                        "limit": limit,
+                        "rule_type": rule_type,
+                    }
+                )
+
+        parsed_data = {
+            "security_pre_rules": [{"name": "allow-web"}],
+            "security_post_rules": [],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            parsed_path = directory_path / "parsed.json"
+            current_path = directory_path / "current.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+            current_path.write_text(json.dumps({}), encoding="utf-8")
+            manager = PolicyManager()
+
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch.object(main, "initialize_api_session", return_value=LiveSession()),
+                patch.object(main, "setup_scm_object_manager", return_value=manager, create=True),
+            ):
+                main.main(
+                    AppConfig(),
+                    json_file=str(parsed_path),
+                    current_data_file=str(current_path),
+                    policy_scope="folder:Tenant-A",
+                    run_security=True,
+                    post_policy=True,
+                )
+
+        self.assertEqual(len(manager.calls), 1)
+        self.assertEqual(manager.calls[0]["rule_type"], "security")
+        self.assertEqual(manager.calls[0]["scope"], "&folder=Tenant-A")
 
     def test_live_report_dedupes_repeated_fetch_failures(self):
         report = main.build_live_report(

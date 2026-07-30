@@ -93,6 +93,18 @@ class FallbackFetchSession:
         return FakeResponse(200, {"data": [{"name": "tenant-object"}]})
 
 
+class MultiPageFetchSession:
+    def __init__(self):
+        self.get_calls = []
+
+    def ensure_valid_token(self):
+        pass
+
+    def get(self, url, params=None, timeout=20):
+        self.get_calls.append({"url": url, "params": dict(params or {}), "timeout": timeout})
+        return FakeResponse(200, {"data": [{"name": f"tenant-object-{params.get('offset', 0)}"} for _ in range(params.get("limit", 0))]})
+
+
 class EndpointRegistryTests(unittest.TestCase):
     def test_core_object_endpoints_are_modern_and_payload_scoped(self):
         self.assertEqual(obj.Address.get_endpoint(), "/config/objects/v1/addresses")
@@ -344,6 +356,16 @@ class PanApiHandlerTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "Status Code: 400"):
             handler.get("/config/network/v1/zones", params={"snippet": "missing"})
 
+    def test_get_accepts_raw_list_response(self):
+        session = FakeSession()
+        session.get_response = FakeResponse(200, [{"name": "mantest-prefix-default"}])
+        handler = PanApiHandler(session)
+
+        self.assertEqual(
+            handler.get("/config/network/v1/route-prefix-lists", params={"snippet": "Network-Stack"}),
+            [{"name": "mantest-prefix-default"}],
+        )
+
     def test_post_returns_created_status(self):
         session = FakeSession()
         handler = PanApiHandler(session)
@@ -417,6 +439,18 @@ class ProcessorTests(unittest.TestCase):
 
         self.assertEqual(objects, [{"name": "tenant-object"}])
         self.assertEqual([call["params"]["limit"] for call in session.get_calls], [1000, 1000, 500])
+
+    def test_fetch_objects_caps_application_lookup_to_one_page_in_folder_scope(self):
+        session = MultiPageFetchSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&folder=All", obj, [obj.Application], obj.SecurityRule, obj.NatRule)
+
+        objects = manager.fetch_objects(obj.Application, limit="10000")
+
+        self.assertEqual(len(objects), 500)
+        self.assertEqual(len(session.get_calls), 1)
+        self.assertEqual(session.get_calls[0]["params"]["limit"], 500)
+        self.assertEqual(session.get_calls[0]["params"]["offset"], 0)
 
     def test_zone_post_puts_scope_in_payload_not_url(self):
         session = FakeSession()
@@ -691,6 +725,8 @@ class ProcessorTests(unittest.TestCase):
             "ethernet1/1": "$ethernet1-1",
             "ethernet1/4": "$ethernet1-4",
             "ethernet1/4.2": "$ethernet1-4.2",
+            "ae1": "$ae1",
+            "ae1.1921": "$ae1.1921",
             "tunnel.1": "$tunnel1",
         }
 
@@ -699,14 +735,24 @@ class ProcessorTests(unittest.TestCase):
             {"name": "$ethernet1-4.2", "parent_interface": "ethernet1/4", "tag": 2},
             aliases,
         )
+        aggregate_member = manager._normalize_entry_for_post(
+            "EthernetInterface",
+            {"name": "$ethernet1-41", "aggregate_group": "ae1"},
+            aliases,
+        )
         zone = manager._normalize_entry_for_post(
             "Zones",
-            {"name": "Trust", "network": {"layer3": ["ethernet1/1", "ethernet1/4.2", "tunnel.1"]}},
+            {"name": "Trust", "network": {"layer3": ["ethernet1/1", "ethernet1/4.2", "ae1.1921", "tunnel.1"]}},
             aliases,
         )
         ike_gateway = manager._normalize_entry_for_post(
             "IKEGateway",
-            {"name": "gw-a", "local_address": {"interface": "ethernet1/1", "ip": "203.0.113.10/29"}},
+            {"name": "gw-a", "local_address": {"interface": "ae1.1921", "ip": "203.0.113.10/29"}},
+            aliases,
+        )
+        loopback = manager._normalize_entry_for_post(
+            "LoopbackInterface",
+            {"name": "loopback.1", "ip": ["10.255.0.1/32"]},
             aliases,
         )
         ipsec_tunnel = manager._normalize_entry_for_post(
@@ -721,14 +767,20 @@ class ProcessorTests(unittest.TestCase):
                 "vrf": [
                     {
                         "name": "default",
-                        "interface": ["ethernet1/1", "ethernet1/4.2", "tunnel.1"],
+                        "interface": ["ethernet1/1", "ethernet1/4.2", "ae1.1921", "tunnel.1"],
                         "routing_table": {
                             "ip": {
                                 "static_route": [
                                     {"name": "default-route", "interface": "ethernet1/1"},
+                                    {"name": "wan-route", "interface": "ae1.1921"},
                                     {"name": "vpn-route", "interface": "tunnel.1"},
                                 ]
                             }
+                        },
+                        "bgp": {
+                            "peer_group": [
+                                {"peer": [{"name": "peer-a", "local_interface": "ae1.1921"}]}
+                            ]
                         },
                     }
                 ],
@@ -738,17 +790,64 @@ class ProcessorTests(unittest.TestCase):
 
         self.assertEqual(subinterface["name"], "$ethernet1-4.2")
         self.assertEqual(subinterface["parent_interface"], "$ethernet1-4")
-        self.assertEqual(zone["network"]["layer3"], ["$ethernet1-1", "$ethernet1-4.2", "$tunnel1"])
-        self.assertEqual(ike_gateway["local_address"]["interface"], "$ethernet1-1")
+        self.assertEqual(aggregate_member["aggregate_group"], "$ae1")
+        self.assertEqual(zone["network"]["layer3"], ["$ethernet1-1", "$ethernet1-4.2", "$ae1.1921", "$tunnel1"])
+        self.assertEqual(ike_gateway["local_address"]["interface"], "$ae1.1921")
+        self.assertEqual(loopback["ip"], [{"name": "10.255.0.1/32"}])
         self.assertEqual(ipsec_tunnel["tunnel_interface"], "$tunnel1")
         self.assertEqual(
             logical_router["vrf"][0]["interface"],
-            ["$ethernet1-1", "$ethernet1-4.2", "$tunnel1"],
+            ["$ethernet1-1", "$ethernet1-4.2", "$ae1.1921", "$tunnel1"],
         )
         self.assertEqual(
             [route["interface"] for route in logical_router["vrf"][0]["routing_table"]["ip"]["static_route"]],
-            ["$ethernet1-1", "$tunnel1"],
+            ["$ethernet1-1", "$ae1.1921", "$tunnel1"],
         )
+        self.assertEqual(logical_router["vrf"][0]["bgp"]["peer_group"][0]["peer"][0]["local_interface"], "$ae1.1921")
+
+    def test_logical_router_bgp_references_are_normalized_to_scm_shape(self):
+        manager = SCMObjectManager(FailingObjectFetchHandler(), "&snippet=Network-Stack", obj, [], obj.SecurityRule, obj.NatRule)
+        logical_router = manager._normalize_entry_for_post(
+            "LogicalRouter",
+            {
+                "name": "default",
+                "vrf": [{
+                    "name": "default",
+                    "bgp": {
+                        "redistribution_profile": "redist-profile",
+                        "peer_group": [{
+                            "name": "upstream",
+                            "type": "ebgp",
+                            "address_family": {
+                                "ipv4": {"unicast": {"address_family_profile": "ipv4-af"}},
+                            },
+                            "peer": [{
+                                "name": "peer-a",
+                                "address_family": {
+                                    "ipv4": {"unicast": {
+                                        "address_family_profile": "peer-af",
+                                        "filtering_profile": "bgp-filter",
+                                        "import_route_map": "ignored-by-scm-filter-profile",
+                                    }},
+                                },
+                            }],
+                        }],
+                    },
+                }],
+            },
+            {},
+        )
+
+        bgp = logical_router["vrf"][0]["bgp"]
+        self.assertEqual(
+            bgp["redistribution_profile"],
+            {"ipv4": {"unicast": "redist-profile"}, "ipv6": {}},
+        )
+        group = bgp["peer_group"][0]
+        self.assertEqual(group["type"], {"ebgp": {}})
+        self.assertEqual(group["address_family"], {"ipv4": "ipv4-af"})
+        self.assertEqual(group["filtering_profile"], {"ipv4": "bgp-filter"})
+        self.assertEqual(group["peer"][0]["address_family"], {"ipv4": "peer-af"})
 
     def test_loopback_interface_post_puts_scope_in_payload_not_url(self):
         session = FakeSession()
@@ -757,7 +856,7 @@ class ProcessorTests(unittest.TestCase):
 
         manager.configure.post_entries(
             "&snippet=Network-Stack",
-            [{"name": "loopback.1", "ip": ["10.255.0.1/32"]}],
+            [{"name": "$loopback1", "ip": [{"name": "10.255.0.1/32"}]}],
             obj.LoopbackInterface,
             extra_query_params="",
         )
@@ -769,11 +868,74 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(
             session.post_calls[0]["json"],
             {
-                "name": "loopback.1",
-                "ip": ["10.255.0.1/32"],
+                "name": "$loopback1",
+                "ip": [{"name": "10.255.0.1/32"}],
                 "snippet": "Network-Stack",
             },
         )
+
+    def test_address_aliases_override_name_with_ip_netmask_for_network_posts(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.Layer3Subinterface, obj.LoopbackInterface], obj.SecurityRule, obj.NatRule)
+
+        aliases = manager._build_reference_aliases(
+            {
+                "Layer3Subinterface": [{"name": "$ae1.1118", "parent_interface": "$ae1", "tag": 1118, "ip": ["LCO-Fedline-Private-NAT"]}],
+                "LoopbackInterface": [{"name": "$loopback1", "ip": ["Pub-VPN-NAT_174.34.230.252_32"]}],
+            },
+            {
+                "Address": [
+                    {"name": "LCO-Fedline-Private-NAT", "ip_netmask": "10.80.248.33/29"},
+                    {"name": "Pub-VPN-NAT_174.34.230.252_32", "ip_netmask": "174.34.230.252/32"},
+                ]
+            },
+        )
+
+        subinterface = manager._normalize_entry_for_post(
+            "Layer3Subinterface",
+            {"name": "$ae1.1118", "parent_interface": "$ae1", "tag": 1118, "ip": ["LCO-Fedline-Private-NAT"]},
+            aliases,
+        )
+        loopback = manager._normalize_entry_for_post(
+            "LoopbackInterface",
+            {"name": "$loopback1", "ip": ["Pub-VPN-NAT_174.34.230.252_32"]},
+            aliases,
+        )
+
+        self.assertEqual(subinterface["ip"], [{"name": "10.80.248.33/29"}])
+        self.assertEqual(loopback["ip"], [{"name": "174.34.230.252/32"}])
+
+    def test_live_process_objects_uses_current_data_address_aliases_for_network_posts(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(handler, "&snippet=Network-Stack", obj, [obj.Layer3Subinterface, obj.LoopbackInterface], obj.SecurityRule, obj.NatRule)
+
+        manager.get_current_objects = lambda *args, **kwargs: {
+            obj.Layer3Subinterface: [],
+            obj.LoopbackInterface: [],
+        }
+
+        parsed_data = {
+            "Layer3Subinterface": [
+                {"name": "$ae1.1118", "parent_interface": "$ae1", "tag": 1118, "ip": ["LCO-Fedline-Private-NAT"]}
+            ],
+            "LoopbackInterface": [
+                {"name": "$loopback1", "ip": ["Pub-VPN-NAT_174.34.230.252_32"]}
+            ],
+        }
+        current_data = {
+            "Address": [
+                {"name": "LCO-Fedline-Private-NAT", "ip_netmask": "10.80.248.33/29"},
+                {"name": "Pub-VPN-NAT_174.34.230.252_32", "ip_netmask": "174.34.230.252/32"},
+            ]
+        }
+
+        manager.process_objects(parsed_data, "&snippet=Network-Stack", "", current_data=current_data)
+
+        payloads = {call["json"]["name"]: call["json"] for call in session.post_calls}
+        self.assertEqual(payloads["$ae1.1118"]["ip"], [{"name": "10.80.248.33/29"}])
+        self.assertEqual(payloads["$loopback1"]["ip"], [{"name": "174.34.230.252/32"}])
 
     def test_logical_router_post_puts_scope_in_payload_not_url(self):
         session = FakeSession()
@@ -808,7 +970,7 @@ class ProcessorTests(unittest.TestCase):
 
         manager.configure.post_entries(
             "&snippet=Network-Stack",
-            [{"name": "default-export-default-pl", "prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}]}],
+            [{"name": "default-export-default-pl", "ipv4": {"prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}]}}],
             obj.RoutePrefixList,
             extra_query_params="",
         )
@@ -821,9 +983,46 @@ class ProcessorTests(unittest.TestCase):
             session.post_calls[0]["json"],
             {
                 "name": "default-export-default-pl",
-                "prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}],
+                "ipv4": {"prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}]},
                 "snippet": "Network-Stack",
             },
+        )
+
+    def test_route_prefix_and_access_lists_are_normalized_to_scm_wire_shape(self):
+        session = FakeSession()
+        handler = PanApiHandler(session)
+        manager = SCMObjectManager(
+            handler,
+            "&snippet=Network-Stack",
+            obj,
+            [obj.RoutePrefixList, obj.RouteAccessList],
+            obj.SecurityRule,
+            obj.NatRule,
+        )
+
+        manager.post_new_entries(
+            {
+                "RoutePrefixList": [{
+                    "name": "prefixes",
+                    "ipv4": {"prefix_list": [{"name": 1, "action": "deny", "prefix": "0.0.0.0/0"}]},
+                }],
+                "RouteAccessList": [{
+                    "name": "access",
+                    "access_list": [{"name": 1, "action": "permit", "source": "any"}],
+                }],
+            },
+            "&snippet=Network-Stack",
+            "",
+        )
+
+        payloads = {call["json"]["name"]: call["json"] for call in session.post_calls}
+        self.assertEqual(
+            payloads["prefixes"]["type"],
+            {"ipv4": {"ipv4_entry": [{"name": 1, "action": "deny", "prefix": {"entry": {"network": "0.0.0.0/0"}}}]}},
+        )
+        self.assertEqual(
+            payloads["access"]["type"],
+            {"ipv4": {"ipv4_entry": [{"name": 1, "action": "permit", "source_address": {"address": "any"}, "destination_address": {"address": "any"}}]}},
         )
 
     def test_bgp_route_map_post_puts_scope_in_payload_not_url(self):

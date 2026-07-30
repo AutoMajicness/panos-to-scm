@@ -32,7 +32,11 @@ class PanApiHandler:
                 response = self.session.get(url, params=params, timeout=20)
                 if response.status_code == 200:
                     payload = response.json()
-                    return payload.get("data", payload)
+                    if isinstance(payload, dict):
+                        return payload.get("data", payload)
+                    if isinstance(payload, list):
+                        return payload
+                    return payload
                 last_error = self._response_error(response)
                 self.logger.error(last_error)
             except Exception as exc:

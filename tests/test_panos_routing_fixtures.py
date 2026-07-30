@@ -289,7 +289,8 @@ class PanosRoutingFixtureTests(unittest.TestCase):
                     },
                     "interface": [
                         {
-                            "name": "ethernet1/4",
+                            "name": "$ethernet1-4",
+                            "default_value": "ethernet1/4",
                             "enable": True,
                             "priority": 5,
                             "instance_id": 2,
@@ -334,10 +335,6 @@ class PanosRoutingFixtureTests(unittest.TestCase):
                 },
                 {
                     "code": "unsupported-panos-routing-node",
-                    "path": "network.virtual-router.entry[unsupported-vr].protocol.bgp.routing-options.graceful-restart",
-                },
-                {
-                    "code": "unsupported-panos-routing-node",
                     "path": "network.virtual-router.entry[unsupported-vr].protocol.bgp.redist-rules.entry[rip-to-bgp]",
                 },
                 {
@@ -357,9 +354,9 @@ class PanosRoutingFixtureTests(unittest.TestCase):
 
         plan = build_plan(parsed, object_types=["LogicalRouter"])
 
-        self.assertEqual(plan.summary()["warnings"], 9)
+        self.assertEqual(plan.summary()["warnings"], 7)
         warning_codes = [warning.code for warning in plan.warnings]
-        self.assertEqual(warning_codes.count("unsupported-panos-routing-node"), 8)
+        self.assertEqual(warning_codes.count("unsupported-panos-routing-node"), 6)
         self.assertEqual(warning_codes.count("missing-network-reference"), 1)
 
     def test_template_routing_layout_emits_parser_warning_for_local_mode(self):

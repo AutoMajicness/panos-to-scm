@@ -1,6 +1,6 @@
-import xml.etree.ElementTree as ET
 import logging
 import re
+import xml.etree.ElementTree as ET
 
 class XMLParser:
     def __init__(self, file_path, config_type, device_group_name=None):
@@ -42,7 +42,10 @@ class XMLParser:
         if re.match(r'^tunnel\.\d+$', interface_name):
             suffix = interface_name.split('.', 1)[1]
             return f"$tunnel{suffix}"
-        if re.match(r'^(ethernet\d+/\d+(\.\d+)?|ae\d+)$', interface_name):
+        if re.match(r'^loopback\.\d+$', interface_name):
+            suffix = interface_name.split('.', 1)[1]
+            return f"$loopback{suffix}"
+        if re.match(r'^(ethernet\d+/\d+(\.\d+)?|ae\d+(\.\d+)?)$', interface_name):
             return f"${self._sanitize_name(interface_name)}"
         return interface_name
 
@@ -264,7 +267,7 @@ class XMLParser:
 
             bgp = router_entry.find('protocol/bgp')
             if bgp is not None:
-                warnings.extend(self._bgp_unsupported_warning_entries(router_name, bgp))
+                warnings.extend(self._bgp_unsupported_warning_entries(router_entry, router_name, bgp))
 
             for path, message in [
                 (
@@ -305,7 +308,7 @@ class XMLParser:
                         )
         return warnings
 
-    def _bgp_unsupported_warning_entries(self, router_name, bgp):
+    def _bgp_unsupported_warning_entries(self, router_entry, router_name, bgp):
         warnings = []
         for profile_entry in bgp.findall('dampening-profile/entry'):
             profile_name = profile_entry.get('name') or "unnamed-dampening-profile"
@@ -320,7 +323,10 @@ class XMLParser:
             )
 
         for path in ['conditional-advertisement', 'conditional-advertise']:
-            if bgp.find(path) is not None:
+            if bgp.find(path) is not None and not any(
+                self._convert_bgp_conditional_advertisement(router_entry, family)
+                for family in ('ipv4', 'ipv6')
+            ):
                 warnings.append(
                     self._migration_warning(
                         "LogicalRouter",
@@ -331,7 +337,7 @@ class XMLParser:
                     )
                 )
 
-        if bgp.find('routing-options/graceful-restart') is not None:
+        if bgp.find('routing-options/graceful-restart') is not None and not self._convert_bgp_graceful_restart(bgp):
             warnings.append(
                 self._migration_warning(
                     "LogicalRouter",
@@ -2448,6 +2454,16 @@ class XMLParser:
                 if payload:
                     subinterfaces.append(payload)
 
+        for parent_entry in self.root.findall('./devices/entry/network/interface/aggregate-ethernet/entry'):
+            parent_name = parent_entry.get('name')
+            if not parent_name:
+                continue
+
+            for subinterface_entry in parent_entry.findall('layer2/units/entry'):
+                payload = self._convert_layer2_subinterface(parent_name, subinterface_entry)
+                if payload:
+                    subinterfaces.append(payload)
+
         return subinterfaces
 
     def _convert_layer2_subinterface(self, parent_name, entry):
@@ -2474,6 +2490,16 @@ class XMLParser:
 
         subinterfaces = []
         for parent_entry in self.root.findall('./devices/entry/network/interface/ethernet/entry'):
+            parent_name = parent_entry.get('name')
+            if not parent_name:
+                continue
+
+            for subinterface_entry in parent_entry.findall('layer3/units/entry'):
+                payload = self._convert_layer3_subinterface(parent_name, subinterface_entry)
+                if payload:
+                    subinterfaces.append(payload)
+
+        for parent_entry in self.root.findall('./devices/entry/network/interface/aggregate-ethernet/entry'):
             parent_name = parent_entry.get('name')
             if not parent_name:
                 continue
@@ -2570,7 +2596,10 @@ class XMLParser:
         if not interface_name:
             return None
 
-        payload = {'name': interface_name}
+        payload = {
+            'name': self._scm_interface_object_name(interface_name),
+            'default_value': interface_name,
+        }
         field_map = {
             'comment': 'comment',
             'interface-management-profile': 'interface_management_profile',
@@ -3588,6 +3617,51 @@ class XMLParser:
         if outbound_filters:
             payload['outbound_network_filters'] = outbound_filters
 
+        conditional_advertisement = self._convert_bgp_conditional_advertisement(router_entry, family)
+        if conditional_advertisement:
+            payload['conditional_advertisement'] = conditional_advertisement
+
+        return payload or None
+
+    def _convert_bgp_conditional_advertisement(self, router_entry, family):
+        bgp = router_entry.find('protocol/bgp')
+        if bgp is None:
+            return None
+
+        source = None
+        for path in ['conditional-advertisement', 'conditional-advertise']:
+            candidate = bgp.find(path)
+            if candidate is not None:
+                source = candidate
+                break
+        if source is None:
+            return None
+
+        family_source = source.find(family)
+        if family_source is not None:
+            source = family_source
+
+        payload = {}
+        for condition_name, fields in {
+            'exist': ('advertise-map', 'exist-map'),
+            'non_exist': ('advertise-map', 'non-exist-map'),
+        }.items():
+            condition = source.find(condition_name.replace('_', '-'))
+            if condition is None:
+                continue
+            condition_payload = {}
+            for panos_name, scm_name in fields:
+                value = self._child_text(condition, panos_name)
+                if not value:
+                    value = self._first_text_or_member(condition.find(panos_name))
+                if value:
+                    condition_payload[scm_name] = value
+            if condition_payload:
+                payload[condition_name] = condition_payload
+
+        unsuppress_map = self._child_text(source, 'unsuppress-map')
+        if unsuppress_map:
+            payload['unsuppress_map'] = unsuppress_map
         return payload or None
 
     def _convert_bgp_filtering_network_filters(self, router_entry, direction, family):
@@ -3656,13 +3730,16 @@ class XMLParser:
                     seen_names.add(list_name)
 
                     action = self._bgp_policy_rule_action(rule_entry)
+                    family = 'ipv6' if any(':' in prefix.get('prefix', '') for prefix in prefixes) else 'ipv4'
                     prefix_lists.append(
                         {
                             'name': list_name,
-                            'prefix_list': [
-                                self._route_prefix_list_rule(index, prefix, action)
-                                for index, prefix in enumerate(prefixes, start=1)
-                            ],
+                            family: {
+                                'prefix_list': [
+                                    self._route_prefix_list_rule(index, prefix, action)
+                                    for index, prefix in enumerate(prefixes, start=1)
+                                ],
+                            },
                         }
                     )
 
@@ -3902,6 +3979,10 @@ class XMLParser:
         if redist_profile_name:
             payload['redistribution_profile'] = redist_profile_name
 
+        graceful_restart = self._convert_bgp_graceful_restart(bgp)
+        if graceful_restart:
+            payload['graceful_restart'] = graceful_restart
+
         peer_groups = []
         for group_entry in bgp.findall('peer-group/entry'):
             group_payload = self._convert_bgp_peer_group(group_entry, router_entry)
@@ -3992,21 +4073,21 @@ class XMLParser:
         export_ipv4_route_maps = self._bgp_policy_route_map_names(router_entry, 'export', family='ipv4')
         import_ipv6_route_maps = self._bgp_policy_route_map_names(router_entry, 'import', family='ipv6')
         export_ipv6_route_maps = self._bgp_policy_route_map_names(router_entry, 'export', family='ipv6')
-        if import_ipv4_route_maps or export_ipv4_route_maps or import_ipv6_route_maps or export_ipv6_route_maps:
-            if import_ipv4_route_maps or export_ipv4_route_maps:
-                address_family.setdefault('ipv4', {'unicast': {}})
-                address_family['ipv4']['unicast']['filtering_profile'] = self._bgp_filtering_profile_name(router_entry, 'ipv4')
-                if import_ipv4_route_maps:
-                    address_family['ipv4']['unicast']['import_route_map'] = import_ipv4_route_maps[0]
-                if export_ipv4_route_maps:
-                    address_family['ipv4']['unicast']['export_route_map'] = export_ipv4_route_maps[0]
-            if import_ipv6_route_maps or export_ipv6_route_maps:
-                address_family.setdefault('ipv6', {'unicast': {}})
-                address_family['ipv6']['unicast']['filtering_profile'] = self._bgp_filtering_profile_name(router_entry, 'ipv6')
-                if import_ipv6_route_maps:
-                    address_family['ipv6']['unicast']['import_route_map'] = import_ipv6_route_maps[0]
-                if export_ipv6_route_maps:
-                    address_family['ipv6']['unicast']['export_route_map'] = export_ipv6_route_maps[0]
+        if import_ipv4_route_maps or export_ipv4_route_maps:
+            address_family.setdefault('ipv4', {'unicast': {}})
+            address_family['ipv4']['unicast']['filtering_profile'] = self._bgp_filtering_profile_name(router_entry, 'ipv4')
+            if import_ipv4_route_maps:
+                address_family['ipv4']['unicast']['import_route_map'] = import_ipv4_route_maps[0]
+            if export_ipv4_route_maps:
+                address_family['ipv4']['unicast']['export_route_map'] = export_ipv4_route_maps[0]
+        if import_ipv6_route_maps or export_ipv6_route_maps:
+            address_family.setdefault('ipv6', {'unicast': {}})
+            address_family['ipv6']['unicast']['filtering_profile'] = self._bgp_filtering_profile_name(router_entry, 'ipv6')
+            if import_ipv6_route_maps:
+                address_family['ipv6']['unicast']['import_route_map'] = import_ipv6_route_maps[0]
+            if export_ipv6_route_maps:
+                address_family['ipv6']['unicast']['export_route_map'] = export_ipv6_route_maps[0]
+
         if address_family:
             payload['address_family'] = address_family
 
@@ -4030,6 +4111,25 @@ class XMLParser:
                 }
             }
         return address_family
+
+    def _convert_bgp_graceful_restart(self, bgp):
+        restart = bgp.find('routing-options/graceful-restart')
+        if restart is None:
+            return None
+
+        payload = {}
+        enable = self._child_text(restart, 'enable')
+        if enable:
+            payload['enable'] = enable.lower() == 'yes'
+        for panos_name, scm_name in [
+            ('local-restart-time', 'local_restart_time'),
+            ('max-peer-restart-time', 'max_peer_restart_time'),
+            ('stale-route-time', 'stale_route_time'),
+        ]:
+            value = self._child_text(restart, panos_name)
+            if value and value.isdigit():
+                payload[scm_name] = int(value)
+        return payload or None
 
     def _convert_bgp_timers(self, timers):
         if timers is None:
@@ -4327,7 +4427,10 @@ class XMLParser:
         if not interface_name:
             return None
 
-        payload = {'name': interface_name}
+        payload = {
+            'name': self._scm_interface_object_name(interface_name),
+            'default_value': interface_name,
+        }
         for panos_name, scm_name in [
             ('enable', 'enable'),
             ('passive', 'passive'),
@@ -4747,6 +4850,7 @@ class XMLParser:
                     for member in layer_element.findall('member')
                     if member.text and member.text.strip()
                 ]
+                interfaces = [interface_name for interface_name in interfaces if interface_name != 'tunnel']
                 if interfaces:
                     network_data[scm_layer] = interfaces
 
