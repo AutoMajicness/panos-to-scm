@@ -3,6 +3,7 @@ import sys
 import yaml
 import logging
 import scm.obj as obj
+from api.config import panapi_config_path
 
 class AppConfig:
     def __init__(self):
@@ -39,7 +40,7 @@ class AppConfig:
 
 class ConfigurationManager:
     def __init__(self):
-        self.config_file_path = os.path.expanduser('~/.panapi/config.yml')
+        self.config_file_path = str(panapi_config_path())
         self.app_config = AppConfig()
         self.ensure_config_exists()
         self.check_for_default_settings()

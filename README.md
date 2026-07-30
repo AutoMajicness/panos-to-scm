@@ -29,7 +29,7 @@ Python 3.10 or newer is required.
 ### Step 3: SCM and PANOS Credentials
 - **Common Services IAM account**
   - **Generate Service Account** Directions -> https://docs.paloaltonetworks.com/common-services/identity-and-access-access-management/manage-identity-and-access/add-service-accounts
-- **SCM Credentials**: The credentials needed to request an access token can be defined in a configuration located at "$HOME/.panapi/config.yml"
+- **SCM Credentials**: Live SCM commands automatically load the credentials needed to request an access token from `$HOME/.panapi/config.yml`; no credential flags are required. Set `PANAPI_CONFIG` only when using a different file.
   - **How to get there**:
   - **Window**s: `C:\users\<username>\.panapi\config.yml`
   - **MacOS**: `/Users/<username>/.panapi/config.yml`

@@ -2,8 +2,7 @@ import requests
 import logging
 import time
 import yaml
-import os
-from requests_oauthlib import OAuth2Session
+from api.config import load_panapi_config, panapi_config_path
 
 class PanApiSession:
     """
@@ -22,19 +21,17 @@ class PanApiSession:
         return session
 
     def _load_config(self):
-        config_file_path = os.path.expanduser('~/.panapi/config.yml')
         try:
-            with open(config_file_path, 'r') as config_file:
-                config = yaml.safe_load(config_file)
-                return {
-                    'api_url': 'https://api.strata.paloaltonetworks.com',
-                    'client_id': config.get('client_id'),
-                    'client_secret': config.get('client_secret'),
-                    'tsg_id': config.get('tsg_id'),
-                    'auth_url': 'https://auth.apps.paloaltonetworks.com/oauth2/access_token'
-                }
+            config = load_panapi_config()
+            return {
+                'api_url': config.get('api_url', 'https://api.strata.paloaltonetworks.com'),
+                'client_id': config.get('client_id'),
+                'client_secret': config.get('client_secret'),
+                'tsg_id': config.get('tsg_id'),
+                'auth_url': config.get('auth_url', 'https://auth.apps.paloaltonetworks.com/oauth2/access_token'),
+            }
         except Exception as e:
-            logging.error(f"Error loading config: {e}")
+            logging.error(f"Error loading PAN-API credentials from {panapi_config_path()}: {e}")
             return {
                 'api_url': 'https://api.strata.paloaltonetworks.com',
                 'auth_url': 'https://auth.apps.paloaltonetworks.com/oauth2/access_token'
