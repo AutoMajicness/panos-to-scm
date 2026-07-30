@@ -2,12 +2,106 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 
+
+BRACE_COLLECTION_PARENTS = {
+    "devices", "vsys", "zone", "rules", "address", "address-group", "service",
+    "service-group", "application", "application-group", "virtual-router",
+    "aggregate-ethernet", "ethernet", "loopback", "tunnel", "vlan", "peer-group",
+    "peer", "certificate", "external-list", "custom-url-category", "schedule",
+    "device-object", "authentication-object", "interface-management-profile",
+    "zone-protection-profile", "profile-group", "server-profile",
+}
+
+BRACE_TAG_BLOCKS = {
+    "config", "shared", "panorama", "network", "deviceconfig", "system", "setting",
+    "management", "service", "high-availability", "import", "interface", "layer3",
+    "layer2", "virtual-wire", "ha", "rulebase", "pre-rulebase", "post-rulebase",
+    "security", "nat", "default-security-rules", "application-override", "decryption",
+    "tunnel-inspect", "virtual-router", "protocol", "bgp", "ospf", "ospfv3", "rip",
+    "multicast", "routing-options", "redistribution-profile", "bfd", "path-monitor",
+}
+
+
+def _strip_brace_quotes(value):
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        return value[1:-1]
+    return value
+
+
+def _looks_like_brace_config(file_path):
+    with open(file_path, "r", encoding="utf-8", errors="replace") as file:
+        sample = file.read(12000).lstrip()
+    first_line = next((line.strip() for line in sample.splitlines() if line.strip()), "")
+    return first_line.startswith("config {") or first_line == "config" or "config {" in sample[:1200]
+
+
+def _brace_child_is_entry(parent, token):
+    return parent.tag in BRACE_COLLECTION_PARENTS and token not in BRACE_TAG_BLOCKS
+
+
+def _brace_block_for_token(parent, token):
+    if _brace_child_is_entry(parent, token):
+        return ET.SubElement(parent, "entry", {"name": token})
+    return ET.SubElement(parent, token)
+
+
+def _parse_brace_config(file_path):
+    with open(file_path, "r", encoding="utf-8", errors="replace") as file:
+        lines = file.read().splitlines()
+    root = ET.Element("config")
+
+    def parse_children(parent, index):
+        while index < len(lines):
+            raw = lines[index].strip()
+            index += 1
+            if not raw or raw.startswith("#") or raw.startswith("//"):
+                continue
+            if raw in {"}", "};"}:
+                return index
+            if raw == "config {" and parent.tag == "config":
+                index = parse_children(parent, index)
+                continue
+            if raw.endswith("{"):
+                header = raw[:-1].strip()
+                if header:
+                    child = _brace_block_for_token(parent, _strip_brace_quotes(header))
+                    index = parse_children(child, index)
+                continue
+            if not raw.endswith(";"):
+                continue
+            statement = raw[:-1].strip()
+            if not statement:
+                continue
+            match = re.match(r"^(?P<tag>[A-Za-z0-9_.\-/]+)\s+\[(?P<items>.*)\]$", statement)
+            if match:
+                container = ET.SubElement(parent, match.group("tag"))
+                for item in re.split(r"\s+", match.group("items").strip()):
+                    if item:
+                        member = ET.SubElement(container, "member")
+                        member.text = _strip_brace_quotes(item)
+                continue
+            if statement.startswith('"') and statement.endswith('"'):
+                member = ET.SubElement(parent, "member")
+                member.text = _strip_brace_quotes(statement)
+                continue
+            parts = statement.split(None, 1)
+            if len(parts) == 1:
+                ET.SubElement(parent, parts[0])
+            else:
+                child = ET.SubElement(parent, parts[0])
+                child.text = _strip_brace_quotes(parts[1])
+        return index
+
+    parse_children(root, 0)
+    return ET.ElementTree(root)
+
 class XMLParser:
     def __init__(self, file_path, config_type, device_group_name=None):
         self.file_path = file_path
         self.config_type = config_type
         self.device_group_name = device_group_name
-        self.tree = ET.parse(self.file_path)
+        self.tree = _parse_brace_config(self.file_path) if _looks_like_brace_config(self.file_path) else ET.parse(self.file_path)
         self.root = self.tree.getroot()
         self.logger = logging.getLogger(__name__)
         self.logger.debug(f"Initialized XMLParser with file_path: {self.file_path}, config_type: {self.config_type}, device_group_name: {self.device_group_name}")
@@ -50,7 +144,7 @@ class XMLParser:
         return interface_name
 
     def parse_config_and_set_scope(self, xml_file_path):
-        tree = ET.parse(xml_file_path)
+        tree = _parse_brace_config(xml_file_path) if _looks_like_brace_config(xml_file_path) else ET.parse(xml_file_path)
         root = tree.getroot()
 
         device_group_xpath = root.find('.//devices/entry/device-group')

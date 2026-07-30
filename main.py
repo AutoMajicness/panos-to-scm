@@ -229,6 +229,10 @@ def prepare_import_target(
 
 
 def infer_panos_config_type(file_path):
+    with open(file_path, "r", encoding="utf-8", errors="replace") as file:
+        sample = file.read(12000).lstrip()
+    if sample.startswith("config {") or "config {" in sample[:1200]:
+        return "local"
     root = ET.parse(file_path).getroot()
     if root.find('.//devices/entry/device-group') is not None:
         raise CliError(

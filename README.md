@@ -326,11 +326,11 @@ For full acceptance on a local firewall import, treat the live report as the pro
 - **PBF Rules**
 - **Security Zones**
 
-Network features currently support local firewall XML only. Panorama templates and template stacks are not parsed yet.
+Network features currently support local firewall XML and PAN-OS brace-format exports. Panorama templates and template stacks are not parsed yet.
 
 DHCP client mode is supported for Layer 3 ethernet interfaces and Layer 3 ethernet subinterfaces. Static IP mode remains supported for ethernet, aggregate, subinterface, VLAN, tunnel, and loopback interfaces.
 
-PAN-OS local firewall XML stores routes under `network/virtual-router`; this tool maps those source entries into SCM Logical Routers with `routing_stack` set to `advanced` for ARE-enabled firewalls. DHCP interface migration covers common local firewall DHCP server and relay interface settings. Logical router migration includes IPv4/IPv6 static routes, route-table options, passive static route options, BFD profile references, static route path-monitor data, BGP peer groups/peers with auth profile references, address-family profile references, filtering profile references, timers, multihop, and connection options, OSPF/OSPFv3 areas/interfaces with auth profile bindings, area ranges, virtual links, interface timing, and export rules, and BGP export route-map references under the Logical Router RIB filter.
+PAN-OS local firewall XML stores routes under `network/virtual-router`; this tool maps those source entries into SCM Logical Routers with `routing_stack` set to `advanced` for ARE-enabled firewalls. The parser also accepts PAN-OS brace-format exports that are sometimes saved with an `.xml` extension, such as `config { ... }` files. DHCP interface migration covers common local firewall DHCP server and relay interface settings. Logical router migration includes IPv4/IPv6 static routes, route-table options, passive static route options, BFD profile references, static route path-monitor data, BGP peer groups/peers with auth profile references, address-family profile references, filtering profile references, timers, multihop, and connection options, OSPF/OSPFv3 areas/interfaces with auth profile bindings, area ranges, virtual links, interface timing, and export rules, and BGP export route-map references under the Logical Router RIB filter.
 
 Network object posting is dependency ordered even when `-o` is supplied out of order. The manager posts interfaces before DHCP/zones, route lists before route maps and filtering profiles, VPN crypto profiles before gateways/tunnels, and Logical Routers after their generated routing/VPN dependencies.
 

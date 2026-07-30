@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from migration import build_plan
 from parse.parse_panos import XMLParser
@@ -9,6 +10,28 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures" / "panos"
 
 
 class PanosRoutingFixtureTests(unittest.TestCase):
+    def test_brace_config_is_parsed_as_local_pan_os_config(self):
+        config = """config {
+  devices {
+    localhost.localdomain {
+      network {
+        virtual-router {
+          edge {
+            interface [ ethernet1/1 ];
+          }
+        }
+      }
+    }
+  }
+}
+"""
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "running_config.xml"
+            path.write_text(config, encoding="utf-8")
+            parsed = XMLParser(str(path), "local").parse_specific_types(["LogicalRouter"])
+
+        self.assertEqual(parsed["LogicalRouter"][0]["name"], "edge")
+
     def test_real_world_edge_stack_fixture_parses_network_dependencies(self):
         object_types = [
             "InterfaceManagementProfile",
