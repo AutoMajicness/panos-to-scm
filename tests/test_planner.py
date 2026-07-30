@@ -136,14 +136,17 @@ class BuildPlanTests(unittest.TestCase):
             {
                 "generated-bgp-filtering-profile": {
                     "count": 1,
+                    "classification": "schema_sensitive",
                     "object_types": {"BgpFilteringProfile": 1},
                 },
                 "logical-router-static-route-option": {
                     "count": 1,
+                    "classification": "schema_sensitive",
                     "object_types": {"LogicalRouter": 1},
                 },
                 "missing-network-reference": {
                     "count": 1,
+                    "classification": "missing_dependency",
                     "object_types": {"BgpFilteringProfile": 1},
                 },
             },
@@ -646,6 +649,109 @@ class BuildPlanTests(unittest.TestCase):
             {warning.code for warning in plan.warnings},
         )
 
+    def test_build_plan_skips_interface_alias_only_network_differences(self):
+        parsed_data = {
+            "Zones": [
+                {
+                    "name": "Trust",
+                    "network": {"layer3": ["ethernet1/4.2", "tunnel.1"]},
+                }
+            ],
+            "Layer3Subinterface": [
+                {
+                    "name": "$ethernet1-4.2",
+                    "default_value": "ethernet1/4.2",
+                    "parent_interface": "ethernet1/4",
+                    "tag": 2,
+                }
+            ],
+            "LogicalRouter": [
+                {
+                    "name": "default",
+                    "vrf": [
+                        {
+                            "name": "default",
+                            "interface": ["ethernet1/4.2", "tunnel.1"],
+                            "routing_table": {
+                                "ip": {
+                                    "static_route": [
+                                        {
+                                            "name": "to-vpn",
+                                            "destination": "192.0.2.0/24",
+                                            "interface": "tunnel.1",
+                                            "nexthop": {"ip_address": "169.254.2.1"},
+                                        }
+                                    ]
+                                }
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        current_data = {
+            "Zones": [{"name": "Trust", "network": {"layer3": ["$ethernet1-4.2", "$tunnel1"]}}],
+            "Layer3Subinterface": [{"name": "$ethernet1-4.2", "parent_interface": "$ethernet1-4", "tag": 2}],
+            "LogicalRouter": [
+                {
+                    "name": "default",
+                    "vrf": [
+                        {
+                            "name": "default",
+                            "interface": ["$ethernet1-4.2", "$tunnel1"],
+                            "routing_table": {
+                                "ip": {
+                                    "static_route": [
+                                        {
+                                            "name": "to-vpn",
+                                            "destination": "192.0.2.0/24",
+                                            "interface": "$tunnel1",
+                                            "nexthop": {"ip_address": "169.254.2.1"},
+                                        }
+                                    ]
+                                }
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        plan = build_plan(parsed_data, current_data=current_data)
+
+        self.assertEqual(plan.summary()["conflicts"], 0)
+        self.assertEqual(plan.summary()["skips"], 3)
+
+    def test_build_plan_skips_ike_gateway_when_only_secret_ciphertext_and_defaults_differ(self):
+        parsed_data = {
+            "IKEGateway": [
+                {
+                    "name": "vpn-a",
+                    "local_address": {"interface": "ethernet1/1", "ip": "203.0.113.10/29"},
+                    "peer_address": {"ip": "198.51.100.1"},
+                    "authentication": {"pre_shared_key": {"key": "plaintext"}},
+                    "protocol": {"version": "ikev2"},
+                }
+            ]
+        }
+        current_data = {
+            "IKEGateway": [
+                {
+                    "name": "vpn-a",
+                    "local_address": {"interface": "$ethernet1-1", "ip": "203.0.113.10/29"},
+                    "peer_address": {"ip": "198.51.100.1"},
+                    "authentication": {"pre_shared_key": {"key": "encrypted-ciphertext"}},
+                    "protocol": {"version": "ikev2"},
+                    "protocol_common": {"fragmentation": {"enable": False}, "nat_traversal": {"enable": True}},
+                }
+            ]
+        }
+
+        plan = build_plan(parsed_data, current_data=current_data)
+
+        self.assertEqual(plan.summary()["conflicts"], 0)
+        self.assertEqual(plan.summary()["skips"], 1)
+
     def test_build_plan_treats_external_dynamic_lists_as_valid_policy_address_references(self):
         parsed_data = {
             "security_pre_rules": [
@@ -760,10 +866,12 @@ class BuildPlanTests(unittest.TestCase):
             {
                 "logical-router-static-route-option": {
                     "count": 1,
+                    "classification": "schema_sensitive",
                     "object_types": {"LogicalRouter": 1},
                 },
                 "unsupported-panos-routing-node": {
                     "count": 1,
+                    "classification": "manual_rebuild_required",
                     "object_types": {"LogicalRouter": 1},
                 },
             },
@@ -771,6 +879,10 @@ class BuildPlanTests(unittest.TestCase):
         self.assertEqual(
             [warning.code for warning in report.warnings],
             ["unsupported-panos-routing-node", "logical-router-static-route-option"],
+        )
+        self.assertEqual(
+            [warning.to_dict()["classification"] for warning in report.warnings],
+            ["manual_rebuild_required", "schema_sensitive"],
         )
 
 

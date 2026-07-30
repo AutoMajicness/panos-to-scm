@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping
+import re
 
-from scm.process import NETWORK_OBJECT_DEPENDENCY_ORDER
+from scm.process import NETWORK_OBJECT_DEPENDENCY_ORDER, normalize_scm_interface_name
 
 
 ParsedData = Mapping[str, list[dict[str, Any]]]
@@ -53,11 +54,13 @@ class PlanWarning:
     path: str = ""
     code: str = "schema-sensitive"
     severity: str = "warning"
+    classification: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "code": self.code,
             "severity": self.severity,
+            "classification": self.classification or _warning_classification(self.code, self.path, self.message),
             "object_type": self.object_type,
             "name": self.name,
             "path": self.path,
@@ -314,19 +317,41 @@ def build_network_report(
     return NetworkReport(objects=network_objects, warnings=warnings)
 
 
-def _normalize(value: Any) -> Any:
+_INTERFACE_REFERENCE_PATH_PATTERNS = (
+    re.compile(r"(?:^|\.)(?:parent_interface|tunnel_interface)$"),
+    re.compile(r"(?:^|\.)(?:local_address\.interface)$"),
+    re.compile(r"(?:^|\.)(?:vrf\[\d+\]\.interface\[\d+\])$"),
+    re.compile(r"(?:^|\.)(?:network\.(?:layer2|layer3|tap|virtual_wire)\[\d+\])$"),
+    re.compile(r"(?:^|\.)(?:static_route\[\d+\]\.interface)$"),
+    re.compile(r"(?:^|\.)(?:nexthop\.tunnel)$"),
+)
+
+
+def _normalize(value: Any, path: str = "") -> Any:
     """Normalize API payloads enough for deterministic dry-run comparison."""
 
     if isinstance(value, dict):
-        ignored_keys = {"id", "folder", "snippet", "device"}
+        ignored_keys = {"id", "folder", "snippet", "device", "default_value", "protocol_common"}
         return {
-            key: _normalize(item)
+            key: _normalize(item, f"{path}.{key}" if path else key)
             for key, item in sorted(value.items())
             if key not in ignored_keys and item not in (None, [], {})
         }
     if isinstance(value, list):
-        return sorted((_normalize(item) for item in value), key=repr)
+        return sorted(
+            (_normalize(item, f"{path}[{index}]") for index, item in enumerate(value)),
+            key=repr,
+        )
+    if isinstance(value, str):
+        if path.endswith("authentication.pre_shared_key.key"):
+            return "__encrypted_pre_shared_key__"
+        if _is_interface_reference_path(path):
+            return normalize_scm_interface_name(value)
     return value
+
+
+def _is_interface_reference_path(path: str) -> bool:
+    return any(pattern.search(path) for pattern in _INTERFACE_REFERENCE_PATH_PATTERNS)
 
 
 def _serialize_changes(changes: list[Change]) -> list[dict[str, Any]]:
@@ -346,10 +371,16 @@ def _serialize_warnings(warnings: list[PlanWarning]) -> list[dict[str, Any]]:
 def _warning_summary(warnings: list[PlanWarning]) -> dict[str, dict[str, Any]]:
     summary: dict[str, dict[str, Any]] = {}
     for warning in warnings:
+        classification = warning.classification or _warning_classification(
+            warning.code,
+            warning.path,
+            warning.message,
+        )
         code_summary = summary.setdefault(
             warning.code,
             {
                 "count": 0,
+                "classification": classification,
                 "object_types": {},
             },
         )
@@ -360,6 +391,7 @@ def _warning_summary(warnings: list[PlanWarning]) -> dict[str, dict[str, Any]]:
     return {
         code: {
             "count": data["count"],
+            "classification": data["classification"],
             "object_types": dict(sorted(data["object_types"].items())),
         }
         for code, data in sorted(summary.items())
@@ -369,10 +401,16 @@ def _warning_summary(warnings: list[PlanWarning]) -> dict[str, dict[str, Any]]:
 def _remediation_report(warnings: list[PlanWarning]) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     for warning in sorted(warnings, key=lambda item: (item.code, item.object_type, item.name, item.path)):
+        classification = warning.classification or _warning_classification(
+            warning.code,
+            warning.path,
+            warning.message,
+        )
         code_group = grouped.setdefault(
             warning.code,
             {
                 "code": warning.code,
+                "classification": classification,
                 "count": 0,
                 "action": _remediation_action(warning.code),
                 "object_types": {},
@@ -395,6 +433,7 @@ def _remediation_report(warnings: list[PlanWarning]) -> list[dict[str, Any]]:
     return [
         {
             "code": code,
+            "classification": data["classification"],
             "count": data["count"],
             "action": data["action"],
             "object_types": dict(sorted(data["object_types"].items())),
@@ -436,6 +475,40 @@ def _remediation_action(code: str) -> str:
     return actions.get(code, "Review the warning examples and validate the generated payload before posting.")
 
 
+def _warning_classification(code: str, path: str, message: str) -> str:
+    if code in {"missing-network-reference", "missing-policy-reference"}:
+        return "missing_dependency"
+    if code in {
+        "logical-router-static-route-option",
+        "logical-router-bgp-reference",
+        "generated-bgp-filtering-profile",
+        "bgp-address-family-profile",
+    }:
+        return "schema_sensitive"
+    if code == "unsupported-panos-config-layout":
+        return "input_mismatch"
+    if code != "unsupported-panos-routing-node":
+        return "warning"
+
+    lowered_path = path.lower()
+    lowered_message = message.lower()
+    if "qualified-next-hop" in lowered_path or "not implemented in this tool yet" in lowered_message:
+        return "tool_not_implemented"
+    if "redist-rules" in lowered_path or "not mapped to the current scm redistribution profile conversion" in lowered_message:
+        return "tool_not_implemented"
+    if "ecmp" in lowered_path:
+        return "manual_rebuild_required"
+    if "graceful-restart" in lowered_path:
+        return "manual_rebuild_required"
+    if "conditional-advert" in lowered_path:
+        return "manual_rebuild_required"
+    if "dampening-profile" in lowered_path:
+        return "manual_rebuild_required"
+    if ".protocol.pim" in lowered_path or ".protocol.multicast" in lowered_path:
+        return "no_scm_equivalent"
+    return "manual_rebuild_required"
+
+
 def _posting_batches(changes: list[Change]) -> list[dict[str, Any]]:
     names_by_type: dict[str, list[str]] = {}
     for change in changes:
@@ -475,6 +548,7 @@ def _parser_warnings(entries: Any) -> list[PlanWarning]:
                 path=entry.get("path", ""),
                 code=entry.get("code", "parser-warning"),
                 severity=entry.get("severity", "warning"),
+                classification=entry.get("classification", ""),
                 message=entry.get("message", ""),
             )
         )
