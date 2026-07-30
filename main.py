@@ -178,6 +178,56 @@ def resolve_category_scopes(
     return scopes
 
 
+def scope_resource_name(scope, resource_type):
+    """Return the named folder/snippet from a typed SCM scope."""
+    prefix = f"{resource_type}:"
+    if isinstance(scope, str) and scope.startswith(prefix):
+        value = scope[len(prefix):].strip()
+        return value or None
+    return None
+
+
+def prepare_import_target(
+    api_session,
+    scopes,
+    target_folder,
+    target_snippet,
+    parent_folder,
+    associate_snippet,
+):
+    """Create missing local-firewall import resources and return the setup result."""
+    folder_name = target_folder or scope_resource_name(scopes.get("object"), "folder")
+    policy_folder = scope_resource_name(scopes.get("policy"), "folder")
+    if not folder_name and policy_folder:
+        folder_name = policy_folder
+    snippet_name = target_snippet or scope_resource_name(scopes.get("network"), "snippet")
+
+    # A caller may intentionally use different scopes for different categories.
+    # Only auto-provision when the import has a complete folder/snippet target.
+    if not folder_name or not snippet_name:
+        return None
+
+    from scm.setup import SetupTargetRequest, ensure_setup_target
+
+    result = ensure_setup_target(
+        api_session,
+        SetupTargetRequest(
+            folder_name=folder_name,
+            snippet_name=snippet_name,
+            parent_folder=parent_folder,
+            associate_snippet=associate_snippet,
+            create=True,
+        ),
+    )
+    if not result["summary"]["ready"]:
+        raise CliError(
+            "SCM import target is not ready: "
+            + ", ".join(result["summary"].get("missing", []))
+        )
+    logger.info("SCM import target verified: %s", json.dumps(result["summary"], sort_keys=True))
+    return result
+
+
 def infer_panos_config_type(file_path):
     root = ET.parse(file_path).getroot()
     if root.find('.//devices/entry/device-group') is not None:
@@ -1090,9 +1140,9 @@ def main(
 
         scopes = resolve_category_scopes(
             scope,
-            object_scope,
-            policy_scope,
-            network_scope,
+            object_scope or (f"folder:{target_folder}" if target_folder else ""),
+            policy_scope or (f"folder:{target_folder}" if target_folder else ""),
+            network_scope or (f"snippet:{target_snippet}" if target_snippet else ""),
             interactive,
             needs_object_scope,
             needs_policy_scope,
@@ -1189,6 +1239,14 @@ def main(
         from scm import PanApiHandler
 
         api_session = PanApiHandler(initialize_api_session())
+        prepare_import_target(
+            api_session,
+            scopes,
+            target_folder,
+            target_snippet,
+            parent_folder,
+            associate_snippet,
+        )
         managers = []
 
         if run_all:

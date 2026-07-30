@@ -84,7 +84,7 @@ The legacy `--scope folder:All` option still works as a fallback for all categor
 
 Object selection can be combined with policy flags. For example, `-o Address,Service --security-rules --nat-rules` parses and plans the selected object types plus the selected local firewall rulebases.
 
-For standalone firewall imports, create or verify the SCM migration target before snapshot/posting. This is guarded: without `--create-scm-target`, the command only checks for the folder/snippet and exits nonzero if they do not exist.
+For standalone firewall imports, the live import path automatically checks the SCM migration target and creates the folder/snippet when either is missing. Supplying `--target-folder` and `--target-snippet` also supplies the corresponding object, policy, and network scopes when those scopes are omitted.
 
 ```bash
 # Read-only check.
@@ -102,7 +102,7 @@ python3 main.py \
   --parent-folder ngfw-shared
 ```
 
-The command prints the follow-on scopes to use for migration: `folder:<target>` for objects/policies and `snippet:<target-network>` for network stack objects. SCM displays the NGFW root as All Firewalls, but the setup API parent value is `ngfw-shared`.
+The command prints the follow-on scopes to use for migration: `folder:<target>` for objects/policies and `snippet:<target-network>` for network stack objects. SCM displays the NGFW root as All Firewalls, but the setup API parent value is `ngfw-shared`. The normal live import performs the same check/create operation immediately before posting; `--setup-scm-target` remains available when you want to provision the target without importing anything.
 
 For CI-style local validation that does not require SCM authentication or scope prompts:
 
@@ -168,8 +168,8 @@ Use `--limit 1` for a quick parser smoke or repeat `--config-file path/to/config
 - Set network destination scope: `--network-scope snippet:Network-Stack`
 - Build an offline plan without SCM authentication: `--dry-run`
 - Run local parser/planner validation without SCM authentication or scope prompts: `--validate-only`
-- Check/create target folder and network snippet: `--setup-scm-target --target-folder FW1 --target-snippet FW1-network`
-- Permit setup creation after the read-only check: `--create-scm-target`
+- Check/create target folder and network snippet without importing: `--setup-scm-target --create-scm-target --target-folder FW1 --target-snippet FW1-network`
+- Let a live import provision missing target resources: `--target-folder FW1 --target-snippet FW1-network`
 - Fetch current SCM object data into validation JSON: `--snapshot-current-data --snapshot-output /tmp/current-data.json`
 - Include common policy dependency object types in a snapshot: `--snapshot-policy-dependencies`
 - Allow guarded live object/profile posting: `--post-objects`

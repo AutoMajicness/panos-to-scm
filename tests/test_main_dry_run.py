@@ -141,6 +141,51 @@ class MainDryRunTests(unittest.TestCase):
         self.assertTrue(result["summary"]["ready"])
         self.assertEqual(len(session.posts), 2)
 
+    def test_prepare_import_target_creates_from_explicit_scopes(self):
+        class ImportSession:
+            def __init__(self):
+                self.posts = []
+
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return {"data": []}
+
+                return Response()
+
+            def post(self, url, json=None, timeout=20):
+                self.posts.append({"url": url, "json": json})
+
+                class Response:
+                    status_code = 201
+                    text = ""
+
+                    def json(self):
+                        return {"name": json["name"]}
+
+                return Response()
+
+        from scm import PanApiHandler
+
+        session = ImportSession()
+        result = main.prepare_import_target(
+            PanApiHandler(session),
+            {"object": "folder:FW1", "policy": "folder:FW1", "network": "snippet:FW1-network"},
+            "",
+            "",
+            "ngfw-shared",
+            True,
+        )
+
+        self.assertTrue(result["summary"]["ready"])
+        self.assertEqual(len(session.posts), 2)
+
     def test_snapshot_current_data_writes_selected_object_types(self):
         class SnapshotSession:
             def ensure_valid_token(self):
