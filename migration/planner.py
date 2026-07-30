@@ -748,7 +748,7 @@ def _network_reference_targets(object_type: str, path: str, key: str) -> tuple[s
         if key in {"from", "to"}:
             return ("Zones",)
         if key in {"source", "destination", "translated_address"} and not _is_nat_type_path(path):
-            return ("Address", "AddressGroup")
+            return ("Address", "AddressGroup", "ExternalDynamicList")
         if key == "service":
             return ("Service", "ServiceGroup")
         if key == "application" and object_type in {"app_override_pre_rules", "app_override_post_rules"}:
@@ -765,7 +765,7 @@ def _network_reference_targets(object_type: str, path: str, key: str) -> tuple[s
         if key == "profile" and object_type in {"decryption_pre_rules", "decryption_post_rules"}:
             return ("DecryptionProfile",)
         if key == "translated_address" and _is_nat_type_path(path):
-            return ("Address", "AddressGroup")
+            return ("Address", "AddressGroup", "ExternalDynamicList")
 
     return ()
 

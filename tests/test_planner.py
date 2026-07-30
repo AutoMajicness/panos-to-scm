@@ -646,6 +646,33 @@ class BuildPlanTests(unittest.TestCase):
             {warning.code for warning in plan.warnings},
         )
 
+    def test_build_plan_treats_external_dynamic_lists_as_valid_policy_address_references(self):
+        parsed_data = {
+            "security_pre_rules": [
+                {
+                    "name": "block-edl",
+                    "from": ["trust"],
+                    "to": ["untrust"],
+                    "source": ["panw-highrisk-ip-list"],
+                    "destination": ["panw-known-ip-list"],
+                }
+            ]
+        }
+        current_data = {
+            "Zones": [{"name": "trust"}, {"name": "untrust"}],
+            "ExternalDynamicList": [
+                {"name": "panw-highrisk-ip-list"},
+                {"name": "panw-known-ip-list"},
+            ],
+        }
+
+        plan = build_plan(parsed_data, current_data=current_data, object_types=["security_pre_rules"])
+
+        self.assertNotIn(
+            "missing-policy-reference",
+            {warning.code for warning in plan.warnings},
+        )
+
     def test_build_plan_warns_when_reference_target_is_parsed_but_not_selected(self):
         parsed_data = {
             "BgpFilteringProfile": [
