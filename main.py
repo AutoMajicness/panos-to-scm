@@ -518,6 +518,12 @@ def main(
     snapshot_current_data=False,
     snapshot_output="",
     snapshot_policy_dependencies=False,
+    setup_scm_target=False,
+    create_scm_target=False,
+    target_folder="",
+    target_snippet="",
+    parent_folder="All",
+    associate_snippet=True,
     post_objects=False,
     post_policy=False,
     post_network=False,
@@ -566,6 +572,29 @@ def main(
         selected_obj_types = selected_regular_obj_types + selected_network_obj_types
         if run_objects and not selected_obj_types:
             logger.warning(f"No valid objects found to run for {run_objects_list}")
+
+        if setup_scm_target:
+            if not target_folder or not target_snippet:
+                raise CliError("--target-folder and --target-snippet are required with --setup-scm-target")
+            from scm import PanApiHandler
+            from scm.setup import SetupTargetRequest, ensure_setup_target
+
+            api_session = PanApiHandler(initialize_api_session())
+            setup_result = ensure_setup_target(
+                api_session,
+                SetupTargetRequest(
+                    folder_name=target_folder,
+                    snippet_name=target_snippet,
+                    parent_folder=parent_folder,
+                    associate_snippet=associate_snippet,
+                    create=create_scm_target,
+                ),
+            )
+            logger.info(f"SCM target setup summary: {json.dumps(setup_result['summary'], sort_keys=True)}")
+            print(json.dumps(setup_result, indent=2, sort_keys=True))
+            if not setup_result["summary"]["ready"]:
+                sys.exit(1)
+            return setup_result
 
         if snapshot_current_data:
             if not selected_obj_types:
@@ -882,6 +911,7 @@ def main(
         sys.exit(1)
     except Exception as e:
         logger.error(f"An error occurred: {e}", exc_info=True)
+        sys.exit(1)
     
     complete_time = time.time()
     script_begin_time = globals().get('begin_time', start_time)
@@ -918,6 +948,12 @@ if __name__ == "__main__":
     parser.add_argument('--snapshot-current-data', action='store_true', help="Fetch current SCM objects into --current-data compatible JSON and exit")
     parser.add_argument('--snapshot-output', action='store', default="", help="Write --snapshot-current-data JSON to this path")
     parser.add_argument('--snapshot-policy-dependencies', action='store_true', help="With --snapshot-current-data, include common policy dependency object types")
+    parser.add_argument('--setup-scm-target', action='store_true', help="Check or create the target SCM folder/snippet pair and print the resulting scopes")
+    parser.add_argument('--create-scm-target', action='store_true', help="With --setup-scm-target, create missing folder/snippet setup resources")
+    parser.add_argument('--target-folder', action='store', default="", help="Target SCM folder name for migrated objects and policies")
+    parser.add_argument('--target-snippet', action='store', default="", help="Target SCM snippet name for migrated network stack objects")
+    parser.add_argument('--parent-folder', action='store', default="All", help="Parent folder for --setup-scm-target creation")
+    parser.add_argument('--no-associate-snippet', action='store_true', help="Do not associate the target snippet when creating the target folder")
     parser.add_argument('--post-objects', action='store_true', help="Allow live object/profile posting after validation blockers are checked")
     parser.add_argument('--post-policy', action='store_true', help="Allow live policy/NAT posting after validation blockers are checked")
     parser.add_argument('--post-network', action='store_true', help="Allow live network object posting after validation blockers are checked")
@@ -933,4 +969,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config = parser_config if args.dry_run or args.validate_only or args.network_report else ConfigurationManager().app_config
     
-    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, validate_only=args.validate_only, snapshot_current_data=args.snapshot_current_data, snapshot_output=args.snapshot_output, snapshot_policy_dependencies=args.snapshot_policy_dependencies, post_objects=args.post_objects, post_policy=args.post_policy, post_network=args.post_network, warnings_as_errors=args.warnings_as_errors, warning_codes=args.warning_codes, strict_local_firewall=args.strict_local_firewall, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, remediation_output=args.remediation_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)
+    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, validate_only=args.validate_only, snapshot_current_data=args.snapshot_current_data, snapshot_output=args.snapshot_output, snapshot_policy_dependencies=args.snapshot_policy_dependencies, setup_scm_target=args.setup_scm_target, create_scm_target=args.create_scm_target, target_folder=args.target_folder, target_snippet=args.target_snippet, parent_folder=args.parent_folder, associate_snippet=not args.no_associate_snippet, post_objects=args.post_objects, post_policy=args.post_policy, post_network=args.post_network, warnings_as_errors=args.warnings_as_errors, warning_codes=args.warning_codes, strict_local_firewall=args.strict_local_firewall, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, remediation_output=args.remediation_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)

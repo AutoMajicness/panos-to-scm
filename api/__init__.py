@@ -45,6 +45,8 @@ class PanApiSession:
             self.token = self.get_access_token()
             if self.token:
                 self.session.headers.update({'Authorization': f'Bearer {self.token}'})
+            else:
+                raise RuntimeError("Unable to authenticate to SCM; access token was not returned")
 
     def is_token_expired(self):
         if not self.token_expiry_time:
@@ -107,11 +109,10 @@ class PanApiSession:
             url = f"{self.config['api_url']}{endpoint}"
         try:
             response = self.session.get(url, params=params, timeout=timeout)
-            response.raise_for_status()
             return response
         except requests.exceptions.RequestException as e:
             logging.error(f"Error during API request to {url}: {e}")
-            return None
+            raise
 
     def post(self, endpoint, data=None, headers=None, timeout=20, json=None):
         self.authenticate()
@@ -131,15 +132,7 @@ class PanApiSession:
                 response = self.session.post(url, json=json, headers=headers, timeout=timeout)
             else:
                 response = self.session.post(url, json=data, headers=headers, timeout=timeout)
-            response.raise_for_status()
             return response
         except requests.exceptions.RequestException as e:
             logging.error(f"Error during POST to {url}: {e}")
-            return None
-        try:
-            response = self.session.post(url, json=data, headers=headers, timeout=20)
-            response.raise_for_status()
-            return response
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Error during POST to {url}: {e}")
-            return None
+            raise

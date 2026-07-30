@@ -10,6 +10,83 @@ from config import AppConfig
 
 
 class MainDryRunTests(unittest.TestCase):
+    def test_setup_scm_target_exits_when_missing_without_create(self):
+        class SetupSession:
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return {"data": []}
+
+                return Response()
+
+        with (
+            patch.object(main, "logger"),
+            patch("sys.stdout", new_callable=io.StringIO),
+            patch.object(main, "initialize_api_session", return_value=SetupSession()),
+        ):
+            with self.assertRaises(SystemExit) as exit_context:
+                main.main(
+                    AppConfig(),
+                    setup_scm_target=True,
+                    target_folder="FW1",
+                    target_snippet="FW1-network",
+                )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_setup_scm_target_creates_when_enabled(self):
+        class SetupSession:
+            def __init__(self):
+                self.posts = []
+
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return {"data": []}
+
+                return Response()
+
+            def post(self, url, json=None, timeout=20):
+                self.posts.append({"url": url, "json": json})
+
+                class Response:
+                    status_code = 201
+                    text = ""
+
+                    def json(self):
+                        return {"id": "created"}
+
+                return Response()
+
+        session = SetupSession()
+        with (
+            patch.object(main, "logger"),
+            patch("sys.stdout", new_callable=io.StringIO),
+            patch.object(main, "initialize_api_session", return_value=session),
+        ):
+            result = main.main(
+                AppConfig(),
+                setup_scm_target=True,
+                create_scm_target=True,
+                target_folder="FW1",
+                target_snippet="FW1-network",
+            )
+
+        self.assertTrue(result["summary"]["ready"])
+        self.assertEqual(len(session.posts), 2)
+
     def test_snapshot_current_data_writes_selected_object_types(self):
         class SnapshotSession:
             def ensure_valid_token(self):

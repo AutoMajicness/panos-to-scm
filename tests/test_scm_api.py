@@ -202,6 +202,14 @@ class PanApiHandlerTests(unittest.TestCase):
         )
         self.assertEqual(session.get_calls[0]["params"], {"folder": "All", "limit": 100})
 
+    def test_get_raises_api_request_error_with_status_and_body(self):
+        session = FakeSession()
+        session.get_response = FakeResponse(400, {"_errors": [{"message": "bad scope"}]}, "bad scope")
+        handler = PanApiHandler(session)
+
+        with self.assertRaisesRegex(Exception, "Status Code: 400"):
+            handler.get("/config/network/v1/zones", params={"snippet": "missing"})
+
     def test_post_returns_created_status(self):
         session = FakeSession()
         handler = PanApiHandler(session)

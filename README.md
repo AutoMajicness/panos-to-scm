@@ -84,6 +84,26 @@ The legacy `--scope folder:All` option still works as a fallback for all categor
 
 Object selection can be combined with policy flags. For example, `-o Address,Service --security-rules --nat-rules` parses and plans the selected object types plus the selected local firewall rulebases.
 
+For standalone firewall imports, create or verify the SCM migration target before snapshot/posting. This is guarded: without `--create-scm-target`, the command only checks for the folder/snippet and exits nonzero if they do not exist.
+
+```bash
+# Read-only check.
+python3 main.py \
+  --setup-scm-target \
+  --target-folder FW1-GEJ \
+  --target-snippet FW1-GEJ-network
+
+# Explicitly create the missing setup objects.
+python3 main.py \
+  --setup-scm-target \
+  --create-scm-target \
+  --target-folder FW1-GEJ \
+  --target-snippet FW1-GEJ-network \
+  --parent-folder All
+```
+
+The command prints the follow-on scopes to use for migration: `folder:<target>` for objects/policies and `snippet:<target-network>` for network stack objects.
+
 For CI-style local validation that does not require SCM authentication or scope prompts:
 
 ```bash
@@ -148,6 +168,8 @@ Use `--limit 1` for a quick parser smoke or repeat `--config-file path/to/config
 - Set network destination scope: `--network-scope snippet:Network-Stack`
 - Build an offline plan without SCM authentication: `--dry-run`
 - Run local parser/planner validation without SCM authentication or scope prompts: `--validate-only`
+- Check/create target folder and network snippet: `--setup-scm-target --target-folder FW1 --target-snippet FW1-network`
+- Permit setup creation after the read-only check: `--create-scm-target`
 - Fetch current SCM object data into validation JSON: `--snapshot-current-data --snapshot-output /tmp/current-data.json`
 - Include common policy dependency object types in a snapshot: `--snapshot-policy-dependencies`
 - Allow guarded live object/profile posting: `--post-objects`
