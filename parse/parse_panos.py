@@ -3913,6 +3913,8 @@ class XMLParser:
         entries = []
         for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
             for redist_entry in self._bgp_redist_rule_entries(router_entry):
+                if self._bgp_redist_source_type(redist_entry) not in {'static', 'connected', 'ospf'}:
+                    continue
                 name = self._bgp_redist_route_map_name(router_entry, redist_entry)
                 route_map = {
                     'name': 10,
@@ -4021,6 +4023,18 @@ class XMLParser:
         if address_family:
             payload['address_family'] = address_family
 
+        filtering_profile = {}
+        for family in ('ipv4', 'ipv6'):
+            has_policy = any(
+                self._bgp_policy_rule_family(rule_entry) == family
+                for direction in ('import', 'export')
+                for rule_entry in self._bgp_policy_rule_entries(router_entry, direction)
+            )
+            if has_policy:
+                filtering_profile[family] = self._bgp_filtering_profile_name(router_entry, family)
+        if filtering_profile:
+            payload['filtering_profile'] = filtering_profile
+
         peers = []
         for peer_entry in group_entry.findall('peer/entry'):
             peer_payload = self._convert_bgp_peer(peer_entry, router_entry, group_name)
@@ -4068,25 +4082,6 @@ class XMLParser:
             group_name,
             peer_name,
         )
-
-        import_ipv4_route_maps = self._bgp_policy_route_map_names(router_entry, 'import', family='ipv4')
-        export_ipv4_route_maps = self._bgp_policy_route_map_names(router_entry, 'export', family='ipv4')
-        import_ipv6_route_maps = self._bgp_policy_route_map_names(router_entry, 'import', family='ipv6')
-        export_ipv6_route_maps = self._bgp_policy_route_map_names(router_entry, 'export', family='ipv6')
-        if import_ipv4_route_maps or export_ipv4_route_maps:
-            address_family.setdefault('ipv4', {'unicast': {}})
-            address_family['ipv4']['unicast']['filtering_profile'] = self._bgp_filtering_profile_name(router_entry, 'ipv4')
-            if import_ipv4_route_maps:
-                address_family['ipv4']['unicast']['import_route_map'] = import_ipv4_route_maps[0]
-            if export_ipv4_route_maps:
-                address_family['ipv4']['unicast']['export_route_map'] = export_ipv4_route_maps[0]
-        if import_ipv6_route_maps or export_ipv6_route_maps:
-            address_family.setdefault('ipv6', {'unicast': {}})
-            address_family['ipv6']['unicast']['filtering_profile'] = self._bgp_filtering_profile_name(router_entry, 'ipv6')
-            if import_ipv6_route_maps:
-                address_family['ipv6']['unicast']['import_route_map'] = import_ipv6_route_maps[0]
-            if export_ipv6_route_maps:
-                address_family['ipv6']['unicast']['export_route_map'] = export_ipv6_route_maps[0]
 
         if address_family:
             payload['address_family'] = address_family
@@ -4569,7 +4564,10 @@ class XMLParser:
         return self._sanitize_name(f"{router_entry.get('name')}-redist-{redist_entry.get('name')}-rm")
 
     def _bgp_redist_profile_name_if_needed(self, router_entry):
-        if self._bgp_redist_rule_entries(router_entry):
+        if any(
+            self._bgp_redist_source_type(entry) in {'static', 'connected', 'ospf'}
+            for entry in self._bgp_redist_rule_entries(router_entry)
+        ):
             return self._sanitize_name(f"{router_entry.get('name')}-bgp-redist")
         return None
 

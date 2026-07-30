@@ -209,13 +209,13 @@ class MainDryRunTests(unittest.TestCase):
             output = json.loads(output_path.read_text(encoding="utf-8"))
 
         self.assertEqual(report.summary()["LogicalRouter"], 1)
-        self.assertEqual(report.summary()["warnings"], 8)
+        self.assertEqual(report.summary()["warnings"], 7)
         self.assertEqual(output["summary"]["LogicalRouter"], 1)
-        self.assertEqual(output["summary"]["warnings"], 8)
+        self.assertEqual(output["summary"]["warnings"], 7)
         self.assertIn("LogicalRouter", output["objects"])
         warning_codes = [warning["code"] for warning in output["warnings"]]
         self.assertEqual(warning_codes.count("unsupported-panos-routing-node"), 7)
-        self.assertEqual(warning_codes.count("missing-network-reference"), 1)
+        self.assertEqual(warning_codes.count("missing-network-reference"), 0)
 
     def test_validate_only_writes_remediation_output(self):
         parsed_data = {

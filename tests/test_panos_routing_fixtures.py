@@ -250,8 +250,11 @@ class PanosRoutingFixtureTests(unittest.TestCase):
             "edge-vr-transit-transit-v6-ipv6-af",
         )
         self.assertEqual(
-            peer["address_family"]["ipv6"]["unicast"]["filtering_profile"],
-            "edge-vr-ipv6-bgp-filtering",
+            peer_group["filtering_profile"],
+            {
+                "ipv4": "edge-vr-ipv4-bgp-filtering",
+                "ipv6": "edge-vr-ipv6-bgp-filtering",
+            },
         )
 
     def test_ospf_static_fixture_variants_parse_to_logical_router(self):
@@ -354,10 +357,10 @@ class PanosRoutingFixtureTests(unittest.TestCase):
 
         plan = build_plan(parsed, object_types=["LogicalRouter"])
 
-        self.assertEqual(plan.summary()["warnings"], 7)
+        self.assertEqual(plan.summary()["warnings"], 6)
         warning_codes = [warning.code for warning in plan.warnings]
         self.assertEqual(warning_codes.count("unsupported-panos-routing-node"), 6)
-        self.assertEqual(warning_codes.count("missing-network-reference"), 1)
+        self.assertEqual(warning_codes.count("missing-network-reference"), 0)
 
     def test_template_routing_layout_emits_parser_warning_for_local_mode(self):
         parsed = XMLParser(

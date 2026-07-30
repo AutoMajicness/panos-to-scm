@@ -436,24 +436,18 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                                     "local_port": 179,
                                                 },
                                                 "address_family": {
-                                                    "ipv4": {
-                                                        "unicast": {
-                                                            "filtering_profile": "default-ipv4-bgp-filtering",
-                                                            "import_route_map": "default-import-import-private-rm",
-                                                            "export_route_map": "default-export-export-default-rm",
-                                                        }
-                                                    },
                                                     "ipv6": {
                                                         "unicast": {
                                                             "address_family_profile": "default-upstream-peer-a-ipv6-af",
-                                                            "filtering_profile": "default-ipv6-bgp-filtering",
-                                                            "import_route_map": "default-import-import-v6-rm",
-                                                            "export_route_map": "default-export-export-v6-rm",
                                                         }
                                                     }
                                                 },
                                             }
                                         ],
+                                        "filtering_profile": {
+                                            "ipv4": "default-ipv4-bgp-filtering",
+                                            "ipv6": "default-ipv6-bgp-filtering",
+                                        },
                                     }
                                 ],
                             },
@@ -476,7 +470,8 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                         "type": {"normal": {}},
                                         "interface": [
                                             {
-                                                "name": "ethernet1/1",
+                                                "name": "$ethernet1-1",
+                                                "default_value": "ethernet1/1",
                                                 "enable": True,
                                                 "passive": False,
                                                 "metric": 10,
@@ -540,7 +535,8 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
                                         "name": "0.0.0.0",
                                         "interface": [
                                             {
-                                                "name": "ethernet1/1",
+                                                "name": "$ethernet1-1",
+                                                "default_value": "ethernet1/1",
                                                 "enable": True,
                                                 "metric": 20,
                                                 "authentication": "ospf-simple",
@@ -745,44 +741,52 @@ class PanosLogicalRouterParserTests(unittest.TestCase):
             [
                 {
                     "name": "default-import-import-private-pl",
-                    "prefix_list": [
-                        {
-                            "name": 1,
-                            "action": "permit",
-                            "prefix": "10.0.0.0/8",
-                            "exact": True,
-                        }
-                    ],
+                    "ipv4": {
+                        "prefix_list": [
+                            {
+                                "name": 1,
+                                "action": "permit",
+                                "prefix": "10.0.0.0/8",
+                                "exact": True,
+                            }
+                        ]
+                    },
                 },
                 {
                     "name": "default-import-import-v6-pl",
-                    "prefix_list": [
-                        {
-                            "name": 1,
-                            "action": "permit",
-                            "prefix": "2001:db8:100::/48",
-                        }
-                    ],
+                    "ipv6": {
+                        "prefix_list": [
+                            {
+                                "name": 1,
+                                "action": "permit",
+                                "prefix": "2001:db8:100::/48",
+                            }
+                        ]
+                    },
                 },
                 {
                     "name": "default-export-export-default-pl",
-                    "prefix_list": [
-                        {
-                            "name": 1,
-                            "action": "permit",
-                            "prefix": "0.0.0.0/0",
-                        }
-                    ],
+                    "ipv4": {
+                        "prefix_list": [
+                            {
+                                "name": 1,
+                                "action": "permit",
+                                "prefix": "0.0.0.0/0",
+                            }
+                        ]
+                    },
                 },
                 {
                     "name": "default-export-export-v6-pl",
-                    "prefix_list": [
-                        {
-                            "name": 1,
-                            "action": "permit",
-                            "prefix": "2001:db8::/32",
-                        }
-                    ],
+                    "ipv6": {
+                        "prefix_list": [
+                            {
+                                "name": 1,
+                                "action": "permit",
+                                "prefix": "2001:db8::/32",
+                            }
+                        ]
+                    },
                 },
             ],
         )
