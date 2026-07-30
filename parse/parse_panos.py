@@ -2712,6 +2712,13 @@ class XMLParser:
         for panos_name, scm_name in field_map.items():
             value = self._child_text(entry, panos_name)
             if value:
+                if panos_name == 'destination':
+                    value = self._resolve_panos_ip(value)
+                    if '/' not in value:
+                        if re.match(r'^\d{1,3}(?:\.\d{1,3}){3}$', value):
+                            value = f'{value}/32'
+                        elif ':' in value:
+                            value = f'{value}/128'
                 route[scm_name] = value
 
         int_field_map = {
