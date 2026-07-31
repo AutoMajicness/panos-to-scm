@@ -629,7 +629,7 @@ def write_live_remediation_output(validation_plans, remediation_output):
     write_json_file(remediation_output, remediation, "Live remediation report")
 
 
-def build_snapshot_summary(api_session, selected_obj_types, scope_param, config):
+def build_snapshot_summary(api_session, selected_obj_types, scope_param, config, parsed_data=None):
     if not selected_obj_types:
         return {"counts": {}, "fetch_failures": []}
     manager = setup_scm_object_manager(
@@ -639,7 +639,12 @@ def build_snapshot_summary(api_session, selected_obj_types, scope_param, config)
         config.nat_obj,
         scope_param,
     )
-    current_objects = manager.get_current_objects(manager.obj_types, max_workers=6, limit=config.limit)
+    current_objects = manager.get_current_objects(
+        manager.obj_types,
+        max_workers=6,
+        limit=config.limit,
+        parsed_data=parsed_data,
+    )
     return {
         "counts": {
             obj_type.__name__: len(current_objects.get(obj_type, []))
@@ -657,6 +662,7 @@ def build_live_report(
     scopes,
     selected_regular_obj_types,
     selected_network_obj_types,
+    parsed_data=None,
     validation_plans,
     managers,
 ):
@@ -665,12 +671,14 @@ def build_live_report(
         selected_regular_obj_types,
         scopes.get("object"),
         config,
+        parsed_data=parsed_data,
     )
     network_snapshot = build_snapshot_summary(
         api_session,
         selected_network_obj_types,
         scopes.get("network"),
         config,
+        parsed_data=parsed_data,
     )
     rule_order_verification = []
     fetch_failures = []
@@ -1302,6 +1310,7 @@ def main(
             scopes=scopes,
             selected_regular_obj_types=selected_regular_obj_types,
             selected_network_obj_types=selected_network_obj_types,
+            parsed_data=parsed_data,
             validation_plans=validation_plans,
             managers=managers,
         )

@@ -105,6 +105,31 @@ class MultiPageFetchSession:
         return FakeResponse(200, {"data": [{"name": f"tenant-object-{params.get('offset', 0)}"} for _ in range(params.get("limit", 0))]})
 
 
+class RouteListFallbackHandler:
+    def __init__(self):
+        self.put_calls = []
+
+    def get(self, endpoint, params=None):
+        if params and params.get("name") == "routes":
+            return [{"id": "route-1", "name": "routes", "type": {"ipv4": {"ipv4_entry": []}}}]
+        raise ApiRequestError("route-list collection unavailable")
+
+    def put(self, endpoint, item_data):
+        self.put_calls.append({"endpoint": endpoint, "item_data": item_data})
+        return {"status": "updated", "message": "updated"}
+
+
+class IncompleteLogicalRouterHandler:
+    def __init__(self):
+        self.name_lookups = []
+
+    def get(self, endpoint, params=None):
+        if params and params.get("name"):
+            self.name_lookups.append(params["name"])
+            return [{"id": params["name"], "name": params["name"]}]
+        return [{"id": "default", "name": "default"}]
+
+
 class EndpointRegistryTests(unittest.TestCase):
     def test_core_object_endpoints_are_modern_and_payload_scoped(self):
         self.assertEqual(obj.Address.get_endpoint(), "/config/objects/v1/addresses")
@@ -176,6 +201,103 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(current_objects[obj.Address], [{"name": "existing-object"}])
         self.assertEqual(current_objects[obj.Application], [])
         self.assertEqual(manager.fetch_failures[0]["object_type"], "Application")
+
+    def test_route_lists_fall_back_to_name_scoped_lookup(self):
+        manager = SCMObjectManager(
+            RouteListFallbackHandler(),
+            "&snippet=Network-Stack",
+            obj,
+            [obj.RoutePrefixList],
+            obj.SecurityRule,
+            obj.NatRule,
+        )
+
+        current_objects = manager.get_current_objects(
+            manager.obj_types,
+            max_workers=1,
+            parsed_data={"RoutePrefixList": [{"name": "routes"}]},
+        )
+
+        self.assertEqual(current_objects[obj.RoutePrefixList][0]["id"], "route-1")
+        self.assertEqual(manager.fetch_failures, [])
+
+    def test_existing_route_list_update_uses_name_scoped_lookup(self):
+        handler = RouteListFallbackHandler()
+        manager = SCMObjectManager(
+            handler,
+            "&snippet=Network-Stack",
+            obj,
+            [obj.RoutePrefixList],
+            obj.SecurityRule,
+            obj.NatRule,
+            conflict_policy="replace",
+        )
+
+        manager.update_existing_entries(
+            {
+                "RoutePrefixList": [
+                    {
+                        "id": "route-1",
+                        "name": "routes",
+                        "type": {"ipv4": {"ipv4_entry": [{"name": 1, "action": "permit"}]}},
+                    }
+                ]
+            },
+            "&snippet=Network-Stack",
+            "",
+            100,
+        )
+
+        self.assertEqual(handler.put_calls[0]["endpoint"], "/config/network/v1/route-prefix-lists/route-1")
+
+    def test_incomplete_logical_router_collection_is_completed_by_name(self):
+        handler = IncompleteLogicalRouterHandler()
+        manager = SCMObjectManager(
+            handler,
+            "&snippet=Network-Stack",
+            obj,
+            [obj.LogicalRouter],
+            obj.SecurityRule,
+            obj.NatRule,
+        )
+
+        current_objects = manager.get_current_objects(
+            manager.obj_types,
+            max_workers=1,
+            parsed_data={
+                "LogicalRouter": [
+                    {"name": "default"},
+                    {"name": "SW-MGMT"},
+                    {"name": "AWS-CNG-BGP"},
+                ]
+            },
+        )
+
+        self.assertEqual(
+            {item["name"] for item in current_objects[obj.LogicalRouter]},
+            {"default", "SW-MGMT", "AWS-CNG-BGP"},
+        )
+        self.assertEqual(handler.name_lookups, ["SW-MGMT", "AWS-CNG-BGP"])
+
+    def test_empty_source_type_is_not_fetched(self):
+        handler = IncompleteLogicalRouterHandler()
+        manager = SCMObjectManager(
+            handler,
+            "&snippet=Network-Stack",
+            obj,
+            [obj.RouteAccessList],
+            obj.SecurityRule,
+            obj.NatRule,
+        )
+
+        current_objects = manager.get_current_objects(
+            manager.obj_types,
+            max_workers=1,
+            parsed_data={"RouteAccessList": []},
+        )
+
+        self.assertEqual(current_objects[obj.RouteAccessList], [])
+        self.assertEqual(handler.name_lookups, [])
 
     def test_noninteractive_conflict_uses_replace_policy(self):
         manager = SCMObjectManager(

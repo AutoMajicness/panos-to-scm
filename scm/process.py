@@ -58,6 +58,13 @@ _FETCH_LIMIT_OVERRIDES = {
 }
 _FETCH_LIMIT_FALLBACKS = (5000, 1000, 500, 200, 100, 50)
 _SINGLE_PAGE_FETCH_OBJECTS = {"Application"}
+_NAME_SCOPED_FALLBACK_OBJECTS = {
+    "RoutePrefixList",
+    "RouteAccessList",
+    "LogicalRouter",
+    "OSPFAuthProfile",
+    "BgpRedistributionProfile",
+}
 
 
 def order_object_types_for_dependencies(obj_types):
@@ -445,6 +452,17 @@ class SCMObjectManager:
     def get_current_objects(self, obj_types, max_workers=6, limit='10000', parsed_data=None, **kwargs):
         self.logger.info(f"Running with {max_workers} workers.")
         current_objects = {}
+        types_to_fetch = []
+        for obj_type in obj_types:
+            parsed_data_key = self._generate_key_name(obj_type.__name__)
+            if (
+                isinstance(parsed_data, dict)
+                and parsed_data_key in parsed_data
+                and not parsed_data.get(parsed_data_key)
+            ):
+                current_objects[obj_type] = []
+                continue
+            types_to_fetch.append(obj_type)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_obj_type = {
                 executor.submit(
@@ -452,12 +470,16 @@ class SCMObjectManager:
                     obj_type, 
                     limit, 
                     **kwargs.get(obj_type.__name__, {})
-                ): obj_type for obj_type in obj_types
+                ): obj_type for obj_type in types_to_fetch
             }
             for future in as_completed(future_to_obj_type):
                 obj_type = future_to_obj_type[future]
                 try:
-                    current_objects[obj_type] = future.result()
+                    current = future.result()
+                    fallback = self._fetch_named_route_lists(obj_type, parsed_data, current)
+                    if fallback:
+                        current = self._merge_named_objects(current, fallback)
+                    current_objects[obj_type] = current
                 except Exception as exc:
                     fallback = self._fetch_named_route_lists(obj_type, parsed_data)
                     if fallback is not None:
@@ -483,8 +505,8 @@ class SCMObjectManager:
                     current_objects[obj_type] = []
         return current_objects
 
-    def _fetch_named_route_lists(self, obj_type, parsed_data):
-        if obj_type.__name__ not in {"RoutePrefixList", "RouteAccessList"}:
+    def _fetch_named_route_lists(self, obj_type, parsed_data, current_objects=None):
+        if obj_type.__name__ not in _NAME_SCOPED_FALLBACK_OBJECTS:
             return None
         if not isinstance(parsed_data, dict):
             return None
@@ -493,6 +515,15 @@ class SCMObjectManager:
         names = [entry.get("name") for entry in desired if isinstance(entry, dict) and entry.get("name")]
         if not names:
             return None
+
+        current_names = {
+            item.get("name")
+            for item in (current_objects or [])
+            if isinstance(item, dict) and item.get("name")
+        }
+        names = [name for name in names if name not in current_names]
+        if not names:
+            return []
 
         found = []
         endpoint = obj_type.get_endpoint()
@@ -510,6 +541,22 @@ class SCMObjectManager:
             elif isinstance(matches, dict):
                 found.append(matches)
         return found
+
+    @staticmethod
+    def _merge_named_objects(current_objects, fallback_objects):
+        merged = list(current_objects or [])
+        existing_names = {
+            item.get("name")
+            for item in merged
+            if isinstance(item, dict) and item.get("name")
+        }
+        merged.extend(
+            item for item in fallback_objects
+            if isinstance(item, dict)
+            and item.get("name")
+            and item.get("name") not in existing_names
+        )
+        return merged
 
     def get_new_and_updated_entries(self, parsed_data, current_objects):
         new_entries = {}
@@ -614,7 +661,17 @@ class SCMObjectManager:
                 endpoint = f"{entry_class.get_endpoint().rstrip('?')}/{object_id}"
                 params = {**self.scope.as_query_params(), 'limit': limit}
                 
-                current_objects = self.api_handler.get(entry_class.get_endpoint(), params=params)
+                try:
+                    current_objects = self.api_handler.get(entry_class.get_endpoint(), params=params)
+                except Exception:
+                    if entry_type_name not in {"RoutePrefixList", "RouteAccessList"}:
+                        raise
+                    current_objects = self.api_handler.get(
+                        entry_class.get_endpoint(),
+                        params={**self.scope.as_query_params(), "name": entry["name"]},
+                    )
+                if isinstance(current_objects, dict):
+                    current_objects = [current_objects]
                 current_object = next((obj for obj in current_objects if obj['name'] == entry['name']), None)
                 
                 if not current_object:
