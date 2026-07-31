@@ -361,7 +361,59 @@ LOCAL_LOGICAL_ROUTER_XML = """<config>
 """
 
 
+MULTI_PEER_BGP_POLICY_XML = """<config>
+  <devices><entry name="localhost.localdomain"><network><virtual-router>
+    <entry name="edge"><protocol><bgp>
+      <policy>
+        <import><rules>
+          <entry name="import-a"><match><from-peer><member>peer-group-a</member></from-peer><address-prefix><entry name="10.0.0.0/8" /></address-prefix></match><used-by><member>peer-group-a</member></used-by></entry>
+          <entry name="import-b"><match><from-peer><member>peer-group-b</member></from-peer><address-prefix><entry name="192.0.2.0/24" /></address-prefix></match><used-by><member>peer-group-b</member></used-by></entry>
+        </rules></import>
+        <export><rules>
+          <entry name="export-a"><match><address-prefix><entry name="10.10.0.0/16" /></address-prefix></match><used-by><member>peer-group-a</member></used-by></entry>
+          <entry name="export-b"><match><address-prefix><entry name="10.20.0.0/16" /></address-prefix></match><used-by><member>peer-group-b</member></used-by></entry>
+        </rules></export>
+      </policy>
+      <peer-group><entry name="peer-group-a"><peer><entry name="peer-a"><peer-address><ip>192.0.2.2</ip></peer-address></entry></peer></entry><entry name="peer-group-b"><peer><entry name="peer-b"><peer-address><ip>192.0.2.3</ip></peer-address></entry></peer></entry></peer-group>
+    </bgp></protocol></entry>
+  </virtual-router></network></entry></devices>
+</config>"""
+
+
 class PanosLogicalRouterParserTests(unittest.TestCase):
+    def test_bgp_filtering_profiles_follow_used_by_peer_groups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            xml_path = Path(directory) / "running.xml"
+            xml_path.write_text(MULTI_PEER_BGP_POLICY_XML, encoding="utf-8")
+            parsed = XMLParser(str(xml_path), "local").parse_specific_types(
+                ["BgpFilteringProfile", "LogicalRouter"]
+            )
+
+        profiles = {entry["name"]: entry for entry in parsed["BgpFilteringProfile"]}
+        self.assertEqual(
+            profiles["edge-peer-group-a-ipv4-bgp-filtering"]["ipv4"]["unicast"]["route_maps"],
+            {
+                "inbound": "edge-import-import-a-rm",
+                "outbound": "edge-export-export-a-rm",
+            },
+        )
+        self.assertEqual(
+            profiles["edge-peer-group-b-ipv4-bgp-filtering"]["ipv4"]["unicast"]["route_maps"],
+            {
+                "inbound": "edge-import-import-b-rm",
+                "outbound": "edge-export-export-b-rm",
+            },
+        )
+        router = parsed["LogicalRouter"][0]
+        peer_groups = router["vrf"][0]["bgp"]["peer_group"]
+        self.assertEqual(
+            [group["filtering_profile"]["ipv4"] for group in peer_groups],
+            [
+                "edge-peer-group-a-ipv4-bgp-filtering",
+                "edge-peer-group-b-ipv4-bgp-filtering",
+            ],
+        )
+
     def test_local_panos_virtual_router_entries_are_mapped_to_scm_logical_routers(self):
         with tempfile.TemporaryDirectory() as directory:
             xml_path = Path(directory) / "running.xml"

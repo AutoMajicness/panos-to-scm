@@ -3710,35 +3710,83 @@ class XMLParser:
         profiles = []
         for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
             for family in ['ipv4', 'ipv6']:
-                unicast = self._convert_bgp_filtering_profile_unicast(router_entry, family)
-                if not unicast:
+                policy_groups = [
+                    group_entry.get('name')
+                    for group_entry in router_entry.findall('protocol/bgp/peer-group/entry')
+                    if group_entry.get('name')
+                    and self._bgp_group_has_policy(router_entry, group_entry.get('name'), family)
+                ]
+                if policy_groups:
+                    for group_name in policy_groups:
+                        unicast = self._convert_bgp_filtering_profile_unicast(
+                            router_entry,
+                            family,
+                            peer_group_name=group_name,
+                        )
+                        if not unicast:
+                            continue
+                        profiles.append(
+                            {
+                                'name': self._bgp_filtering_profile_name(
+                                    router_entry,
+                                    family,
+                                    peer_group_name=group_name if len(policy_groups) > 1 else None,
+                                ),
+                                family: {'unicast': unicast},
+                            }
+                        )
                     continue
-                profiles.append(
-                    {
-                        'name': self._bgp_filtering_profile_name(router_entry, family),
-                        family: {'unicast': unicast},
-                    }
-                )
+
+                unicast = self._convert_bgp_filtering_profile_unicast(router_entry, family)
+                if unicast:
+                    profiles.append(
+                        {
+                            'name': self._bgp_filtering_profile_name(router_entry, family),
+                            family: {'unicast': unicast},
+                        }
+                    )
         return profiles
 
-    def _convert_bgp_filtering_profile_unicast(self, router_entry, family):
+    def _convert_bgp_filtering_profile_unicast(self, router_entry, family, peer_group_name=None):
         payload = {}
 
         route_maps = {}
-        inbound_route_map = self._first_bgp_policy_artifact(router_entry, 'import', family, self._bgp_policy_route_map_name)
+        inbound_route_map = self._first_bgp_policy_artifact(
+            router_entry,
+            'import',
+            family,
+            self._bgp_policy_route_map_name,
+            peer_group_name=peer_group_name,
+        )
         if inbound_route_map:
             route_maps['inbound'] = inbound_route_map
-        outbound_route_map = self._first_bgp_policy_artifact(router_entry, 'export', family, self._bgp_policy_route_map_name)
+        outbound_route_map = self._first_bgp_policy_artifact(
+            router_entry,
+            'export',
+            family,
+            self._bgp_policy_route_map_name,
+            peer_group_name=peer_group_name,
+        )
         if outbound_route_map:
             route_maps['outbound'] = outbound_route_map
         if route_maps:
             payload['route_maps'] = route_maps
 
-        inbound_filters = self._convert_bgp_filtering_network_filters(router_entry, 'import', family)
+        inbound_filters = self._convert_bgp_filtering_network_filters(
+            router_entry,
+            'import',
+            family,
+            peer_group_name=peer_group_name,
+        )
         if inbound_filters:
             payload['inbound_network_filters'] = inbound_filters
 
-        outbound_filters = self._convert_bgp_filtering_network_filters(router_entry, 'export', family)
+        outbound_filters = self._convert_bgp_filtering_network_filters(
+            router_entry,
+            'export',
+            family,
+            peer_group_name=peer_group_name,
+        )
         if outbound_filters:
             payload['outbound_network_filters'] = outbound_filters
 
@@ -3789,7 +3837,7 @@ class XMLParser:
             payload['unsuppress_map'] = unsuppress_map
         return payload or None
 
-    def _convert_bgp_filtering_network_filters(self, router_entry, direction, family):
+    def _convert_bgp_filtering_network_filters(self, router_entry, direction, family, peer_group_name=None):
         filters = {}
         prefix_list = self._first_bgp_policy_artifact(
             router_entry,
@@ -3797,6 +3845,7 @@ class XMLParser:
             family,
             self._bgp_policy_prefix_list_name,
             needs_prefix=True,
+            peer_group_name=peer_group_name,
         )
         if prefix_list:
             filters['prefix_list'] = prefix_list
@@ -3807,6 +3856,7 @@ class XMLParser:
             family,
             self._bgp_policy_access_list_name,
             needs_access_list=True,
+            peer_group_name=peer_group_name,
         )
         if access_list:
             filters['distribute_list'] = access_list
@@ -3821,9 +3871,12 @@ class XMLParser:
         name_builder,
         needs_prefix=False,
         needs_access_list=False,
+        peer_group_name=None,
     ):
         for rule_entry in self._bgp_policy_rule_entries(router_entry, direction):
             if self._bgp_policy_rule_family(rule_entry) != family:
+                continue
+            if peer_group_name and not self._bgp_policy_rule_applies_to_group(rule_entry, peer_group_name):
                 continue
             if needs_prefix and not self._bgp_policy_rule_prefixes(rule_entry):
                 continue
@@ -3832,8 +3885,26 @@ class XMLParser:
             return name_builder(router_entry, direction, rule_entry)
         return None
 
-    def _bgp_filtering_profile_name(self, router_entry, family):
-        return self._sanitize_name(f"{router_entry.get('name')}-{family}-bgp-filtering")
+    def _bgp_filtering_profile_name(self, router_entry, family, peer_group_name=None):
+        suffix = f"-{peer_group_name}" if peer_group_name else ""
+        return self._sanitize_name(f"{router_entry.get('name')}{suffix}-{family}-bgp-filtering")
+
+    def _bgp_group_has_policy(self, router_entry, peer_group_name, family):
+        return any(
+            self._bgp_policy_rule_family(rule_entry) == family
+            and self._bgp_policy_rule_applies_to_group(rule_entry, peer_group_name)
+            for direction in ('import', 'export')
+            for rule_entry in self._bgp_policy_rule_entries(router_entry, direction)
+        )
+
+    def _bgp_policy_rule_applies_to_group(self, rule_entry, peer_group_name):
+        used_by = self._member_texts(rule_entry.find('used-by'))
+        if used_by:
+            return peer_group_name in used_by
+        from_peer = self._member_texts(rule_entry.find('match/from-peer'))
+        if from_peer:
+            return peer_group_name in from_peer
+        return True
 
     def _route_prefix_list_entries(self):
         if self.config_type != 'local':
@@ -4157,13 +4228,17 @@ class XMLParser:
 
         filtering_profile = {}
         for family in ('ipv4', 'ipv6'):
-            has_policy = any(
-                self._bgp_policy_rule_family(rule_entry) == family
-                for direction in ('import', 'export')
-                for rule_entry in self._bgp_policy_rule_entries(router_entry, direction)
-            )
-            if has_policy:
-                filtering_profile[family] = self._bgp_filtering_profile_name(router_entry, family)
+            if self._bgp_group_has_policy(router_entry, group_name, family):
+                policy_groups = [
+                    entry.get('name')
+                    for entry in router_entry.findall('protocol/bgp/peer-group/entry')
+                    if entry.get('name') and self._bgp_group_has_policy(router_entry, entry.get('name'), family)
+                ]
+                filtering_profile[family] = self._bgp_filtering_profile_name(
+                    router_entry,
+                    family,
+                    peer_group_name=group_name if len(policy_groups) > 1 else None,
+                )
         if filtering_profile:
             payload['filtering_profile'] = filtering_profile
 
