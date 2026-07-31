@@ -919,6 +919,19 @@ _BUILTIN_REFERENCE_VALUES = {
     "application-default",
     "default",
     "none",
+    "service-http",
+    "service-https",
+    "service-ssh",
+    "service-telnet",
+    "service-ftp",
+    "service-dns",
+    "service-ntp",
+    "service-ping",
+    "service-smtp",
+    "panw-bulletproof-ip-list",
+    "panw-highrisk-ip-list",
+    "panw-known-ip-list",
+    "panw-torexit-ip-list",
 }
 
 

@@ -10,6 +10,25 @@ from config import AppConfig
 
 
 class MainDryRunTests(unittest.TestCase):
+    def test_builtin_policy_references_are_not_reported_missing(self):
+        plan = main.build_plan(
+            {
+                "security_pre_rules": [
+                    {
+                        "name": "block-builtins",
+                        "from": ["any"],
+                        "to": ["any"],
+                        "source": ["panw-bulletproof-ip-list"],
+                        "destination": ["panw-known-ip-list"],
+                        "service": ["service-http", "service-https"],
+                    }
+                ]
+            },
+            object_types=["security_pre_rules"],
+        )
+
+        self.assertEqual(plan.warnings, [])
+
     def test_local_xml_without_selection_defaults_to_full_import(self):
         self.assertTrue(
             main.should_default_full_import(
