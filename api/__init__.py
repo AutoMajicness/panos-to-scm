@@ -8,11 +8,17 @@ class PanApiSession:
     """
     Manages a session with the SASE API, including authentication.
     """
-    def __init__(self):
+    def __init__(self, runtime_config=None):
         self.session = self._create_session()
         self.token = None
         self.token_expiry_time = None
         self.config = self._load_config()
+        if isinstance(runtime_config, dict):
+            self.config.update({
+                key: value
+                for key, value in runtime_config.items()
+                if value is not None and str(value).strip()
+            })
         self.oauth_session = None
 
     def _create_session(self):

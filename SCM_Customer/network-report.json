@@ -1,0 +1,22 @@
+{
+  "objects": {
+    "LogicalRouter": [
+      {
+        "name": "default",
+        "routing_stack": "advanced",
+        "vrf": [
+          {
+            "name": "default"
+          }
+        ]
+      }
+    ]
+  },
+  "remediation": [],
+  "summary": {
+    "LogicalRouter": 1,
+    "warnings": 0
+  },
+  "warning_summary": {},
+  "warnings": []
+}

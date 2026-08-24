@@ -1,0 +1,19 @@
+[
+  {
+    "action": "Include the referenced network object type in the migration, add it to --current-data, or create it in the target SCM snippet before posting.",
+    "classification": "missing_dependency",
+    "code": "missing-network-reference",
+    "count": 1,
+    "examples": [
+      {
+        "message": "Reference 'ethernet1/1' was not found in generated payloads or current SCM data for AggregateInterface or EthernetInterface or Layer2Subinterface or Layer3Subinterface or VlanInterface or TunnelInterface or LoopbackInterface; include that object type in the migration or verify it already exists in the target tenant before posting.",
+        "name": "trust",
+        "object_type": "Zones",
+        "path": "network.layer3"
+      }
+    ],
+    "object_types": {
+      "Zones": 1
+    }
+  }
+]

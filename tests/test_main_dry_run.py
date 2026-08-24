@@ -10,6 +10,90 @@ from config import AppConfig
 
 
 class MainDryRunTests(unittest.TestCase):
+    def test_merge_scoped_snapshot_results_keeps_priority_and_provenance(self):
+        merged = main.merge_scoped_snapshot_results([
+            ("snippet:high", {"Address": [{"name": "shared", "value": "high"}]}),
+            ("snippet:low", {"Address": [{"name": "shared", "value": "low"}, {"name": "only-low"}]}),
+        ], include_provenance=True)
+
+        self.assertEqual(
+            merged["Address"],
+            [
+                {"name": "shared", "value": "high", "_scm_scope": "snippet:high"},
+                {"name": "only-low", "_scm_scope": "snippet:low"},
+            ],
+        )
+
+    def test_resolve_folder_scope_returns_all_network_scopes(self):
+        class Handler:
+            def get(self, endpoint, params=None):
+                return [{"name": "Customer-FW", "snippets": ["base", "override"]}]
+
+        result = main.resolve_folder_scope(Handler(), "Customer-FW")
+
+        self.assertEqual(result["network_scopes"], ["&snippet=base", "&snippet=override"])
+        self.assertEqual(result["folder_scope"], "folder:Customer-FW")
+        self.assertEqual(result["folder_scope_param"], "&folder=Customer-FW")
+
+    def test_prompt_scm_credentials_collects_secret_without_persisting(self):
+        with (
+            patch("builtins.input", side_effect=["tenant-1", "client-1"]),
+            patch("main.getpass.getpass", return_value="secret-1"),
+        ):
+            credentials = main.prompt_scm_credentials()
+
+        self.assertEqual(
+            {"tsg_id": "tenant-1", "client_id": "client-1", "client_secret": "secret-1"},
+            credentials,
+        )
+
+    def test_initialize_api_session_prompts_only_for_interactive_terminal(self):
+        class Session:
+            def __init__(self, runtime_config=None):
+                self.runtime_config = runtime_config
+
+            def authenticate(self):
+                pass
+
+        with (
+            patch("main.sys.stdin.isatty", return_value=True),
+            patch("main.prompt_scm_credentials", return_value={"tsg_id": "t", "client_id": "c", "client_secret": "s"}),
+            patch("api.PanApiSession", Session),
+        ):
+            session = main.initialize_api_session()
+
+        self.assertEqual({"tsg_id": "t", "client_id": "c", "client_secret": "s"}, session.runtime_config)
+
+    def test_output_directory_infers_target_folder_and_creates_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = main.resolve_output_directory(target_folder="Customer/West Wing", cwd=directory)
+            self.assertEqual("Customer_West Wing", output_dir.name)
+            self.assertTrue(output_dir.is_dir())
+
+    def test_output_folder_override_wins_over_customer_inference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            override = Path(directory) / "artifacts"
+            output_dir = main.resolve_output_directory(
+                output_folder=str(override),
+                target_folder="Customer-FW",
+                cwd=directory,
+            )
+            self.assertEqual(override, output_dir)
+            self.assertTrue(output_dir.is_dir())
+
+    def test_output_name_falls_back_from_generic_input_filename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(
+                "SCM_Customer",
+                main.infer_customer_name(config_file="running_config.xml"),
+            )
+
+    def test_default_output_path_preserves_explicit_file(self):
+        self.assertEqual(
+            "/tmp/custom-plan.json",
+            main.default_output_path("/tmp/customer", "/tmp/custom-plan.json", "migration-plan.json"),
+        )
+
     def test_builtin_policy_references_are_not_reported_missing(self):
         plan = main.build_plan(
             {
@@ -247,12 +331,15 @@ class MainDryRunTests(unittest.TestCase):
 
         self.assertEqual(snapshot, output)
         self.assertEqual(
-            output,
-            {
-                "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1"}],
-                "Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}],
-            },
+            output["EthernetInterface"],
+            [{"name": "$ethernet1-1", "default_value": "ethernet1/1"}],
         )
+        self.assertEqual(
+            output["Zones"],
+            [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}],
+        )
+        self.assertEqual(output["device_inventory"], [])
+        self.assertEqual(output["metadata"]["management_mode"], "scm_managed")
 
     def test_snapshot_policy_dependencies_includes_object_and_network_dependencies(self):
         class SnapshotSession:
@@ -292,9 +379,7 @@ class MainDryRunTests(unittest.TestCase):
             output = json.loads(output_path.read_text(encoding="utf-8"))
 
         self.assertEqual(snapshot, output)
-        self.assertEqual(
-            set(output),
-            {
+        self.assertTrue({
                 "Address",
                 "AddressGroup",
                 "Application",
@@ -305,8 +390,108 @@ class MainDryRunTests(unittest.TestCase):
                 "Service",
                 "ServiceGroup",
                 "Zones",
-            },
-        )
+            }.issubset(output))
+        self.assertIn("device_inventory", output)
+        self.assertIn("metadata", output)
+
+    def test_snapshot_policy_collects_pre_and_post_rulebases_with_metadata(self):
+        class SnapshotSession:
+            def __init__(self):
+                self.calls = []
+
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                self.calls.append({"url": url, "params": dict(params or {})})
+                endpoint = url.rstrip("?").rstrip("/").split("/")[-1]
+                position = (params or {}).get("position", "none")
+                rule = {"name": f"{endpoint}-{position}", "folder": "Customer-FW"}
+                if endpoint == "security-rules":
+                    rule.update({"action": "allow", "from": ["trust"], "to": ["untrust"]})
+                elif endpoint == "nat-rules":
+                    rule.update({"from": ["trust"], "to": ["untrust"], "source": ["any"]})
+                else:
+                    rule.update({"action": "no-decrypt"})
+                payload = {"data": [rule]}
+
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return payload
+
+                return Response()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "policy-snapshot.json"
+            session = SnapshotSession()
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch("main.initialize_api_session", return_value=session),
+            ):
+                snapshot = main.main(
+                    AppConfig(),
+                    run_objects="EthernetInterface",
+                    snapshot_current_data=True,
+                    snapshot_policy=True,
+                    snapshot_output=str(output_path),
+                    object_scope="folder:Customer-FW",
+                    network_scope="snippet:Customer-FW-Network",
+                    policy_scope="folder:Customer-FW",
+                )
+
+            output = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(snapshot, output)
+        self.assertEqual("folder:Customer-FW", output["metadata"]["scopes"]["policy"])
+        self.assertEqual("security-rules-pre", output["security_pre_rules"][0]["name"])
+        self.assertEqual("nat-rules-post", output["nat_post_rules"][0]["name"])
+        self.assertEqual([], output["fetch_failures"])
+        policy_calls = [call for call in session.calls if "security-rules" in call["url"]]
+        self.assertEqual({"pre", "post"}, {call["params"]["position"] for call in policy_calls})
+
+    def test_snapshot_policy_records_rulebase_fetch_failures(self):
+        class FailingPolicySession:
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                if "security-rules" in url and (params or {}).get("position") == "post":
+                    raise RuntimeError("post rulebase unavailable")
+
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return {"data": []}
+
+                return Response()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "policy-snapshot.json"
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch("main.initialize_api_session", return_value=FailingPolicySession()),
+            ):
+                snapshot = main.main(
+                    AppConfig(),
+                    run_objects="EthernetInterface",
+                    snapshot_current_data=True,
+                    snapshot_policy=True,
+                    snapshot_output=str(output_path),
+                    object_scope="folder:Customer-FW",
+                    network_scope="snippet:Customer-FW-Network",
+                    policy_scope="folder:Customer-FW",
+                )
+
+        failures = snapshot["fetch_failures"]
+        self.assertEqual(1, len([failure for failure in failures if failure["object_type"] == "SecurityRule" and failure["position"] == "post"]))
+        self.assertEqual([], snapshot["security_post_rules"])
 
     def test_network_report_writes_payloads_and_warnings_without_scope(self):
         fixture_path = Path(__file__).parent / "fixtures" / "panos" / "local_routing_unsupported_nodes.xml"

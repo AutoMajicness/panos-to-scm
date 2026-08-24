@@ -1,0 +1,47 @@
+{
+  "mode": "live-post",
+  "validation_plans": {
+    "objects": {
+      "conflicts": [],
+      "creates": [
+        {
+          "action": "create",
+          "current": null,
+          "desired": {
+            "ip_netmask": "192.0.2.10",
+            "name": "addr"
+          },
+          "name": "addr",
+          "object_type": "Address",
+          "reason": ""
+        }
+      ],
+      "posting_preview": {
+        "creates": [
+          {
+            "count": 1,
+            "names": [
+              "addr"
+            ],
+            "object_type": "Address"
+          }
+        ],
+        "updates": []
+      },
+      "remediation": [],
+      "skips": [],
+      "summary": {
+        "conflicts": 0,
+        "creates": 1,
+        "skips": 0,
+        "unsupported": 0,
+        "updates": 0,
+        "warnings": 0
+      },
+      "unsupported": [],
+      "updates": [],
+      "warning_summary": {},
+      "warnings": []
+    }
+  }
+}

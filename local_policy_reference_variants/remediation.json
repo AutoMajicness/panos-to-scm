@@ -1,0 +1,43 @@
+[
+  {
+    "action": "Include referenced policy dependency objects such as zones, addresses, services, applications, schedules, profile groups, or decryption profiles, or provide them in --current-data.",
+    "classification": "missing_dependency",
+    "code": "missing-policy-reference",
+    "count": 5,
+    "examples": [
+      {
+        "message": "Reference 'trust' was not found in generated payloads or current SCM data for Zones; include that object type in the migration or verify it already exists in the target tenant before posting.",
+        "name": "allow-web",
+        "object_type": "security_pre_rules",
+        "path": "from"
+      },
+      {
+        "message": "Reference 'strict-profiles' was not found in generated payloads or current SCM data for ProfileGroup; include that object type in the migration or verify it already exists in the target tenant before posting.",
+        "name": "allow-web",
+        "object_type": "security_pre_rules",
+        "path": "profile_setting.group"
+      },
+      {
+        "message": "Reference 'business-hours' was not found in generated payloads or current SCM data for Schedule; include that object type in the migration or verify it already exists in the target tenant before posting.",
+        "name": "allow-web",
+        "object_type": "security_pre_rules",
+        "path": "schedule"
+      },
+      {
+        "message": "Reference 'tcp-443' was not found in generated payloads or current SCM data for Service or ServiceGroup; include that object type in the migration or verify it already exists in the target tenant before posting.",
+        "name": "allow-web",
+        "object_type": "security_pre_rules",
+        "path": "service"
+      },
+      {
+        "message": "Reference 'untrust' was not found in generated payloads or current SCM data for Zones; include that object type in the migration or verify it already exists in the target tenant before posting.",
+        "name": "allow-web",
+        "object_type": "security_pre_rules",
+        "path": "to"
+      }
+    ],
+    "object_types": {
+      "security_pre_rules": 5
+    }
+  }
+]

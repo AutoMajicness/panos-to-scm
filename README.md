@@ -29,7 +29,7 @@ Python 3.10 or newer is required.
 ### Step 3: SCM and PANOS Credentials
 - **Common Services IAM account**
   - **Generate Service Account** Directions -> https://docs.paloaltonetworks.com/common-services/identity-and-access-access-management/manage-identity-and-access/add-service-accounts
-- **SCM Credentials**: Live SCM commands automatically load the credentials needed to request an access token from `$HOME/.panapi/config.yml`; no credential flags are required. Set `PANAPI_CONFIG` only when using a different file.
+- **SCM Credentials**: Interactive terminal runs prompt for Tenant ID, Client ID, and Client Secret for each customer run. Credentials are held in memory only and are not written to the PAN-API file. Use `--use-config` to reuse `$HOME/.panapi/config.yml`, or use the configured file automatically from non-interactive execution. Set `PANAPI_CONFIG` when using a different file.
   - **How to get there**:
   - **Window**s: `C:\users\<username>\.panapi\config.yml`
   - **MacOS**: `/Users/<username>/.panapi/config.yml`
@@ -51,6 +51,41 @@ palo_api_token: xxxxxxxxxxxxxxxxxxxxxx
 ```
 
 ### Step 4: Executing main.py for PAN-OS
+
+For a per-customer interactive SCM run, start the script normally and enter the credentials when prompted:
+
+```bash
+python3 main.py \
+  --target-folder Customer-FW \
+  --object-scope folder:Customer-FW \
+  --network-scope snippet:Customer-FW-network \
+  --policy-scope folder:Customer-FW
+```
+
+The Tenant ID, Client ID, and Client Secret are used only for that process. Add `--use-config` when you intentionally want to use the credentials already stored in `PANAPI_CONFIG`.
+
+For folder-first current-state collection, SCM resolves the folder's associated snippets automatically. This is the shortest As-Built data command:
+
+```bash
+python3 main.py \
+  --snapshot-current-data \
+  --snapshot-policy \
+  --folder Customer-FW
+```
+
+Use `--resolve-folder Customer-FW` to inspect the associated snippets without collecting data. All snippets are fetched in SCM priority order; duplicate names use the higher-priority result and retain `_scm_scope` provenance. Explicit `--object-scope`, `--policy-scope`, `--network-scope`, or `--target-snippet` values override automatic resolution. Live network posting requires an explicit target snippet when a folder has multiple associated snippets.
+
+Nested folders are resolved by their parent hierarchy. If a folder name is duplicated, an interactive run lists the full paths and asks you to choose one. For automation, use `--folder-path` or `--folder-id`:
+
+```bash
+python3 main.py \
+  --snapshot-current-data \
+  --snapshot-policy \
+  --folder-path "CSM-PA440/PA-440/PA-440"
+```
+
+Nested snapshots include parent-folder policies and snippets by default and retain source-folder metadata. Use `--leaf-only` to collect only the selected folder. SCM configuration APIs scope objects and policies by folder name; if duplicate folders cannot be distinguished by the tenant's configuration endpoint, the script reports that limitation rather than silently selecting the wrong folder.
+
 - If you run `main.py` as is, it'll ask if you want to fetch a new `running_config.xml` from your PANOS Endpoint
 - If you want to use an offline XML file, then default XML file name must be in project directory and named `running_config.xml`
 - Otherwise, it'll get the full running config from your PANOS device(controlled at $HOME/.panapi/config.yml)
@@ -171,6 +206,8 @@ Use `--limit 1` for a quick parser smoke or repeat `--config-file path/to/config
 - Check/create target folder and network snippet without importing: `--setup-scm-target --create-scm-target --target-folder FW1 --target-snippet FW1-network`
 - Let a live import provision missing target resources: `--target-folder FW1 --target-snippet FW1-network`
 - Fetch current SCM object data into validation JSON: `--snapshot-current-data --snapshot-output /tmp/current-data.json`
+- Fetch current SCM object, network, and policy rulebase data for As-Built documentation: `--snapshot-current-data --snapshot-policy --snapshot-output /tmp/current-data.json --object-scope folder:Customer-FW --network-scope snippet:Customer-FW-network --policy-scope folder:Customer-FW`
+- Default generated artifacts are written to a customer folder in the current working directory. Use `--output-folder PATH` to override that location.
 - Include common policy dependency object types in a snapshot: `--snapshot-policy-dependencies`
 - Allow guarded live object/profile posting: `--post-objects`
 - Allow guarded live policy/NAT posting: `--post-policy`

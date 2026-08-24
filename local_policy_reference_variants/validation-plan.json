@@ -1,0 +1,224 @@
+{
+  "conflicts": [],
+  "creates": [
+    {
+      "action": "create",
+      "current": null,
+      "desired": {
+        "ip_netmask": "10.10.10.0/24",
+        "name": "users-net",
+        "tag": []
+      },
+      "name": "users-net",
+      "object_type": "Address",
+      "reason": ""
+    },
+    {
+      "action": "create",
+      "current": null,
+      "desired": {
+        "ip_netmask": "192.0.2.10/32",
+        "name": "web-private",
+        "tag": []
+      },
+      "name": "web-private",
+      "object_type": "Address",
+      "reason": ""
+    },
+    {
+      "action": "create",
+      "current": null,
+      "desired": {
+        "ip_netmask": "203.0.113.10/32",
+        "name": "web-public",
+        "tag": []
+      },
+      "name": "web-public",
+      "object_type": "Address",
+      "reason": ""
+    },
+    {
+      "action": "create",
+      "current": null,
+      "desired": {
+        "action": "allow",
+        "application": [
+          "ssl"
+        ],
+        "category": [
+          "any"
+        ],
+        "destination": [
+          "web-public"
+        ],
+        "destination_hip": [
+          "any"
+        ],
+        "disabled": false,
+        "from": [
+          "trust"
+        ],
+        "log_setting": "Cortex Data Lake",
+        "name": "allow-web",
+        "negate_destination": false,
+        "negate_source": false,
+        "profile_setting": {
+          "group": [
+            "strict-profiles"
+          ]
+        },
+        "schedule": "business-hours",
+        "service": [
+          "tcp-443"
+        ],
+        "source": [
+          "users-net"
+        ],
+        "source_hip": [
+          "any"
+        ],
+        "source_user": [
+          "any"
+        ],
+        "tag": [],
+        "to": [
+          "untrust"
+        ]
+      },
+      "name": "allow-web",
+      "object_type": "security_pre_rules",
+      "reason": ""
+    }
+  ],
+  "posting_preview": {
+    "creates": [
+      {
+        "count": 3,
+        "names": [
+          "users-net",
+          "web-private",
+          "web-public"
+        ],
+        "object_type": "Address"
+      },
+      {
+        "count": 1,
+        "names": [
+          "allow-web"
+        ],
+        "object_type": "security_pre_rules"
+      }
+    ],
+    "updates": []
+  },
+  "remediation": [
+    {
+      "action": "Include referenced policy dependency objects such as zones, addresses, services, applications, schedules, profile groups, or decryption profiles, or provide them in --current-data.",
+      "classification": "missing_dependency",
+      "code": "missing-policy-reference",
+      "count": 5,
+      "examples": [
+        {
+          "message": "Reference 'trust' was not found in generated payloads or current SCM data for Zones; include that object type in the migration or verify it already exists in the target tenant before posting.",
+          "name": "allow-web",
+          "object_type": "security_pre_rules",
+          "path": "from"
+        },
+        {
+          "message": "Reference 'strict-profiles' was not found in generated payloads or current SCM data for ProfileGroup; include that object type in the migration or verify it already exists in the target tenant before posting.",
+          "name": "allow-web",
+          "object_type": "security_pre_rules",
+          "path": "profile_setting.group"
+        },
+        {
+          "message": "Reference 'business-hours' was not found in generated payloads or current SCM data for Schedule; include that object type in the migration or verify it already exists in the target tenant before posting.",
+          "name": "allow-web",
+          "object_type": "security_pre_rules",
+          "path": "schedule"
+        },
+        {
+          "message": "Reference 'tcp-443' was not found in generated payloads or current SCM data for Service or ServiceGroup; include that object type in the migration or verify it already exists in the target tenant before posting.",
+          "name": "allow-web",
+          "object_type": "security_pre_rules",
+          "path": "service"
+        },
+        {
+          "message": "Reference 'untrust' was not found in generated payloads or current SCM data for Zones; include that object type in the migration or verify it already exists in the target tenant before posting.",
+          "name": "allow-web",
+          "object_type": "security_pre_rules",
+          "path": "to"
+        }
+      ],
+      "object_types": {
+        "security_pre_rules": 5
+      }
+    }
+  ],
+  "skips": [],
+  "summary": {
+    "conflicts": 0,
+    "creates": 4,
+    "skips": 0,
+    "unsupported": 0,
+    "updates": 0,
+    "warnings": 5
+  },
+  "unsupported": [],
+  "updates": [],
+  "warning_summary": {
+    "missing-policy-reference": {
+      "classification": "missing_dependency",
+      "count": 5,
+      "object_types": {
+        "security_pre_rules": 5
+      }
+    }
+  },
+  "warnings": [
+    {
+      "classification": "missing_dependency",
+      "code": "missing-policy-reference",
+      "message": "Reference 'trust' was not found in generated payloads or current SCM data for Zones; include that object type in the migration or verify it already exists in the target tenant before posting.",
+      "name": "allow-web",
+      "object_type": "security_pre_rules",
+      "path": "from",
+      "severity": "warning"
+    },
+    {
+      "classification": "missing_dependency",
+      "code": "missing-policy-reference",
+      "message": "Reference 'strict-profiles' was not found in generated payloads or current SCM data for ProfileGroup; include that object type in the migration or verify it already exists in the target tenant before posting.",
+      "name": "allow-web",
+      "object_type": "security_pre_rules",
+      "path": "profile_setting.group",
+      "severity": "warning"
+    },
+    {
+      "classification": "missing_dependency",
+      "code": "missing-policy-reference",
+      "message": "Reference 'business-hours' was not found in generated payloads or current SCM data for Schedule; include that object type in the migration or verify it already exists in the target tenant before posting.",
+      "name": "allow-web",
+      "object_type": "security_pre_rules",
+      "path": "schedule",
+      "severity": "warning"
+    },
+    {
+      "classification": "missing_dependency",
+      "code": "missing-policy-reference",
+      "message": "Reference 'tcp-443' was not found in generated payloads or current SCM data for Service or ServiceGroup; include that object type in the migration or verify it already exists in the target tenant before posting.",
+      "name": "allow-web",
+      "object_type": "security_pre_rules",
+      "path": "service",
+      "severity": "warning"
+    },
+    {
+      "classification": "missing_dependency",
+      "code": "missing-policy-reference",
+      "message": "Reference 'untrust' was not found in generated payloads or current SCM data for Zones; include that object type in the migration or verify it already exists in the target tenant before posting.",
+      "name": "allow-web",
+      "object_type": "security_pre_rules",
+      "path": "to",
+      "severity": "warning"
+    }
+  ]
+}

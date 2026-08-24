@@ -11,8 +11,11 @@ import scm.obj as obj
 import argparse
 import json
 import sys
+import getpass
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from pathlib import Path
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -74,11 +77,13 @@ POLICY_DEPENDENCY_OBJECT_TYPE_NAMES = [
 class CliError(Exception):
     """Raised for invalid non-interactive CLI usage."""
 
-def setup_logging():
+def setup_logging(log_path="debug-log.txt"):
     logger = logging.getLogger('')
     logger.setLevel(logging.DEBUG)
-    
-    handler = TimedRotatingFileHandler('debug-log.txt', utc=True, when="midnight", interval=1, backupCount=1)
+
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = TimedRotatingFileHandler(str(log_path), utc=True, when="midnight", interval=1, backupCount=1)
     handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(handler)
 
@@ -86,6 +91,56 @@ def setup_logging():
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(console_handler)
+
+
+_GENERIC_CUSTOMER_NAMES = {
+    "", "running_config", "running-config", "config", "configuration",
+    "input", "sample", "parsed", "current-data",
+}
+
+
+def _safe_customer_name(value):
+    """Convert an inferred customer identifier into a safe readable folder name."""
+    value = str(value or "").strip()
+    if value.lower().startswith(("folder:", "snippet:", "device:")):
+        value = value.split(":", 1)[1].strip()
+    value = re.sub(r"\.(?:xml|json|txt|conf|cfg)$", "", value, flags=re.IGNORECASE).strip()
+    if value.lower() in _GENERIC_CUSTOMER_NAMES:
+        return ""
+    value = re.sub(r"[^A-Za-z0-9._ -]+", "_", value)
+    value = re.sub(r"\s+", " ", value).strip(" ._-")
+    return value or ""
+
+
+def infer_customer_name(*, target_folder="", config_file="", json_file=""):
+    """Infer a customer folder name from the most customer-specific input."""
+    candidates = [
+        target_folder,
+        Path(config_file).name if config_file else "",
+        Path(json_file).name if json_file else "",
+    ]
+    for candidate in candidates:
+        name = _safe_customer_name(candidate)
+        if name:
+            return name
+    return "SCM_Customer"
+
+
+def resolve_output_directory(*, output_folder="", target_folder="", config_file="", json_file="", cwd=None):
+    """Return and create the single directory used for default artifacts."""
+    base = Path(cwd) if cwd else Path.cwd()
+    output_dir = Path(output_folder) if output_folder else base / infer_customer_name(
+        target_folder=target_folder,
+        config_file=config_file,
+        json_file=json_file,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
+def default_output_path(output_dir, explicit_path, filename):
+    """Use an explicit artifact path or place the default filename in output_dir."""
+    return str(Path(explicit_path)) if explicit_path else str(Path(output_dir) / filename)
 
 def scope_param_from_cli(scope_arg):
     try:
@@ -176,6 +231,137 @@ def resolve_category_scopes(
             'snippet:Network-Stack',
         )
     return scopes
+
+
+def resolve_folder_scope(
+    api_session,
+    target_folder="",
+    target_snippet="",
+    network_scope="",
+    folder_path="",
+    folder_id="",
+    interactive=False,
+    leaf_only=False,
+    include_descendants=False,
+):
+    """Resolve a selected folder's effective hierarchy and linked snippets.
+
+    By default this is the selected folder plus its ancestors. Descendants are
+    separate configuration targets and are only included on explicit request.
+    """
+    from scm.setup import resolve_folder_hierarchy, resolve_snippets_from_folder
+
+    try:
+        result = resolve_folder_hierarchy(
+            api_session,
+            folder_name=target_folder,
+            folder_path=folder_path,
+            folder_id=folder_id,
+            interactive=interactive,
+        )
+    except ValueError as err:
+        raise CliError(str(err)) from err
+    folder_chain = result["folders"][-1:] if leaf_only else result["folders"]
+    collection_folders = list(folder_chain)
+    if include_descendants:
+        seen_folder_ids = set()
+        for folder in collection_folders:
+            folder_id = str(folder.get("id", ""))
+            if folder_id:
+                seen_folder_ids.add(folder_id)
+        for folder_record in result.get("descendant_folders", []):
+            leaf = folder_record.get("folders", [])[-1]
+            folder_id = str(leaf.get("id", ""))
+            if folder_id and folder_id in seen_folder_ids:
+                continue
+            if folder_id:
+                seen_folder_ids.add(folder_id)
+            collection_folders.append(leaf)
+
+    direct_snippets = []
+    snippets_by_folder = {}
+    scope_nodes = []
+    for folder in collection_folders:
+        snippet_result = resolve_snippets_from_folder(folder)
+        names = snippet_result["snippet_names"]
+        folder_path = next(
+            (
+                record.get("path", "")
+                for record in result.get("descendant_folders", [])
+                if record.get("folder_ids", []) and record["folder_ids"][-1] == folder.get("id")
+            ),
+            "/".join(result["folder_names"]),
+        )
+        snippets_by_folder[folder_path] = names
+        scope_nodes.append({
+            "scope": f"&folder={folder['name']}",
+            "source_type": "folder",
+            "source_name": folder.get("name", ""),
+            "source_id": folder.get("id", ""),
+            "source_path": folder_path,
+            "hierarchy_index": len(scope_nodes),
+        })
+        for snippet in snippet_result["snippets"]:
+            name = snippet["name"]
+            if name not in direct_snippets:
+                direct_snippets.append(name)
+            scope_nodes.append({
+                "scope": f"&snippet={name}",
+                "source_type": "snippet",
+                "source_name": name,
+                "source_id": "",
+                "source_path": folder_path,
+                "hierarchy_index": len(scope_nodes),
+                "association_priority": snippet.get("priority"),
+            })
+    if target_snippet:
+        names = [target_snippet]
+    elif network_scope:
+        names = [scope_resource_name(network_scope, "snippet") or network_scope]
+    else:
+        names = direct_snippets
+    if not names:
+        raise CliError(f"SCM folder '{result['path']}' has no associated snippets")
+    return {
+        **result,
+        "collection_folders": collection_folders,
+        "snippet_names": names,
+        "network_scopes": [node["scope"] for node in scope_nodes if node["scope"].startswith("&snippet=")],
+        "snippets_by_folder": snippets_by_folder,
+        "scope_nodes": scope_nodes,
+        # Keep the CLI form separate from the internal API query form.  The
+        # category resolver accepts folder:<name>; managers consume &folder=<name>.
+        "folder_scope": f"folder:{result['folder']['name']}",
+        "folder_scope_param": f"&folder={result['folder']['name']}",
+    }
+
+
+def merge_scoped_snapshot_results(results, include_provenance=False, dedupe_names=True):
+    """Merge ordered per-snippet snapshots, retaining higher-priority values."""
+    merged = {}
+    for source, snapshot in results:
+        scope_name = source.get("scope", "") if isinstance(source, dict) else source
+        for object_type, entries in snapshot.items():
+            destination = merged.setdefault(object_type, [])
+            existing_names = {entry.get("name") for entry in destination if isinstance(entry, dict)}
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    destination.append(entry)
+                    continue
+                name = entry.get("name")
+                if dedupe_names and name and name in existing_names:
+                    continue
+                enriched = dict(entry)
+                if include_provenance:
+                    enriched.setdefault("_scm_scope", scope_name)
+                    if isinstance(source, dict):
+                        enriched.setdefault("_scm_provenance", {
+                            key: value for key, value in source.items() if key != "scope"
+                        })
+                destination.append(enriched)
+                if dedupe_names and name:
+                    existing_names.add(name)
+    return merged
 
 
 def scope_resource_name(scope, resource_type):
@@ -281,10 +467,37 @@ def get_file_path_and_type(config, logger, parser_type=None, config_file="", fet
 
     return file_path, config_choice
 
-def initialize_api_session():
+def prompt_scm_credentials():
+    """Prompt for per-run SCM credentials without persisting them."""
+    print("Enter SCM credentials for this run. They will not be saved.")
+    tenant_id = input("SCM Tenant ID: ").strip()
+    client_id = input("SCM Client ID: ").strip()
+    client_secret = getpass.getpass("SCM Client Secret: ").strip()
+    missing = [
+        label
+        for label, value in (
+            ("Tenant ID", tenant_id),
+            ("Client ID", client_id),
+            ("Client Secret", client_secret),
+        )
+        if not value
+    ]
+    if missing:
+        raise CliError("Missing SCM credential value(s): " + ", ".join(missing))
+    return {
+        "tsg_id": tenant_id,
+        "client_id": client_id,
+        "client_secret": client_secret,
+    }
+
+
+def initialize_api_session(*, use_config=False):
     from api import PanApiSession
 
-    session = PanApiSession()
+    runtime_config = None
+    if sys.stdin.isatty() and not use_config:
+        runtime_config = prompt_scm_credentials()
+    session = PanApiSession(runtime_config=runtime_config)
     session.authenticate()
     return session
 
@@ -452,6 +665,7 @@ def write_plan_output(plan, plan_output, label):
     if not plan_output:
         return
     try:
+        Path(plan_output).parent.mkdir(parents=True, exist_ok=True)
         with open(plan_output, 'w') as file:
             json.dump(plan.to_dict(), file, indent=2, sort_keys=True)
             file.write('\n')
@@ -471,6 +685,7 @@ def write_json_file(output_path, payload, label):
     if not output_path:
         raise CliError(f"{label} output path is required")
     try:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, 'w') as file:
             json.dump(payload, file, indent=2, sort_keys=True)
             file.write('\n')
@@ -489,10 +704,140 @@ def build_current_data_snapshot(api_session, selected_obj_types, scope_param, co
         scope_param,
     )
     current_objects = manager.get_current_objects(manager.obj_types, max_workers=6, limit=config.limit)
-    return {
+    snapshot = {
         obj_type.__name__: current_objects.get(obj_type, [])
         for obj_type in manager.obj_types
     }
+    if manager.fetch_failures:
+        snapshot["fetch_failures"] = list(manager.fetch_failures)
+    return snapshot
+
+
+def _device_folder_values(device):
+    """Return normalized folder identifiers exposed by an SCM device record."""
+    values = []
+    for key in ("folder", "folder_name", "folder_path", "folder_id", "parent_folder"):
+        value = device.get(key)
+        if isinstance(value, dict):
+            value = value.get("id") or value.get("name") or value.get("path")
+        if isinstance(value, list):
+            values.extend(str(item).strip() for item in value if item)
+        elif value:
+            values.append(str(value).strip())
+    folders = device.get("folders")
+    if isinstance(folders, list):
+        for item in folders:
+            if isinstance(item, dict):
+                item = item.get("id") or item.get("name") or item.get("path")
+            if item:
+                values.append(str(item).strip())
+    return {value for value in values if value}
+
+
+def collect_device_inventory(api_session, folder_resolution=None, limit=200):
+    """Collect SCM onboarded-device inventory and optionally filter by folder hierarchy."""
+    endpoint = "/config/setup/v1/devices"
+    devices = []
+    failures = []
+    offset = 0
+    while True:
+        try:
+            page = api_session.get(endpoint, params={"limit": limit, "offset": offset})
+        except Exception as exc:  # noqa: BLE001
+            failures.append({
+                "object_type": "DeviceInventory",
+                "endpoint": endpoint,
+                "scope": "setup",
+                "error": str(exc),
+            })
+            break
+        if not isinstance(page, list):
+            page = []
+        devices.extend(item for item in page if isinstance(item, dict))
+        if len(page) < limit:
+            break
+        offset += limit
+
+    if not folder_resolution:
+        return devices, failures
+
+    records = folder_resolution.get("descendant_folders", [])
+    folder_names = set(folder_resolution.get("folder_names", []))
+    folder_ids = set(folder_resolution.get("folder_ids", []))
+    folder_paths = set()
+    for record in records:
+        folder_names.update(record.get("folder_names", []))
+        folder_ids.update(record.get("folder_ids", []))
+        if record.get("path"):
+            folder_paths.add(record["path"])
+
+    filtered = []
+    for device in devices:
+        values = _device_folder_values(device)
+        if not values or values.intersection(folder_names | folder_ids | folder_paths):
+            filtered.append(device)
+    return filtered, failures
+
+
+def _snapshot_scope_label(scope_param):
+    """Convert an internal SCM query scope to the public CLI form."""
+    text = str(scope_param or "").lstrip("&")
+    if "=" not in text:
+        return text
+    scope_type, scope_value = text.split("=", 1)
+    return f"{scope_type}:{scope_value}"
+
+
+def build_policy_snapshot(api_session, policy_scope, config, limit="10000"):
+    """Fetch SCM policy rulebases in their current pre/post order."""
+    def _rule_payloads(entries):
+        """Exclude folder/snippet container records returned by rule endpoints."""
+        rule_fields = {
+            "action", "from", "to", "source", "destination", "service",
+            "application", "category", "source_translation",
+            "destination_translation", "position", "disabled", "description",
+        }
+        return [
+            item for item in entries
+            if isinstance(item, dict) and item.get("name")
+            and any(field in item for field in rule_fields)
+        ]
+    manager = setup_scm_object_manager(
+        api_session,
+        [],
+        config.sec_obj,
+        config.nat_obj,
+        policy_scope,
+    )
+    policy_types = (
+        ("security", config.sec_obj),
+        ("nat", config.nat_obj),
+        ("decryption", config.decryption_rule_obj),
+        ("app_override", config.app_override_obj),
+    )
+    snapshot = {}
+    fetch_failures = []
+    for label, rule_type in policy_types:
+        for position in ("pre", "post"):
+            key = f"{label}_pre_rules" if position == "pre" else f"{label}_post_rules"
+            try:
+                snapshot[key] = _rule_payloads(manager.fetch_rules(rule_type, limit=limit, position=position))
+            except Exception as exc:  # noqa: BLE001
+                snapshot[key] = []
+                failure = {
+                    "object_type": rule_type.__name__,
+                    "position": position,
+                    "scope": policy_scope,
+                    "error": str(exc),
+                }
+                fetch_failures.append(failure)
+                manager.logger.error(
+                    "Unable to fetch current %s %s rules from SCM; continuing with an empty rulebase: %s",
+                    label,
+                    position,
+                    exc,
+                )
+    return snapshot, fetch_failures
 
 
 def parse_warning_codes(warning_codes):
@@ -721,9 +1066,11 @@ def build_live_report(
     }
 
 
-def markdown_report_path(file_path):
+def markdown_report_path(file_path, output_dir=None):
     if not file_path or not file_path.lower().endswith(".xml"):
         return ""
+    if output_dir:
+        return str(Path(output_dir) / "migration-report.md")
     return os.path.splitext(file_path)[0] + ".md"
 
 
@@ -742,10 +1089,11 @@ def write_markdown_import_report(
     scopes,
     validation_plans,
     live_report,
+    output_dir=None,
 ):
-    """Write an LLM-friendly import record beside the source XML."""
+    """Write an LLM-friendly import record in the resolved output directory."""
 
-    output_path = markdown_report_path(file_path)
+    output_path = markdown_report_path(file_path, output_dir=output_dir)
     if not output_path:
         return ""
 
@@ -877,10 +1225,17 @@ def main(
     validate_only=False,
     snapshot_current_data=False,
     snapshot_output="",
+    snapshot_policy=False,
     snapshot_policy_dependencies=False,
+    output_folder="",
     setup_scm_target=False,
     create_scm_target=False,
+    resolve_folder="",
     target_folder="",
+    folder_path="",
+    folder_id="",
+    leaf_only=False,
+    include_descendants=False,
     target_snippet="",
     parent_folder="ngfw-shared",
     associate_snippet=True,
@@ -906,11 +1261,36 @@ def main(
     interactive=False,
     panos_config_type="",
     device_group_name="",
+    use_config=False,
 ):
     try:
         start_time = time.time()
         file_path = json_file or config_file
+        output_dir = resolve_output_directory(
+            output_folder=output_folder,
+            target_folder=target_folder or folder_path or folder_id,
+            config_file=config_file or getattr(config, "xml_file_path", ""),
+            json_file=json_file,
+        )
+        snapshot_output = default_output_path(output_dir, snapshot_output, "current-data.json") if snapshot_current_data else snapshot_output
+        if network_report:
+            report_output = default_output_path(output_dir, report_output, "network-report.json")
+        elif snapshot_current_data and snapshot_policy:
+            report_output = report_output
+        if validate_only:
+            plan_output = default_output_path(output_dir, plan_output, "validation-plan.json")
+            remediation_output = default_output_path(output_dir, remediation_output, "remediation.json")
+        elif dry_run:
+            plan_output = default_output_path(output_dir, plan_output, "migration-plan.json")
+            remediation_output = default_output_path(output_dir, remediation_output, "remediation.json")
+        elif not snapshot_current_data and not network_report:
+            plan_output = default_output_path(output_dir, plan_output, "live-validation-plan.json")
+            remediation_output = default_output_path(output_dir, remediation_output, "live-remediation.json")
+            report_output = default_output_path(output_dir, report_output, "live-report.json")
+        if fetch_panos_config and not config_file:
+            config_file = str(output_dir / "running_config.xml")
         logger.info(f"Script started at {time.ctime(start_time)}")
+        logger.info(f"Output directory: {output_dir}")
         warnings_as_errors, warning_code_filter = strict_local_firewall_warning_settings(
             warnings_as_errors,
             warning_codes,
@@ -954,7 +1334,7 @@ def main(
             from scm import PanApiHandler
             from scm.setup import SetupTargetRequest, ensure_setup_target
 
-            api_session = PanApiHandler(initialize_api_session())
+            api_session = PanApiHandler(initialize_api_session(use_config=use_config))
             setup_result = ensure_setup_target(
                 api_session,
                 SetupTargetRequest(
@@ -971,6 +1351,22 @@ def main(
                 sys.exit(1)
             return setup_result
 
+        if resolve_folder:
+            from scm import PanApiHandler
+
+            api_session = PanApiHandler(initialize_api_session(use_config=use_config))
+            resolution = resolve_folder_scope(
+                api_session,
+                target_folder=resolve_folder,
+                folder_path=folder_path,
+                folder_id=folder_id,
+                interactive=interactive,
+                leaf_only=leaf_only,
+                include_descendants=include_descendants,
+            )
+            print(json.dumps(resolution, indent=2, sort_keys=True))
+            return resolution
+
         if snapshot_current_data:
             if not selected_obj_types:
                 selected_obj_types = get_supported_obj_types(config)
@@ -979,41 +1375,161 @@ def main(
                     [obj_type.__name__ for obj_type in selected_obj_types],
                 )
             needs_object_scope = bool(selected_regular_obj_types)
+            needs_policy_scope = bool(snapshot_policy)
             needs_network_scope = bool(selected_network_obj_types)
+            from scm import PanApiHandler
+
+            api_session = PanApiHandler(initialize_api_session(use_config=use_config))
+            folder_resolution = None
+            folder_selector_supplied = bool(target_folder or folder_path or folder_id)
+            if folder_selector_supplied and (
+                (needs_network_scope and not network_scope and not target_snippet)
+                or (needs_object_scope and not object_scope)
+                or (needs_policy_scope and not policy_scope)
+            ):
+                folder_resolution = resolve_folder_scope(
+                    api_session,
+                    target_folder=target_folder,
+                    folder_path=folder_path,
+                    folder_id=folder_id,
+                    interactive=interactive,
+                    leaf_only=leaf_only,
+                    include_descendants=include_descendants,
+                )
+                network_scope = f"snippet:{folder_resolution['snippet_names'][0]}"
             scopes = resolve_category_scopes(
                 scope,
-                object_scope,
-                policy_scope,
+                object_scope or (folder_resolution["folder_scope"] if folder_resolution else f"folder:{target_folder}" if target_folder else ""),
+                policy_scope or (folder_resolution["folder_scope"] if folder_resolution else f"folder:{target_folder}" if target_folder else ""),
                 network_scope,
                 interactive,
                 needs_object_scope,
-                False,
+                needs_policy_scope,
                 needs_network_scope,
             )
-            from scm import PanApiHandler
-
-            api_session = PanApiHandler(initialize_api_session())
             snapshot = {}
             if selected_regular_obj_types:
-                snapshot.update(
-                    build_current_data_snapshot(
+                if folder_resolution:
+                    object_results = []
+                    for source in folder_resolution["scope_nodes"]:
+                        object_results.append((
+                            source,
+                            build_current_data_snapshot(
+                                api_session,
+                                selected_regular_obj_types,
+                                source["scope"],
+                                config,
+                            ),
+                        ))
+                    snapshot.update(merge_scoped_snapshot_results(object_results, include_provenance=True, dedupe_names=False))
+                else:
+                    snapshot.update(build_current_data_snapshot(
                         api_session,
                         selected_regular_obj_types,
-                        scopes.get('object'),
+                        scopes.get("object"),
                         config,
-                    )
-                )
+                    ))
             if selected_network_obj_types:
-                snapshot.update(
-                    build_current_data_snapshot(
+                if folder_resolution:
+                    network_snapshot = merge_scoped_snapshot_results([
+                        (
+                            source,
+                            build_current_data_snapshot(
+                                api_session,
+                                selected_network_obj_types,
+                                source["scope"],
+                                config,
+                            ),
+                        )
+                        for source in folder_resolution["scope_nodes"]
+                    ], include_provenance=True, dedupe_names=False)
+                else:
+                    network_snapshot = build_current_data_snapshot(
                         api_session,
                         selected_network_obj_types,
-                        scopes.get('network'),
+                        scopes.get("network"),
                         config,
                     )
-                )
+                prior_failures = snapshot.get("fetch_failures", [])
+                snapshot.update(network_snapshot)
+                if prior_failures and network_snapshot.get("fetch_failures"):
+                    snapshot["fetch_failures"] = prior_failures + network_snapshot["fetch_failures"]
+            if snapshot_policy:
+                if folder_resolution:
+                    policy_results = []
+                    fetch_failures = []
+                    for source in folder_resolution["scope_nodes"]:
+                        policy_snapshot, failures = build_policy_snapshot(
+                            api_session,
+                            source["scope"],
+                            config,
+                            limit=config.limit,
+                        )
+                        policy_results.append((
+                            source,
+                            policy_snapshot,
+                        ))
+                        fetch_failures.extend(failures)
+                    snapshot.update(merge_scoped_snapshot_results(policy_results, include_provenance=True, dedupe_names=False))
+                else:
+                    policy_snapshot, fetch_failures = build_policy_snapshot(
+                        api_session,
+                        scopes.get("policy"),
+                        config,
+                        limit=config.limit,
+                    )
+                    snapshot.update(policy_snapshot)
+                existing_fetch_failures = snapshot.get("fetch_failures", [])
+                snapshot["fetch_failures"] = existing_fetch_failures + fetch_failures
+                snapshot["metadata"] = {
+                    "source": "panos-to-scm",
+                    "snapshot_type": "current-data-with-policy",
+                    "scopes": {
+                        category: _snapshot_scope_label(value)
+                        for category, value in scopes.items()
+                    },
+                }
+            device_inventory, inventory_failures = collect_device_inventory(
+                api_session,
+                folder_resolution=folder_resolution,
+                limit=min(int(config.limit or 200), 2000),
+            )
+            snapshot["device_inventory"] = device_inventory
+            if inventory_failures:
+                snapshot["fetch_failures"] = snapshot.get("fetch_failures", []) + inventory_failures
+            if folder_resolution:
+                snapshot.setdefault("metadata", {
+                    "source": "panos-to-scm",
+                    "snapshot_type": "current-data-with-policy" if snapshot_policy else "current-data",
+                    "scopes": {},
+                })
+                snapshot["metadata"]["scopes"]["folder"] = folder_resolution["path"]
+                snapshot["metadata"]["scopes"]["folder_id"] = folder_resolution["folder"].get("id", "")
+                snapshot["metadata"]["scopes"]["parent_folders"] = folder_resolution["folder_names"][:-1]
+                snapshot["metadata"]["scopes"]["snippets"] = folder_resolution["snippet_names"]
+                snapshot["metadata"]["scopes"]["collection_folders"] = [
+                    folder.get("name", "") for folder in folder_resolution.get("collection_folders", [])
+                ]
+                snapshot["metadata"]["scopes"]["scope_nodes"] = folder_resolution["scope_nodes"]
+                snapshot["metadata"]["scopes"]["descendant_folders"] = [
+                    record.get("path", "") for record in folder_resolution.get("descendant_folders", [])
+                ]
+                snapshot["metadata"]["scopes"]["inventory"] = "folder-hierarchy"
+                snapshot["metadata"]["folder_snippets"] = folder_resolution["snippets_by_folder"]
+            snapshot.setdefault("metadata", {
+                "source": "panos-to-scm",
+                "snapshot_type": "current-data-with-policy" if snapshot_policy else "current-data",
+                "scopes": {},
+            })
+            snapshot["metadata"]["management_mode"] = "scm_managed"
             write_json_file(snapshot_output, snapshot, "Current data snapshot")
-            summary = {object_type: len(entries) for object_type, entries in sorted(snapshot.items())}
+            summary = {
+                object_type: len(entries)
+                for object_type, entries in sorted(snapshot.items())
+                if isinstance(entries, list)
+            }
+            if snapshot_policy:
+                summary["fetch_failures"] = len(snapshot.get("fetch_failures", []))
             logger.info(f"Current data snapshot summary: {json.dumps(summary, sort_keys=True)}")
             print(json.dumps(summary, indent=2, sort_keys=True))
             return snapshot
@@ -1150,15 +1666,17 @@ def main(
                 sys.exit(1)
             return plan
 
+        folder_selector_supplied = bool(target_folder or folder_path or folder_id)
+        defer_folder_network_scope = bool(folder_selector_supplied and not network_scope and not target_snippet)
         scopes = resolve_category_scopes(
             scope,
-            object_scope or (f"folder:{target_folder}" if target_folder else ""),
-            policy_scope or (f"folder:{target_folder}" if target_folder else ""),
+            object_scope or (f"folder:{target_folder}" if target_folder and not folder_path and not folder_id else ""),
+            policy_scope or (f"folder:{target_folder}" if target_folder and not folder_path and not folder_id else ""),
             network_scope or (f"snippet:{target_snippet}" if target_snippet else ""),
             interactive,
             needs_object_scope,
             needs_policy_scope,
-            needs_network_scope,
+            needs_network_scope and not defer_folder_network_scope,
         )
 
         if dry_run:
@@ -1250,7 +1768,36 @@ def main(
 
         from scm import PanApiHandler
 
-        api_session = PanApiHandler(initialize_api_session())
+        api_session = PanApiHandler(initialize_api_session(use_config=use_config))
+        folder_resolution = None
+        if folder_selector_supplied and (
+            (needs_network_scope and not network_scope and not target_snippet)
+            or (needs_object_scope and not object_scope)
+            or (needs_policy_scope and not policy_scope)
+        ):
+            folder_resolution = resolve_folder_scope(
+                api_session,
+                target_folder=target_folder,
+                folder_path=folder_path,
+                folder_id=folder_id,
+                interactive=interactive,
+                leaf_only=leaf_only,
+                include_descendants=include_descendants,
+            )
+            scopes["object"] = scopes.get("object") or folder_resolution["folder_scope_param"]
+            scopes["policy"] = scopes.get("policy") or folder_resolution["folder_scope_param"]
+            scopes["network"] = folder_resolution["network_scopes"][0]
+            if len(folder_resolution["network_scopes"]) > 1 and selected_network_obj_types:
+                raise CliError(
+                    "Folder resolves to multiple snippets. Live network posting requires an explicit "
+                    "--target-snippet or --network-scope; use --snapshot-current-data to collect all "
+                    "associated snippets."
+                )
+            logger.info(
+                "Resolved SCM folder '%s' to snippets: %s",
+                target_folder,
+                ", ".join(folder_resolution["snippet_names"]),
+            )
         prepare_import_target(
             api_session,
             scopes,
@@ -1320,6 +1867,7 @@ def main(
             scopes=scopes,
             validation_plans=validation_plans,
             live_report=live_report,
+            output_dir=output_dir,
         )
         live_report["markdown_report"] = markdown_path
 
@@ -1349,7 +1897,6 @@ def main(
     logger.info(f"Final Script execution time: {complete_time - script_begin_time:.2f} seconds")
 
 if __name__ == "__main__":
-    setup_logging()
     begin_time = time.time()
     parser_config = AppConfig()
 
@@ -1372,16 +1919,24 @@ if __name__ == "__main__":
     parser.add_argument('--network-scope', action='store', default="", help="SCM scope for network stack objects such as zones. Falls back to --scope.")
     parser.add_argument('--fetch-panos-config', action='store_true', help="Retrieve running PAN-OS config before parsing")
     parser.add_argument('--interactive', action='store_true', help="Allow legacy prompts for missing CLI values")
+    parser.add_argument('--use-config', action='store_true', help="Use PANAPI_CONFIG credentials instead of prompting for SCM credentials in an interactive terminal")
     parser.add_argument('--panos-config-type', choices=['local', 'panorama/shared', 'panorama/device-group'], default="", help="PAN-OS XML scope type for non-interactive parsing")
     parser.add_argument('--device-group', action='store', default="", help="Panorama device-group name when using panorama/device-group")
     parser.add_argument('--dry-run', action='store_true', help="Build a local migration plan without authenticating to SCM or writing changes")
     parser.add_argument('--validate-only', action='store_true', help="Run parser/planner validation without SCM authentication or scope prompts; exits 1 on conflicts or unsupported entries")
     parser.add_argument('--snapshot-current-data', action='store_true', help="Fetch current SCM objects into --current-data compatible JSON and exit")
     parser.add_argument('--snapshot-output', action='store', default="", help="Write --snapshot-current-data JSON to this path")
+    parser.add_argument('--snapshot-policy', action='store_true', help="With --snapshot-current-data, include pre/post security, NAT, decryption, and application-override rulebases")
     parser.add_argument('--snapshot-policy-dependencies', action='store_true', help="With --snapshot-current-data, include common policy dependency object types")
+    parser.add_argument('--output-folder', action='store', default="", help="Directory for all default generated artifacts; otherwise a customer folder is created in the current working directory")
     parser.add_argument('--setup-scm-target', action='store_true', help="Check or create the target SCM folder/snippet pair and print the resulting scopes")
     parser.add_argument('--create-scm-target', action='store_true', help="With --setup-scm-target, create missing folder/snippet setup resources")
-    parser.add_argument('--target-folder', action='store', default="", help="Target SCM folder name for migrated objects and policies")
+    parser.add_argument('--resolve-folder', action='store', default="", metavar='FOLDER', help="Show the snippets associated with an SCM folder and exit")
+    parser.add_argument('--target-folder', '--folder', dest='target_folder', action='store', default="", help="SCM folder containing the object and policy scope; associated snippets are resolved automatically")
+    parser.add_argument('--folder-path', action='store', default="", help="Exact SCM folder path, for example CSM-PA440/PA-440/PA-440")
+    parser.add_argument('--folder-id', action='store', default="", help="Exact SCM folder UUID")
+    parser.add_argument('--leaf-only', action='store_true', help="With a nested folder, collect only the selected leaf folder instead of inherited parent folders")
+    parser.add_argument('--include-descendants', action='store_true', help="With --folder-path, also collect descendant folders and their linked snippets")
     parser.add_argument('--target-snippet', action='store', default="", help="Target SCM snippet name for migrated network stack objects")
     parser.add_argument('--parent-folder', action='store', default="ngfw-shared", help="Parent folder for --setup-scm-target creation. Defaults to ngfw-shared, the API value for All Firewalls.")
     parser.add_argument('--no-associate-snippet', action='store_true', help="Do not associate the target snippet when creating the target folder")
@@ -1398,6 +1953,13 @@ if __name__ == "__main__":
     parser.add_argument('--remediation-output', action='store', default="", help="Write grouped warning remediation JSON without full payloads")
     parser.add_argument('--current-data', action='store', default="", help="Offline current SCM data JSON for dry-run or validation comparison")
     args = parser.parse_args()
-    config = parser_config if args.dry_run or args.validate_only or args.network_report else ConfigurationManager().app_config
+    cli_output_dir = resolve_output_directory(
+        output_folder=args.output_folder,
+        target_folder=args.target_folder,
+        config_file=args.config_file,
+        json_file=args.json,
+    )
+    setup_logging(cli_output_dir / "debug-log.txt")
+    config = parser_config
     
-    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, validate_only=args.validate_only, snapshot_current_data=args.snapshot_current_data, snapshot_output=args.snapshot_output, snapshot_policy_dependencies=args.snapshot_policy_dependencies, setup_scm_target=args.setup_scm_target, create_scm_target=args.create_scm_target, target_folder=args.target_folder, target_snippet=args.target_snippet, parent_folder=args.parent_folder, associate_snippet=not args.no_associate_snippet, post_objects=args.post_objects, post_policy=args.post_policy, post_network=args.post_network, warnings_as_errors=args.warnings_as_errors, warning_codes=args.warning_codes, strict_local_firewall=args.strict_local_firewall, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, remediation_output=args.remediation_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group)
+    main(config, run_objects=args.objects, run_security=args.security_rules, run_app_override=args.app_override_rules, run_decrypt_rules=args.decryption_rules, run_nat=args.nat_rules, run_all=args.all, json_file=args.json, dry_run=args.dry_run, validate_only=args.validate_only, snapshot_current_data=args.snapshot_current_data, snapshot_output=args.snapshot_output, snapshot_policy=args.snapshot_policy, snapshot_policy_dependencies=args.snapshot_policy_dependencies, output_folder=args.output_folder, setup_scm_target=args.setup_scm_target, create_scm_target=args.create_scm_target, resolve_folder=args.resolve_folder, target_folder=args.target_folder, folder_path=args.folder_path, folder_id=args.folder_id, leaf_only=args.leaf_only, include_descendants=args.include_descendants, target_snippet=args.target_snippet, parent_folder=args.parent_folder, associate_snippet=not args.no_associate_snippet, post_objects=args.post_objects, post_policy=args.post_policy, post_network=args.post_network, warnings_as_errors=args.warnings_as_errors, warning_codes=args.warning_codes, strict_local_firewall=args.strict_local_firewall, network_report=args.network_report, conflict_policy=args.conflict_policy, plan_output=args.plan_output, report_output=args.report_output, remediation_output=args.remediation_output, current_data_file=args.current_data, parser_type=args.parser, config_file=args.config_file, scope=args.scope, object_scope=args.object_scope, policy_scope=args.policy_scope, network_scope=args.network_scope, fetch_panos_config=args.fetch_panos_config, interactive=args.interactive, panos_config_type=args.panos_config_type, device_group_name=args.device_group, use_config=args.use_config)

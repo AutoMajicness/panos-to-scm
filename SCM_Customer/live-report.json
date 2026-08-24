@@ -1,0 +1,46 @@
+{
+  "fetch_failures": [
+    {
+      "error": "GET failed for https://api.strata.paloaltonetworks.com/config/objects/v1/addresses?folder=All&limit=50&offset=0: 'TokenSession' object has no attribute 'get'",
+      "object_type": "Address",
+      "scope": "&folder=All"
+    }
+  ],
+  "final_snapshots": {
+    "network": {},
+    "objects": {
+      "Address": 0
+    }
+  },
+  "markdown_report": "",
+  "mode": "live-post",
+  "rule_order_verification": [],
+  "scopes": {
+    "object": "&folder=All"
+  },
+  "source_config": "/tmp/tmpev38bsmt/parsed.json",
+  "summary": {
+    "fetch_failures": 1,
+    "network_snapshot_types": 0,
+    "object_snapshot_types": 1,
+    "rule_order_checks": 0,
+    "rule_order_unverified": 0,
+    "rule_order_verified": 0,
+    "validation_phases": 1
+  },
+  "validation": {
+    "objects": {
+      "summary": {
+        "blockers": 0,
+        "conflicts": 0,
+        "creates": 1,
+        "skips": 0,
+        "unsupported": 0,
+        "updates": 0,
+        "warning_blockers": 0,
+        "warnings": 0
+      },
+      "warning_summary": {}
+    }
+  }
+}
