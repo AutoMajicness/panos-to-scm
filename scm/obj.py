@@ -21,11 +21,10 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 '''
 
-from scm import PanApiHandler
-
 class PanApiHandler:
     """Base class for Pan objects."""
     _endpoint = None  # Default endpoint
+    _scope_in_payload = False
 
     @classmethod
     def get_endpoint(cls):
@@ -34,6 +33,10 @@ class PanApiHandler:
             raise NotImplementedError("Endpoint not defined for this object type")
         return cls._endpoint
 
+    @classmethod
+    def uses_payload_scope(cls):
+        return cls._scope_in_payload
+
 class SecurityRule(PanApiHandler):
     _endpoint = "/sse/config/v1/security-rules?"
 
@@ -41,23 +44,136 @@ class NatRule(PanApiHandler):
     _endpoint = "/config/network/v1/nat-rules?"
 
 class Zones(PanApiHandler):
-    _endpoint = "/config/network/v1/zones?"
+    _endpoint = "/config/network/v1/zones"
+    _scope_in_payload = True
+
+class InterfaceManagementProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/interface-management-profiles"
+    _scope_in_payload = True
+
+class ZoneProtectionProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/zone-protection-profiles"
+    _scope_in_payload = True
+
+class DHCPInterface(PanApiHandler):
+    _endpoint = "/config/network/v1/dhcp-interfaces"
+    _scope_in_payload = True
+
+class AggregateInterface(PanApiHandler):
+    _endpoint = "/config/network/v1/aggregate-interfaces"
+    _scope_in_payload = True
+
+class EthernetInterface(PanApiHandler):
+    _endpoint = "/config/network/v1/ethernet-interfaces"
+    _scope_in_payload = True
+
+class Layer2Subinterface(PanApiHandler):
+    _endpoint = "/config/network/v1/layer2-subinterfaces"
+    _scope_in_payload = True
+
+class Layer3Subinterface(PanApiHandler):
+    _endpoint = "/config/network/v1/layer3-subinterfaces"
+    _scope_in_payload = True
+
+class VlanInterface(PanApiHandler):
+    _endpoint = "/config/network/v1/vlan-interfaces"
+    _scope_in_payload = True
+
+class TunnelInterface(PanApiHandler):
+    _endpoint = "/config/network/v1/tunnel-interfaces"
+    _scope_in_payload = True
+
+class LoopbackInterface(PanApiHandler):
+    _endpoint = "/config/network/v1/loopback-interfaces"
+    _scope_in_payload = True
+
+class OSPFAuthProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/ospf-auth-profiles"
+    _scope_in_payload = True
+
+class BgpAuthProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/bgp-auth-profiles"
+    _scope_in_payload = True
+
+class BgpAddressFamilyProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/bgp-address-family-profiles"
+    _scope_in_payload = True
+
+class BgpFilteringProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/bgp-filtering-profiles"
+    _scope_in_payload = True
+
+class LogicalRouter(PanApiHandler):
+    _endpoint = "/config/network/v1/logical-routers"
+    _scope_in_payload = True
+
+class RoutePrefixList(PanApiHandler):
+    _endpoint = "/config/network/v1/route-prefix-lists"
+    _scope_in_payload = True
+
+class RouteAccessList(PanApiHandler):
+    _endpoint = "/config/network/v1/route-access-lists"
+    _scope_in_payload = True
+
+class RouteCommunityList(PanApiHandler):
+    _endpoint = "/config/network/v1/route-community-lists"
+    _scope_in_payload = True
+
+class RoutePathAccessList(PanApiHandler):
+    _endpoint = "/config/network/v1/route-path-access-lists"
+    _scope_in_payload = True
+
+class BgpRouteMap(PanApiHandler):
+    _endpoint = "/config/network/v1/bgp-route-maps"
+    _scope_in_payload = True
+
+class BgpRouteMapRedistribution(PanApiHandler):
+    _endpoint = "/config/network/v1/bgp-route-map-redistributions"
+    _scope_in_payload = True
+
+class BgpRedistributionProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/bgp-redistribution-profiles"
+    _scope_in_payload = True
+
+class IKECryptoProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/ike-crypto-profiles"
+    _scope_in_payload = True
+
+class IPsecCryptoProfile(PanApiHandler):
+    _endpoint = "/config/network/v1/ipsec-crypto-profiles"
+    _scope_in_payload = True
+
+class IKEGateway(PanApiHandler):
+    _endpoint = "/config/network/v1/ike-gateways"
+    _scope_in_payload = True
+
+class IPsecTunnel(PanApiHandler):
+    _endpoint = "/config/network/v1/ipsec-tunnels"
+    _scope_in_payload = True
+
+class PbfRule(PanApiHandler):
+    _endpoint = "/config/network/v1/pbf-rules"
+    _scope_in_payload = True
 
 class Address(PanApiHandler):
     "An address object"
-    _endpoint = "/sse/config/v1/addresses?"
+    _endpoint = "/config/objects/v1/addresses"
+    _scope_in_payload = True
 
 class AddressGroup(PanApiHandler):
     "An address group"
-    _endpoint = "/sse/config/v1/address-groups?"
+    _endpoint = "/config/objects/v1/address-groups"
+    _scope_in_payload = True
     
 class Service(PanApiHandler):
     "An application group"
-    _endpoint = "/sse/config/v1/services?"
+    _endpoint = "/config/objects/v1/services"
+    _scope_in_payload = True
         
 class ServiceGroup(PanApiHandler):
     "A service group"
-    _endpoint = "/sse/config/v1/service-groups?"
+    _endpoint = "/config/objects/v1/service-groups"
+    _scope_in_payload = True
     
 class Application(PanApiHandler):
     "An application object"
@@ -113,7 +229,8 @@ class Schedule(PanApiHandler):
 
 class Tag(PanApiHandler):
     "A tag object"
-    _endpoint = "/sse/config/v1/tags?"
+    _endpoint = "/config/objects/v1/tags"
+    _scope_in_payload = True
 
 class URLCategory(PanApiHandler):
     "A custom URL category"

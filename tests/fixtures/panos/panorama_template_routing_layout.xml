@@ -1,0 +1,25 @@
+<config>
+  <devices>
+    <entry name="localhost.localdomain">
+      <template>
+        <entry name="template-a">
+          <config>
+            <devices>
+              <entry name="localhost.localdomain">
+                <network>
+                  <virtual-router>
+                    <entry name="template-vr">
+                      <interface>
+                        <member>ethernet1/1</member>
+                      </interface>
+                    </entry>
+                  </virtual-router>
+                </network>
+              </entry>
+            </devices>
+          </config>
+        </entry>
+      </template>
+    </entry>
+  </devices>
+</config>

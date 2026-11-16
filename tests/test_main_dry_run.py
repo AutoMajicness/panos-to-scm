@@ -1,0 +1,1943 @@
+import json
+import io
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import main
+from config import AppConfig
+
+
+class MainDryRunTests(unittest.TestCase):
+    def test_merge_scoped_snapshot_results_keeps_priority_and_provenance(self):
+        merged = main.merge_scoped_snapshot_results([
+            ("snippet:high", {"Address": [{"name": "shared", "value": "high"}]}),
+            ("snippet:low", {"Address": [{"name": "shared", "value": "low"}, {"name": "only-low"}]}),
+        ], include_provenance=True)
+
+        self.assertEqual(
+            merged["Address"],
+            [
+                {"name": "shared", "value": "high", "_scm_scope": "snippet:high"},
+                {"name": "only-low", "_scm_scope": "snippet:low"},
+            ],
+        )
+
+    def test_resolve_folder_scope_returns_all_network_scopes(self):
+        class Handler:
+            def get(self, endpoint, params=None):
+                return [{"name": "Customer-FW", "snippets": ["base", "override"]}]
+
+        result = main.resolve_folder_scope(Handler(), "Customer-FW")
+
+        self.assertEqual(result["network_scopes"], ["&snippet=base", "&snippet=override"])
+        self.assertEqual(result["folder_scope"], "folder:Customer-FW")
+        self.assertEqual(result["folder_scope_param"], "&folder=Customer-FW")
+
+    def test_prompt_scm_credentials_collects_secret_without_persisting(self):
+        with (
+            patch("builtins.input", side_effect=["tenant-1", "client-1"]),
+            patch("main.getpass.getpass", return_value="secret-1"),
+        ):
+            credentials = main.prompt_scm_credentials()
+
+        self.assertEqual(
+            {"tsg_id": "tenant-1", "client_id": "client-1", "client_secret": "secret-1"},
+            credentials,
+        )
+
+    def test_initialize_api_session_prompts_only_for_interactive_terminal(self):
+        class Session:
+            def __init__(self, runtime_config=None):
+                self.runtime_config = runtime_config
+
+            def authenticate(self):
+                pass
+
+        with (
+            patch("main.sys.stdin.isatty", return_value=True),
+            patch("main.prompt_scm_credentials", return_value={"tsg_id": "t", "client_id": "c", "client_secret": "s"}),
+            patch("api.PanApiSession", Session),
+        ):
+            session = main.initialize_api_session()
+
+        self.assertEqual({"tsg_id": "t", "client_id": "c", "client_secret": "s"}, session.runtime_config)
+
+    def test_output_directory_infers_target_folder_and_creates_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = main.resolve_output_directory(target_folder="Customer/West Wing", cwd=directory)
+            self.assertEqual("Customer_West Wing", output_dir.name)
+            self.assertTrue(output_dir.is_dir())
+
+    def test_output_folder_override_wins_over_customer_inference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            override = Path(directory) / "artifacts"
+            output_dir = main.resolve_output_directory(
+                output_folder=str(override),
+                target_folder="Customer-FW",
+                cwd=directory,
+            )
+            self.assertEqual(override, output_dir)
+            self.assertTrue(output_dir.is_dir())
+
+    def test_output_name_falls_back_from_generic_input_filename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(
+                "SCM_Customer",
+                main.infer_customer_name(config_file="running_config.xml"),
+            )
+
+    def test_default_output_path_preserves_explicit_file(self):
+        self.assertEqual(
+            "/tmp/custom-plan.json",
+            main.default_output_path("/tmp/customer", "/tmp/custom-plan.json", "migration-plan.json"),
+        )
+
+    def test_builtin_policy_references_are_not_reported_missing(self):
+        plan = main.build_plan(
+            {
+                "security_pre_rules": [
+                    {
+                        "name": "block-builtins",
+                        "from": ["any"],
+                        "to": ["any"],
+                        "source": ["panw-bulletproof-ip-list"],
+                        "destination": ["panw-known-ip-list"],
+                        "service": ["service-http", "service-https"],
+                    }
+                ]
+            },
+            object_types=["security_pre_rules"],
+        )
+
+        self.assertEqual(plan.warnings, [])
+
+    def test_local_xml_without_selection_defaults_to_full_import(self):
+        self.assertTrue(
+            main.should_default_full_import(
+                parser_type="panos",
+                config_file="running_config.xml",
+                fetch_panos_config=False,
+                run_objects="",
+                run_security=False,
+                run_app_override=False,
+                run_decrypt_rules=False,
+                run_nat=False,
+                run_all=False,
+            )
+        )
+        self.assertFalse(
+            main.should_default_full_import(
+                parser_type="panos",
+                config_file="running_config.xml",
+                fetch_panos_config=False,
+                run_objects="Address",
+                run_security=False,
+                run_app_override=False,
+                run_decrypt_rules=False,
+                run_nat=False,
+                run_all=False,
+            )
+        )
+
+    def test_live_xml_import_writes_markdown_report_beside_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "running_config.xml"
+            source_path.write_text("<config />", encoding="utf-8")
+            plan = main.build_plan({"Address": [{"name": "web"}]}, object_types=["Address"])
+            live_report = {
+                "summary": {"fetch_failures": 0},
+                "final_snapshots": {"objects": {"Address": 1}, "network": {}},
+                "fetch_failures": [],
+            }
+
+            output_path = main.write_markdown_import_report(
+                file_path=str(source_path),
+                parsed_data={"Address": [{"name": "web"}]},
+                scopes={"object": "folder:FW1"},
+                validation_plans={"objects": plan},
+                live_report=live_report,
+            )
+
+            report = Path(output_path).read_text(encoding="utf-8")
+
+        self.assertEqual(output_path, str(source_path.with_suffix(".md")))
+        self.assertIn("# PAN-OS to Strata Cloud Manager Import Report", report)
+        self.assertIn("## Manual Follow-up", report)
+        self.assertIn("web", report)
+
+    def test_setup_scm_target_exits_when_missing_without_create(self):
+        class SetupSession:
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return {"data": []}
+
+                return Response()
+
+        with (
+            patch.object(main, "logger"),
+            patch("sys.stdout", new_callable=io.StringIO),
+            patch.object(main, "initialize_api_session", return_value=SetupSession()),
+        ):
+            with self.assertRaises(SystemExit) as exit_context:
+                main.main(
+                    AppConfig(),
+                    setup_scm_target=True,
+                    target_folder="FW1",
+                    target_snippet="FW1-network",
+                )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_setup_scm_target_creates_when_enabled(self):
+        class SetupSession:
+            def __init__(self):
+                self.posts = []
+
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return {"data": []}
+
+                return Response()
+
+            def post(self, url, json=None, timeout=20):
+                self.posts.append({"url": url, "json": json})
+
+                class Response:
+                    status_code = 201
+                    text = ""
+
+                    def json(self):
+                        return {"id": "created"}
+
+                return Response()
+
+        session = SetupSession()
+        with (
+            patch.object(main, "logger"),
+            patch("sys.stdout", new_callable=io.StringIO),
+            patch.object(main, "initialize_api_session", return_value=session),
+        ):
+            result = main.main(
+                AppConfig(),
+                setup_scm_target=True,
+                create_scm_target=True,
+                target_folder="FW1",
+                target_snippet="FW1-network",
+            )
+
+        self.assertTrue(result["summary"]["ready"])
+        self.assertEqual(len(session.posts), 2)
+
+    def test_prepare_import_target_creates_from_explicit_scopes(self):
+        class ImportSession:
+            def __init__(self):
+                self.posts = []
+
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return {"data": []}
+
+                return Response()
+
+            def post(self, url, json=None, timeout=20):
+                self.posts.append({"url": url, "json": json})
+
+                class Response:
+                    status_code = 201
+                    text = ""
+
+                    def json(self):
+                        return {"name": json["name"]}
+
+                return Response()
+
+        from scm import PanApiHandler
+
+        session = ImportSession()
+        result = main.prepare_import_target(
+            PanApiHandler(session),
+            {"object": "folder:FW1", "policy": "folder:FW1", "network": "snippet:FW1-network"},
+            "",
+            "",
+            "ngfw-shared",
+            True,
+        )
+
+        self.assertTrue(result["summary"]["ready"])
+        self.assertEqual(len(session.posts), 2)
+
+    def test_snapshot_current_data_writes_selected_object_types(self):
+        class SnapshotSession:
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                if url.endswith("/ethernet-interfaces"):
+                    payload = {"data": [{"name": "$ethernet1-1", "default_value": "ethernet1/1"}]}
+                elif url.endswith("/zones"):
+                    payload = {"data": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}]}
+                else:
+                    payload = {"data": []}
+
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return payload
+
+                return Response()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "current-data.json"
+
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch.object(main, "initialize_api_session", return_value=SnapshotSession()),
+            ):
+                snapshot = main.main(
+                    AppConfig(),
+                    run_objects="EthernetInterface,Zones",
+                    snapshot_current_data=True,
+                    snapshot_output=str(output_path),
+                    network_scope="snippet:Network-Stack",
+                )
+
+            output = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(snapshot, output)
+        self.assertEqual(
+            output["EthernetInterface"],
+            [{"name": "$ethernet1-1", "default_value": "ethernet1/1"}],
+        )
+        self.assertEqual(
+            output["Zones"],
+            [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}],
+        )
+        self.assertEqual(output["device_inventory"], [])
+        self.assertEqual(output["metadata"]["management_mode"], "scm_managed")
+
+    def test_snapshot_policy_dependencies_includes_object_and_network_dependencies(self):
+        class SnapshotSession:
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                endpoint_name = url.rstrip("?").rstrip("/").split("/")[-1]
+                payload = {"data": [{"name": f"tenant-{endpoint_name}"}]}
+
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return payload
+
+                return Response()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "policy-dependencies.json"
+
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch.object(main, "initialize_api_session", return_value=SnapshotSession()),
+            ):
+                snapshot = main.main(
+                    AppConfig(),
+                    snapshot_current_data=True,
+                    snapshot_policy_dependencies=True,
+                    snapshot_output=str(output_path),
+                    object_scope="folder:All",
+                    network_scope="snippet:Network-Stack",
+                )
+
+            output = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(snapshot, output)
+        self.assertTrue({
+                "Address",
+                "AddressGroup",
+                "Application",
+                "ApplicationGroup",
+                "DecryptionProfile",
+                "ProfileGroup",
+                "Schedule",
+                "Service",
+                "ServiceGroup",
+                "Zones",
+            }.issubset(output))
+        self.assertIn("device_inventory", output)
+        self.assertIn("metadata", output)
+
+    def test_snapshot_policy_collects_pre_and_post_rulebases_with_metadata(self):
+        class SnapshotSession:
+            def __init__(self):
+                self.calls = []
+
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                self.calls.append({"url": url, "params": dict(params or {})})
+                endpoint = url.rstrip("?").rstrip("/").split("/")[-1]
+                position = (params or {}).get("position", "none")
+                rule = {"name": f"{endpoint}-{position}", "folder": "Customer-FW"}
+                if endpoint == "security-rules":
+                    rule.update({"action": "allow", "from": ["trust"], "to": ["untrust"]})
+                elif endpoint == "nat-rules":
+                    rule.update({"from": ["trust"], "to": ["untrust"], "source": ["any"]})
+                else:
+                    rule.update({"action": "no-decrypt"})
+                payload = {"data": [rule]}
+
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return payload
+
+                return Response()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "policy-snapshot.json"
+            session = SnapshotSession()
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch("main.initialize_api_session", return_value=session),
+            ):
+                snapshot = main.main(
+                    AppConfig(),
+                    run_objects="EthernetInterface",
+                    snapshot_current_data=True,
+                    snapshot_policy=True,
+                    snapshot_output=str(output_path),
+                    object_scope="folder:Customer-FW",
+                    network_scope="snippet:Customer-FW-Network",
+                    policy_scope="folder:Customer-FW",
+                )
+
+            output = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(snapshot, output)
+        self.assertEqual("folder:Customer-FW", output["metadata"]["scopes"]["policy"])
+        self.assertEqual("security-rules-pre", output["security_pre_rules"][0]["name"])
+        self.assertEqual("nat-rules-post", output["nat_post_rules"][0]["name"])
+        self.assertEqual([], output["fetch_failures"])
+        policy_calls = [call for call in session.calls if "security-rules" in call["url"]]
+        self.assertEqual({"pre", "post"}, {call["params"]["position"] for call in policy_calls})
+
+    def test_snapshot_policy_records_rulebase_fetch_failures(self):
+        class FailingPolicySession:
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                if "security-rules" in url and (params or {}).get("position") == "post":
+                    raise RuntimeError("post rulebase unavailable")
+
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return {"data": []}
+
+                return Response()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "policy-snapshot.json"
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch("main.initialize_api_session", return_value=FailingPolicySession()),
+            ):
+                snapshot = main.main(
+                    AppConfig(),
+                    run_objects="EthernetInterface",
+                    snapshot_current_data=True,
+                    snapshot_policy=True,
+                    snapshot_output=str(output_path),
+                    object_scope="folder:Customer-FW",
+                    network_scope="snippet:Customer-FW-Network",
+                    policy_scope="folder:Customer-FW",
+                )
+
+        failures = snapshot["fetch_failures"]
+        self.assertEqual(1, len([failure for failure in failures if failure["object_type"] == "SecurityRule" and failure["position"] == "post"]))
+        self.assertEqual([], snapshot["security_post_rules"])
+
+    def test_network_report_writes_payloads_and_warnings_without_scope(self):
+        fixture_path = Path(__file__).parent / "fixtures" / "panos" / "local_routing_unsupported_nodes.xml"
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "network-report.json"
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                report = main.main(
+                    AppConfig(),
+                    parser_type="panos",
+                    config_file=str(fixture_path),
+                    panos_config_type="local",
+                    network_report=True,
+                    report_output=str(output_path),
+                )
+
+            output = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(report.summary()["LogicalRouter"], 1)
+        self.assertEqual(report.summary()["warnings"], 7)
+        self.assertEqual(output["summary"]["LogicalRouter"], 1)
+        self.assertEqual(output["summary"]["warnings"], 7)
+        self.assertIn("LogicalRouter", output["objects"])
+        warning_codes = [warning["code"] for warning in output["warnings"]]
+        self.assertEqual(warning_codes.count("unsupported-panos-routing-node"), 7)
+        self.assertEqual(warning_codes.count("missing-network-reference"), 0)
+
+    def test_validate_only_writes_remediation_output(self):
+        parsed_data = {
+            "Zones": [
+                {
+                    "name": "trust",
+                    "network": {"layer3": ["ethernet1/2"]},
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            remediation_path = Path(directory) / "remediation.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                main.main(
+                    AppConfig(),
+                    run_objects="Zones",
+                    json_file=str(parsed_path),
+                    validate_only=True,
+                    remediation_output=str(remediation_path),
+                )
+
+            remediation = json.loads(remediation_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(remediation[0]["code"], "missing-network-reference")
+        self.assertEqual(remediation[0]["object_types"], {"Zones": 1})
+        self.assertIn("Include the referenced network object type", remediation[0]["action"])
+
+    def test_live_network_post_writes_validation_and_report_outputs(self):
+        class LiveSession:
+            def __init__(self):
+                self.posts = []
+
+            def ensure_valid_token(self):
+                pass
+
+            def get(self, url, params=None, timeout=20):
+                if url.endswith("/ethernet-interfaces"):
+                    payload = {"data": [{"name": "$ethernet1-1", "default_value": "ethernet1/1"}]} if self.posts else {"data": []}
+                elif url.endswith("/zones"):
+                    payload = {"data": [{"name": "trust", "network": {"layer3": ["$ethernet1-1"]}, "snippet": "Network-Stack"}]} if self.posts else {"data": []}
+                else:
+                    payload = {"data": []}
+
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return payload
+
+                return Response()
+
+            def post(self, url, json=None, timeout=20):
+                self.posts.append({"url": url, "json": json})
+
+                class Response:
+                    status_code = 201
+                    text = ""
+
+                    def json(self):
+                        return {"id": "created"}
+
+                return Response()
+
+            def put(self, url, json=None, timeout=20):
+                class Response:
+                    status_code = 200
+                    text = ""
+
+                    def json(self):
+                        return {"id": "updated"}
+
+                return Response()
+
+        parsed_data = {
+            "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1"}],
+            "Zones": [{"name": "trust", "network": {"layer3": ["$ethernet1-1"]}}],
+            "_migration_warnings": [],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            plan_path = Path(directory) / "live-plan.json"
+            remediation_path = Path(directory) / "live-remediation.json"
+            report_path = Path(directory) / "live-report.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+            session = LiveSession()
+
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch.object(main, "initialize_api_session", return_value=session),
+            ):
+                report = main.main(
+                    AppConfig(),
+                    run_objects="EthernetInterface,Zones",
+                    json_file=str(parsed_path),
+                    network_scope="snippet:Network-Stack",
+                    post_network=True,
+                    plan_output=str(plan_path),
+                    remediation_output=str(remediation_path),
+                    report_output=str(report_path),
+                )
+
+            plan_output = json.loads(plan_path.read_text(encoding="utf-8"))
+            remediation_output = json.loads(remediation_path.read_text(encoding="utf-8"))
+            report_output = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["mode"], "live-post")
+        self.assertEqual(plan_output["mode"], "live-post")
+        self.assertEqual(list(plan_output["validation_plans"]), ["network"])
+        self.assertEqual(remediation_output, [])
+        self.assertEqual(report_output["final_snapshots"]["network"]["EthernetInterface"], 1)
+        self.assertEqual(report_output["final_snapshots"]["network"]["Zones"], 1)
+        self.assertEqual(report_output["summary"]["fetch_failures"], 0)
+        self.assertEqual(report_output["summary"]["rule_order_checks"], 0)
+
+    def test_live_policy_only_run_does_not_require_post_objects(self):
+        class LiveSession:
+            def ensure_valid_token(self):
+                pass
+
+        class PolicyManager:
+            def __init__(self):
+                self.calls = []
+                self.rule_order_verification = []
+                self.fetch_failures = []
+                self.configure = type(
+                    "Configure",
+                    (),
+                    {"set_max_workers": lambda self, workers: None},
+                )()
+
+            def process_rules(self, rule_obj, parsed_data, scope, limit=None, rule_type=None):
+                self.calls.append(
+                    {
+                        "rule_obj": rule_obj,
+                        "parsed_data": parsed_data,
+                        "scope": scope,
+                        "limit": limit,
+                        "rule_type": rule_type,
+                    }
+                )
+
+        parsed_data = {
+            "security_pre_rules": [{"name": "allow-web"}],
+            "security_post_rules": [],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            parsed_path = directory_path / "parsed.json"
+            current_path = directory_path / "current.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+            current_path.write_text(json.dumps({}), encoding="utf-8")
+            manager = PolicyManager()
+
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch.object(main, "initialize_api_session", return_value=LiveSession()),
+                patch.object(main, "setup_scm_object_manager", return_value=manager, create=True),
+            ):
+                main.main(
+                    AppConfig(),
+                    json_file=str(parsed_path),
+                    current_data_file=str(current_path),
+                    policy_scope="folder:Tenant-A",
+                    run_security=True,
+                    post_policy=True,
+                )
+
+        self.assertEqual(len(manager.calls), 1)
+        self.assertEqual(manager.calls[0]["rule_type"], "security")
+        self.assertEqual(manager.calls[0]["scope"], "&folder=Tenant-A")
+
+    def test_live_report_dedupes_repeated_fetch_failures(self):
+        report = main.build_live_report(
+            api_session=None,
+            config=AppConfig(),
+            file_path="parsed.json",
+            scopes={"object": "folder:All", "network": "snippet:Network-Stack"},
+            selected_regular_obj_types=[],
+            selected_network_obj_types=[],
+            validation_plans={},
+            managers=[
+                type(
+                    "Manager",
+                    (),
+                    {
+                        "rule_order_verification": [],
+                        "fetch_failures": [
+                            {"object_type": "RoutePrefixList", "scope": "&snippet=Network-Stack", "error": "500"},
+                            {"object_type": "RoutePrefixList", "scope": "&snippet=Network-Stack", "error": "500"},
+                        ],
+                    },
+                )()
+            ],
+        )
+
+        self.assertEqual(report["summary"]["fetch_failures"], 1)
+        self.assertEqual(
+            report["fetch_failures"],
+            [{"object_type": "RoutePrefixList", "scope": "&snippet=Network-Stack", "error": "500"}],
+        )
+
+    def test_network_report_honors_selected_network_objects(self):
+        parsed_data = {
+            "LogicalRouter": [{"name": "default", "routing_stack": "advanced", "vrf": [{"name": "default"}]}],
+            "Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}],
+            "_migration_warnings": [],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                report = main.main(
+                    AppConfig(),
+                    run_objects="LogicalRouter,Address",
+                    json_file=str(parsed_path),
+                    network_report=True,
+                )
+
+        self.assertEqual(set(report.objects), {"LogicalRouter"})
+        self.assertEqual(report.summary()["LogicalRouter"], 1)
+
+    def test_dry_run_writes_plan_output_with_current_data(self):
+        parsed_data = {
+            "Address": [
+                {"name": "same", "ip_netmask": "192.0.2.10"},
+                {"name": "changed", "ip_netmask": "192.0.2.20"},
+            ]
+        }
+        current_data = {
+            "Address": [
+                {"name": "same", "ip_netmask": "192.0.2.10", "folder": "All"},
+                {"name": "changed", "ip_netmask": "192.0.2.21"},
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            parsed_path = directory_path / "parsed.json"
+            current_path = directory_path / "current.json"
+            output_path = directory_path / "plan.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+            current_path.write_text(json.dumps(current_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="Address",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    scope="folder:All",
+                    current_data_file=str(current_path),
+                    plan_output=str(output_path),
+                )
+
+            report = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(plan.summary()["skips"], 1)
+        self.assertEqual(plan.summary()["conflicts"], 1)
+        self.assertEqual(report["summary"]["skips"], 1)
+        self.assertEqual(report["summary"]["conflicts"], 1)
+        self.assertEqual(report["summary"]["warnings"], 0)
+        self.assertEqual(report["warnings"], [])
+        self.assertEqual(report["skips"][0]["name"], "same")
+        self.assertEqual(report["conflicts"][0]["name"], "changed")
+
+    def test_dry_run_plan_output_includes_posting_preview(self):
+        parsed_data = {
+            "LogicalRouter": [{"name": "default", "routing_stack": "advanced", "vrf": [{"name": "default"}]}],
+            "IPsecTunnel": [{"name": "vpn-tunnel-a", "tunnel_interface": "tunnel.1"}],
+            "IKEGateway": [{"name": "vpn-gw-a"}],
+            "TunnelInterface": [{"name": "tunnel.1", "default_value": "tunnel.1"}],
+            "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1", "layer3": {}}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            parsed_path = directory_path / "parsed.json"
+            output_path = directory_path / "plan.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                main.main(
+                    AppConfig(),
+                    run_objects="LogicalRouter,IPsecTunnel,IKEGateway,TunnelInterface,EthernetInterface",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                    plan_output=str(output_path),
+                )
+
+            report = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            [batch["object_type"] for batch in report["posting_preview"]["creates"]],
+            ["EthernetInterface", "TunnelInterface", "IKEGateway", "IPsecTunnel", "LogicalRouter"],
+        )
+
+    def test_dry_run_requires_scope_without_interactive(self):
+        parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("builtins.input") as input_mock:
+                with self.assertRaises(SystemExit):
+                    main.main(AppConfig(), json_file=str(parsed_path), dry_run=True)
+
+        input_mock.assert_not_called()
+
+    def test_validate_only_does_not_require_scope(self):
+        parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="Address",
+                    json_file=str(parsed_path),
+                    validate_only=True,
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.summary()["conflicts"], 0)
+        self.assertEqual(plan.summary()["unsupported"], 0)
+
+    def test_validate_only_uses_current_data_for_conflict_detection(self):
+        parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
+        current_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10", "folder": "All"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            parsed_path = directory_path / "parsed.json"
+            current_path = directory_path / "current.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+            current_path.write_text(json.dumps(current_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="Address",
+                    json_file=str(parsed_path),
+                    validate_only=True,
+                    current_data_file=str(current_path),
+                )
+
+        self.assertEqual(plan.summary()["skips"], 1)
+        self.assertEqual(plan.summary()["conflicts"], 0)
+
+    def test_validate_only_exits_nonzero_on_blockers(self):
+        parsed_data = {"Address": [{"fqdn": "missing-name.example"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_objects="Address",
+                        json_file=str(parsed_path),
+                        validate_only=True,
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_validate_only_warnings_as_errors_exits_on_any_warning(self):
+        parsed_data = {
+            "LogicalRouter": [
+                {
+                    "name": "default",
+                    "routing_stack": "advanced",
+                    "vrf": [
+                        {
+                            "name": "default",
+                            "routing_table": {
+                                "ip": {
+                                    "static_route": [
+                                        {
+                                            "name": "default-route",
+                                            "destination": "0.0.0.0/0",
+                                            "route_table": {"unicast": {}},
+                                        }
+                                    ]
+                                }
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_objects="LogicalRouter",
+                        json_file=str(parsed_path),
+                        validate_only=True,
+                        warnings_as_errors=True,
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_validate_only_warning_codes_ignore_nonmatching_warnings(self):
+        parsed_data = {
+            "LogicalRouter": [
+                {
+                    "name": "default",
+                    "routing_stack": "advanced",
+                    "vrf": [
+                        {
+                            "name": "default",
+                            "routing_table": {
+                                "ip": {
+                                    "static_route": [
+                                        {
+                                            "name": "default-route",
+                                            "destination": "0.0.0.0/0",
+                                            "route_table": {"unicast": {}},
+                                        }
+                                    ]
+                                }
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="LogicalRouter",
+                    json_file=str(parsed_path),
+                    validate_only=True,
+                    warnings_as_errors=True,
+                    warning_codes="missing-network-reference",
+                )
+
+        self.assertEqual(plan.summary()["warnings"], 1)
+
+    def test_validate_only_warning_codes_exit_on_matching_warning(self):
+        parsed_data = {
+            "BgpFilteringProfile": [
+                {
+                    "name": "default-ipv4-bgp-filtering",
+                    "ipv4": {"unicast": {"route_maps": {"inbound": "missing-rm"}}},
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_objects="BgpFilteringProfile",
+                        json_file=str(parsed_path),
+                        validate_only=True,
+                        warnings_as_errors=True,
+                        warning_codes="missing-network-reference",
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_strict_local_firewall_blocks_recommended_warning_codes(self):
+        parsed_data = {
+            "Zones": [
+                {
+                    "name": "trust",
+                    "network": {"layer3": ["ethernet1/2"]},
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_objects="Zones",
+                        json_file=str(parsed_path),
+                        validate_only=True,
+                        strict_local_firewall=True,
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_strict_local_firewall_keeps_schema_review_warnings_advisory(self):
+        parsed_data = {
+            "LogicalRouter": [
+                {
+                    "name": "default",
+                    "routing_stack": "advanced",
+                    "vrf": [
+                        {
+                            "name": "default",
+                            "routing_table": {
+                                "ip": {
+                                    "static_route": [
+                                        {
+                                            "name": "default-route",
+                                            "destination": "0.0.0.0/0",
+                                            "route_table": {"unicast": {}},
+                                        }
+                                    ]
+                                }
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="LogicalRouter",
+                    json_file=str(parsed_path),
+                    validate_only=True,
+                    strict_local_firewall=True,
+                )
+
+        self.assertEqual(plan.summary()["warnings"], 1)
+
+    def test_config_file_json_source_works_for_dry_run(self):
+        parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="Address",
+                    config_file=str(parsed_path),
+                    dry_run=True,
+                    scope="folder:All",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+
+    def test_validate_only_parses_objects_and_policy_flags_together(self):
+        fixture_path = (
+            Path(__file__).parent
+            / "fixtures"
+            / "panos"
+            / "local_policy_reference_variants.xml"
+        )
+
+        with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+            plan = main.main(
+                AppConfig(),
+                parser_type="panos",
+                config_file=str(fixture_path),
+                panos_config_type="local",
+                run_objects="Address",
+                run_security=True,
+                validate_only=True,
+            )
+
+        self.assertEqual(plan.summary()["creates"], 4)
+        self.assertEqual(
+            {change.object_type for change in plan.creates},
+            {"Address", "security_pre_rules"},
+        )
+
+    def test_load_current_data_normalizes_policy_dependency_export_shapes(self):
+        current_data = {
+            "addresses": {
+                "data": [
+                    {"name": "users-net"},
+                    {"name": "web-public"},
+                ]
+            },
+            "/config/objects/v1/services": {"data": [{"name": "tcp-443"}]},
+            "data": [
+                {"object_type": "Zones", "name": "trust"},
+                {"object_type": "Zones", "name": "untrust"},
+                {"type": "profile-groups", "name": "strict-profiles"},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            current_path = Path(directory) / "current.json"
+            current_path.write_text(json.dumps(current_data), encoding="utf-8")
+
+            loaded = main.load_current_data(str(current_path))
+
+        self.assertEqual(
+            loaded,
+            {
+                "Address": [{"name": "users-net"}, {"name": "web-public"}],
+                "Service": [{"name": "tcp-443"}],
+                "Zones": [
+                    {"object_type": "Zones", "name": "trust"},
+                    {"object_type": "Zones", "name": "untrust"},
+                ],
+                "ProfileGroup": [{"type": "profile-groups", "name": "strict-profiles"}],
+            },
+        )
+
+    def test_normalized_current_data_satisfies_strict_policy_references(self):
+        current_data = {
+            "addresses": {"data": [{"name": "users-net"}, {"name": "web-public"}]},
+            "services": {"data": [{"name": "tcp-443"}]},
+            "schedules": {"data": [{"name": "business-hours"}]},
+            "data": [
+                {"object_type": "Zones", "name": "trust"},
+                {"object_type": "Zones", "name": "untrust"},
+                {"type": "profile-groups", "name": "strict-profiles"},
+            ],
+        }
+        fixture_path = (
+            Path(__file__).parent
+            / "fixtures"
+            / "panos"
+            / "local_policy_reference_variants.xml"
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            current_path = Path(directory) / "current.json"
+            current_path.write_text(json.dumps(current_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    parser_type="panos",
+                    config_file=str(fixture_path),
+                    panos_config_type="local",
+                    run_security=True,
+                    validate_only=True,
+                    strict_local_firewall=True,
+                    current_data_file=str(current_path),
+                )
+
+        self.assertEqual(plan.summary()["warnings"], 0)
+
+    def test_zones_can_be_selected_for_dry_run(self):
+        parsed_data = {"Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="Zones",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    scope="folder:All",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "Zones")
+
+    def test_zones_can_use_network_scope_without_default_scope(self):
+        parsed_data = {"Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="Zones",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "Zones")
+
+    def test_ethernet_interfaces_can_use_network_scope_for_dry_run(self):
+        parsed_data = {
+            "EthernetInterface": [
+                {
+                    "name": "$ethernet1-1",
+                    "default_value": "ethernet1/1",
+                    "layer3": {"ip": [{"name": "203.0.113.1/24"}]},
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="EthernetInterface",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "EthernetInterface")
+
+    def test_ethernet_interfaces_and_zones_can_share_network_scope(self):
+        parsed_data = {
+            "InterfaceManagementProfile": [{"name": "allow-mgmt", "ping": True}],
+            "ZoneProtectionProfile": [{"name": "internet-zpp", "description": "edge"}],
+            "DHCPInterface": [{"name": "vlan.100", "server": {"ip_pool": ["10.100.0.10-10.100.0.200"]}}],
+            "AggregateInterface": [{"name": "$ae1", "default_value": "ae1", "layer3": {}}],
+            "EthernetInterface": [
+                {
+                    "name": "$ethernet1-1",
+                    "default_value": "ethernet1/1",
+                    "layer3": {"dhcp_client": {"enable": True}},
+                }
+            ],
+            "Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="EthernetInterface,Zones",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 2)
+        self.assertEqual([change.object_type for change in plan.creates], ["EthernetInterface", "Zones"])
+
+    def test_layer3_subinterfaces_can_use_network_scope_for_dry_run(self):
+        parsed_data = {
+            "Layer3Subinterface": [
+                {
+                    "name": "ethernet1/1.100",
+                    "parent_interface": "ethernet1/1",
+                    "tag": 100,
+                    "ip": [{"name": "10.100.0.1/24"}],
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="Layer3Subinterface",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "Layer3Subinterface")
+
+    def test_ethernet_subinterfaces_and_zones_can_share_network_scope(self):
+        parsed_data = {
+            "AggregateInterface": [{"name": "$ae1", "default_value": "ae1", "layer3": {}}],
+            "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1", "layer3": {}}],
+            "Layer3Subinterface": [{"name": "ethernet1/1.100", "parent_interface": "ethernet1/1", "tag": 100}],
+            "Zones": [{"name": "users", "network": {"layer3": ["ethernet1/1.100"]}}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="EthernetInterface,Layer3Subinterface,Zones",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 3)
+        self.assertEqual(
+            [change.object_type for change in plan.creates],
+            ["EthernetInterface", "Layer3Subinterface", "Zones"],
+        )
+
+    def test_unordered_network_selection_uses_dependency_order(self):
+        parsed_data = {
+            "LogicalRouter": [{"name": "default", "routing_stack": "advanced", "vrf": [{"name": "default"}]}],
+            "BgpFilteringProfile": [{"name": "default-ipv4-bgp-filtering"}],
+            "BgpRouteMap": [{"name": "default-import-rm", "route_map": [{"name": 10, "action": "permit"}]}],
+            "RoutePrefixList": [{"name": "default-prefixes", "prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}]}],
+            "IPsecTunnel": [{"name": "vpn-tunnel-a", "tunnel_interface": "tunnel.1"}],
+            "IKEGateway": [{"name": "vpn-gw-a"}],
+            "IKECryptoProfile": [{"name": "ike-crypto-a", "hash": ["sha256"]}],
+            "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1", "layer3": {}}],
+            "DHCPInterface": [{"name": "ethernet1/1", "server": {"ip_pool": ["10.0.0.10-10.0.0.20"]}}],
+            "Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="LogicalRouter,IPsecTunnel,IKEGateway,IKECryptoProfile,BgpFilteringProfile,BgpRouteMap,RoutePrefixList,Zones,DHCPInterface,EthernetInterface",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(
+            [change.object_type for change in plan.creates],
+            [
+                "EthernetInterface",
+                "DHCPInterface",
+                "Zones",
+                "RoutePrefixList",
+                "BgpRouteMap",
+                "BgpFilteringProfile",
+                "IKECryptoProfile",
+                "IKEGateway",
+                "IPsecTunnel",
+                "LogicalRouter",
+            ],
+        )
+
+    def test_logical_routers_can_use_network_scope_for_dry_run(self):
+        parsed_data = {
+            "LogicalRouter": [
+                {
+                    "name": "default",
+                    "routing_stack": "advanced",
+                    "vrf": [{"name": "default", "interface": ["ethernet1/1"]}],
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="LogicalRouter",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "LogicalRouter")
+
+    def test_full_network_stack_can_share_network_scope(self):
+        parsed_data = {
+            "InterfaceManagementProfile": [{"name": "allow-mgmt", "ping": True}],
+            "ZoneProtectionProfile": [{"name": "internet-zpp", "description": "edge"}],
+            "DHCPInterface": [{"name": "vlan.100", "server": {"ip_pool": ["10.100.0.10-10.100.0.200"]}}],
+            "AggregateInterface": [{"name": "$ae1", "default_value": "ae1", "layer3": {}}],
+            "EthernetInterface": [
+                {
+                    "name": "$ethernet1-1",
+                    "default_value": "ethernet1/1",
+                    "layer3": {"dhcp_client": {"enable": True}},
+                }
+            ],
+            "Layer2Subinterface": [{"name": "ethernet1/6.200", "parent_interface": "ethernet1/6", "tag": 200}],
+            "Layer3Subinterface": [{"name": "ethernet1/1.100", "parent_interface": "ethernet1/1", "tag": 100}],
+            "VlanInterface": [{"name": "vlan.100", "vlan_tag": "100", "ip": [{"name": "10.100.0.1/24"}]}],
+            "TunnelInterface": [{"name": "tunnel.1", "default_value": "tunnel.1", "ip": [{"name": "169.254.1.1/30"}]}],
+            "LoopbackInterface": [{"name": "loopback.1", "ip": ["10.255.0.1/32"]}],
+            "OSPFAuthProfile": [{"name": "ospf-simple", "password": "ospf-secret"}],
+            "BgpAuthProfile": [{"name": "bgp-md5", "secret": "bgp-secret"}],
+            "BgpAddressFamilyProfile": [{"name": "default-upstream-ipv4-af", "ipv4": {"unicast": {"send_community": {"both": {}}}}}],
+            "BgpFilteringProfile": [{"name": "default-ipv4-bgp-filtering", "ipv4": {"unicast": {"route_maps": {"inbound": "import-rm"}}}}],
+            "LogicalRouter": [{"name": "default", "routing_stack": "advanced", "vrf": [{"name": "default"}]}],
+            "RoutePrefixList": [{"name": "default-export-default-pl", "prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}]}],
+            "RouteAccessList": [{"name": "routes-acl", "access_list": [{"name": 1, "action": "permit", "source": "corp-routes"}]}],
+            "RouteCommunityList": [{"name": "communities", "community_list": [{"name": 1, "action": "permit", "community": "65001:100"}]}],
+            "RoutePathAccessList": [{"name": "as-paths", "path_access_list": [{"name": 1, "action": "permit", "regular_expression": "^65010_"}]}],
+            "BgpRouteMap": [{"name": "default-export-default-rm", "route_map": [{"name": 10, "action": "permit"}]}],
+            "BgpRouteMapRedistribution": [{"name": "redist-rm", "route_map": [{"name": 10, "action": "permit"}]}],
+            "BgpRedistributionProfile": [{"name": "redist-profile", "ipv4": {"unicast": {"static": {"enable": True}}}}],
+            "IKECryptoProfile": [{"name": "ike-crypto-a", "hash": ["sha256"], "encryption": ["aes-256-cbc"], "dh_group": ["group14"]}],
+            "IPsecCryptoProfile": [{"name": "ipsec-crypto-a", "esp": {"encryption": ["aes-256-gcm"]}}],
+            "IKEGateway": [{"name": "vpn-gw-a", "protocol": {"ikev2": {"ike_crypto_profile": "ike-crypto-a"}}}],
+            "IPsecTunnel": [{"name": "vpn-tunnel-a", "tunnel_interface": "tunnel.1"}],
+            "PbfRule": [{"name": "send-guest-to-isp2", "action": {"forwarding": {"egress_interface": "ethernet1/2"}}}],
+            "Zones": [{"name": "users", "network": {"layer3": ["ethernet1/1.100"]}}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="InterfaceManagementProfile,ZoneProtectionProfile,DHCPInterface,AggregateInterface,EthernetInterface,Layer2Subinterface,Layer3Subinterface,VlanInterface,TunnelInterface,LoopbackInterface,OSPFAuthProfile,BgpAuthProfile,BgpAddressFamilyProfile,BgpFilteringProfile,RoutePrefixList,RouteAccessList,RouteCommunityList,RoutePathAccessList,BgpRouteMap,BgpRouteMapRedistribution,BgpRedistributionProfile,LogicalRouter,IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel,PbfRule,Zones",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 28)
+        self.assertEqual(
+            [change.object_type for change in plan.creates],
+            [
+                "InterfaceManagementProfile", "ZoneProtectionProfile",
+                "AggregateInterface", "EthernetInterface", "Layer2Subinterface", "Layer3Subinterface",
+                "VlanInterface", "TunnelInterface", "LoopbackInterface", "DHCPInterface",
+                "Zones", "OSPFAuthProfile", "BgpAuthProfile", "BgpAddressFamilyProfile",
+                "RoutePrefixList", "RouteAccessList", "RouteCommunityList", "RoutePathAccessList",
+                "BgpRouteMap", "BgpRouteMapRedistribution", "BgpFilteringProfile",
+                "BgpRedistributionProfile", "IKECryptoProfile", "IPsecCryptoProfile",
+                "IKEGateway", "IPsecTunnel", "LogicalRouter", "PbfRule"
+            ],
+        )
+
+    def test_interface_management_profiles_can_use_network_scope_for_dry_run(self):
+        parsed_data = {"InterfaceManagementProfile": [{"name": "allow-mgmt", "ping": True}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="InterfaceManagementProfile",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "InterfaceManagementProfile")
+
+    def test_zone_protection_profiles_can_use_network_scope_for_dry_run(self):
+        parsed_data = {"ZoneProtectionProfile": [{"name": "internet-zpp", "description": "edge"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="ZoneProtectionProfile",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "ZoneProtectionProfile")
+
+    def test_dhcp_interfaces_can_use_network_scope_for_dry_run(self):
+        parsed_data = {"DHCPInterface": [{"name": "vlan.100", "server": {"ip_pool": ["10.100.0.10-10.100.0.200"]}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="DHCPInterface",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "DHCPInterface")
+
+    def test_aggregate_interfaces_can_use_network_scope_for_dry_run(self):
+        parsed_data = {"AggregateInterface": [{"name": "$ae1", "default_value": "ae1", "layer3": {}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="AggregateInterface",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "AggregateInterface")
+
+    def test_vlan_and_tunnel_interfaces_can_use_network_scope_for_dry_run(self):
+        parsed_data = {
+            "VlanInterface": [{"name": "vlan.100", "vlan_tag": "100"}],
+            "TunnelInterface": [{"name": "tunnel.1", "default_value": "tunnel.1"}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="VlanInterface,TunnelInterface",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 2)
+        self.assertEqual([change.object_type for change in plan.creates], ["VlanInterface", "TunnelInterface"])
+
+    def test_layer2_subinterfaces_can_use_network_scope_for_dry_run(self):
+        parsed_data = {"Layer2Subinterface": [{"name": "ethernet1/6.200", "parent_interface": "ethernet1/6", "tag": 200}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="Layer2Subinterface",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "Layer2Subinterface")
+
+    def test_loopback_interfaces_can_use_network_scope_for_dry_run(self):
+        parsed_data = {"LoopbackInterface": [{"name": "loopback.1", "ip": ["10.255.0.1/32"]}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="LoopbackInterface",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "LoopbackInterface")
+
+    def test_vpn_objects_can_use_network_scope_for_dry_run(self):
+        parsed_data = {
+            "IKECryptoProfile": [{"name": "ike-crypto-a", "hash": ["sha256"], "encryption": ["aes-256-cbc"], "dh_group": ["group14"]}],
+            "IPsecCryptoProfile": [{"name": "ipsec-crypto-a", "esp": {"encryption": ["aes-256-gcm"]}}],
+            "IKEGateway": [{"name": "vpn-gw-a", "protocol": {"ikev2": {"ike_crypto_profile": "ike-crypto-a"}}}],
+            "IPsecTunnel": [{"name": "vpn-tunnel-a", "tunnel_interface": "tunnel.1"}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="IKECryptoProfile,IPsecCryptoProfile,IKEGateway,IPsecTunnel",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 4)
+        self.assertEqual(
+            [change.object_type for change in plan.creates],
+            ["IKECryptoProfile", "IPsecCryptoProfile", "IKEGateway", "IPsecTunnel"],
+        )
+
+    def test_route_filters_can_use_network_scope_for_dry_run(self):
+        parsed_data = {
+            "OSPFAuthProfile": [{"name": "ospf-simple", "password": "ospf-secret"}],
+            "BgpAuthProfile": [{"name": "bgp-md5", "secret": "bgp-secret"}],
+            "BgpAddressFamilyProfile": [{"name": "default-upstream-ipv4-af", "ipv4": {"unicast": {"send_community": {"both": {}}}}}],
+            "BgpFilteringProfile": [{"name": "default-ipv4-bgp-filtering", "ipv4": {"unicast": {"route_maps": {"inbound": "import-rm"}}}}],
+            "RoutePrefixList": [{"name": "default-export-default-pl", "prefix_list": [{"name": 1, "action": "permit", "prefix": "0.0.0.0/0"}]}],
+            "RouteAccessList": [{"name": "routes-acl", "access_list": [{"name": 1, "action": "permit", "source": "corp-routes"}]}],
+            "RouteCommunityList": [{"name": "communities", "community_list": [{"name": 1, "action": "permit", "community": "65001:100"}]}],
+            "RoutePathAccessList": [{"name": "as-paths", "path_access_list": [{"name": 1, "action": "permit", "regular_expression": "^65010_"}]}],
+            "BgpRouteMap": [{"name": "default-export-default-rm", "route_map": [{"name": 10, "action": "permit"}]}],
+            "BgpRouteMapRedistribution": [{"name": "redist-rm", "route_map": [{"name": 10, "action": "permit"}]}],
+            "BgpRedistributionProfile": [{"name": "redist-profile", "ipv4": {"unicast": {"static": {"enable": True}}}}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="OSPFAuthProfile,BgpAuthProfile,BgpAddressFamilyProfile,BgpFilteringProfile,RoutePrefixList,RouteAccessList,RouteCommunityList,RoutePathAccessList,BgpRouteMap,BgpRouteMapRedistribution,BgpRedistributionProfile",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 11)
+        self.assertEqual(
+            [change.object_type for change in plan.creates],
+            [
+                "OSPFAuthProfile",
+                "BgpAuthProfile",
+                "BgpAddressFamilyProfile",
+                "RoutePrefixList",
+                "RouteAccessList",
+                "RouteCommunityList",
+                "RoutePathAccessList",
+                "BgpRouteMap",
+                "BgpRouteMapRedistribution",
+                "BgpFilteringProfile",
+                "BgpRedistributionProfile",
+            ],
+        )
+
+    def test_pbf_rules_can_use_network_scope_for_dry_run(self):
+        parsed_data = {"PbfRule": [{"name": "send-guest-to-isp2", "action": {"forwarding": {"egress_interface": "ethernet1/2"}}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="PbfRule",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    network_scope="snippet:Network-Stack",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+        self.assertEqual(plan.creates[0].object_type, "PbfRule")
+
+    def test_object_dry_run_falls_back_to_default_scope(self):
+        parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                plan = main.main(
+                    AppConfig(),
+                    run_objects="Address",
+                    json_file=str(parsed_path),
+                    dry_run=True,
+                    scope="folder:All",
+                )
+
+        self.assertEqual(plan.summary()["creates"], 1)
+
+    def test_object_post_requires_explicit_post_objects_flag(self):
+        parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_objects="Address",
+                        json_file=str(parsed_path),
+                        object_scope="folder:All",
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_object_post_guard_allows_clean_object_plan(self):
+        class TokenSession:
+            def ensure_valid_token(self):
+                pass
+
+        parsed_data = {"Address": [{"name": "addr", "ip_netmask": "192.0.2.10"}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch.object(main, "initialize_api_session", return_value=TokenSession()),
+                patch.object(main, "process_obj_types") as process_mock,
+            ):
+                main.main(
+                    AppConfig(),
+                    run_objects="Address",
+                    json_file=str(parsed_path),
+                    object_scope="folder:All",
+                    post_objects=True,
+                )
+
+        self.assertEqual(process_mock.call_count, 2)
+        self.assertEqual(
+            [obj_type.__name__ for obj_type in process_mock.call_args_list[0].args[1]],
+            ["Address"],
+        )
+
+    def test_network_dry_run_requires_network_or_default_scope(self):
+        parsed_data = {"Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("builtins.input") as input_mock:
+                with self.assertRaises(SystemExit):
+                    main.main(
+                        AppConfig(),
+                        run_objects="Zones",
+                        json_file=str(parsed_path),
+                        dry_run=True,
+                    )
+
+        input_mock.assert_not_called()
+
+    def test_network_post_requires_explicit_post_network_flag(self):
+        parsed_data = {"Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_objects="Zones",
+                        json_file=str(parsed_path),
+                        network_scope="snippet:Network-Stack",
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_network_post_guard_exits_on_validation_blockers(self):
+        parsed_data = {"Zones": [{"name": "trust", "network": {"layer3": ["missing-interface"]}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_objects="Zones",
+                        json_file=str(parsed_path),
+                        network_scope="snippet:Network-Stack",
+                        post_network=True,
+                        warnings_as_errors=True,
+                        warning_codes="missing-network-reference",
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_network_post_guard_allows_clean_network_plan(self):
+        class TokenSession:
+            def ensure_valid_token(self):
+                pass
+
+        parsed_data = {
+            "EthernetInterface": [{"name": "$ethernet1-1", "default_value": "ethernet1/1", "layer3": {}}],
+            "Zones": [{"name": "trust", "network": {"layer3": ["ethernet1/1"]}}],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with (
+                patch.object(main, "logger"),
+                patch("sys.stdout", new_callable=io.StringIO),
+                patch.object(main, "initialize_api_session", return_value=TokenSession()),
+                patch.object(main, "process_obj_types") as process_mock,
+            ):
+                main.main(
+                    AppConfig(),
+                    run_objects="EthernetInterface,Zones",
+                    json_file=str(parsed_path),
+                    network_scope="snippet:Network-Stack",
+                    post_network=True,
+                )
+
+        self.assertEqual(process_mock.call_count, 2)
+        self.assertEqual(
+            [obj_type.__name__ for obj_type in process_mock.call_args_list[1].args[1]],
+            ["EthernetInterface", "Zones"],
+        )
+
+    def test_policy_post_requires_explicit_post_policy_flag(self):
+        parsed_data = {
+            "security_pre_rules": [{"name": "allow-any", "from": ["any"], "to": ["any"], "source": ["any"], "destination": ["any"], "service": ["any"]}],
+            "security_post_rules": [],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_security=True,
+                        json_file=str(parsed_path),
+                        policy_scope="folder:All",
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_policy_post_guard_exits_on_validation_blockers(self):
+        parsed_data = {
+            "security_pre_rules": [{"name": "allow-web", "from": ["missing-zone"], "to": ["any"], "source": ["any"], "destination": ["any"], "service": ["any"]}],
+            "security_post_rules": [],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.json"
+            parsed_path.write_text(json.dumps(parsed_data), encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as exit_context:
+                    main.main(
+                        AppConfig(),
+                        run_security=True,
+                        json_file=str(parsed_path),
+                        policy_scope="folder:All",
+                        post_policy=True,
+                        warnings_as_errors=True,
+                        warning_codes="missing-policy-reference",
+                    )
+
+        self.assertEqual(exit_context.exception.code, 1)
+
+    def test_cisco_parser_can_be_selected_without_detection_prompt(self):
+        cisco_config = "\n".join(
+            [
+                "ASA Version 9.18",
+                "hostname asa1",
+                "object network WEB",
+                " host 192.0.2.10",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            cisco_path = Path(directory) / "cisco.txt"
+            cisco_path.write_text(cisco_config, encoding="utf-8")
+
+            with patch.object(main, "logger"), patch("sys.stdout", new_callable=io.StringIO), patch("builtins.input") as input_mock:
+                plan = main.main(
+                    AppConfig(),
+                    parser_type="cisco",
+                    config_file=str(cisco_path),
+                    run_objects="Address",
+                    dry_run=True,
+                    scope="folder:All",
+                )
+
+        input_mock.assert_not_called()
+        self.assertEqual(plan.summary()["creates"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
