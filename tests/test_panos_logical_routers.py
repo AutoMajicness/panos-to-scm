@@ -1,0 +1,1036 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from parse.parse_panos import XMLParser
+
+
+LOCAL_LOGICAL_ROUTER_XML = """<config>
+  <devices>
+    <entry name="localhost.localdomain">
+      <network>
+        <virtual-router>
+          <entry name="default">
+            <interface>
+              <member>ethernet1/1</member>
+              <member>ethernet1/1.100</member>
+            </interface>
+            <protocol>
+              <bgp>
+                <enable>yes</enable>
+                <router-id>192.0.2.1</router-id>
+                <local-as>65001</local-as>
+                <auth-profile>
+                  <entry name="bgp-md5">
+                    <secret>bgp-secret</secret>
+                  </entry>
+                </auth-profile>
+                <peer-group>
+                  <entry name="upstream">
+                    <enable>yes</enable>
+                    <auth-profile>bgp-md5</auth-profile>
+                    <timers>
+                      <keep-alive-interval>30</keep-alive-interval>
+                      <hold-time>90</hold-time>
+                    </timers>
+                    <address-family>
+                      <ipv4>
+                        <send-community>
+                          <both />
+                        </send-community>
+                        <route-reflector-client>yes</route-reflector-client>
+                        <default-originate>yes</default-originate>
+                        <default-originate-map>default-export-export-default-rm</default-originate-map>
+                      </ipv4>
+                    </address-family>
+                    <peer>
+                      <entry name="peer-a">
+                        <enable>yes</enable>
+                        <peer-as>65002</peer-as>
+                        <auth-profile>bgp-md5</auth-profile>
+                        <local-address>
+                          <interface>ethernet1/1</interface>
+                          <ip>192.0.2.1/24</ip>
+                        </local-address>
+                        <peer-address>
+                          <ip>192.0.2.2</ip>
+                        </peer-address>
+                        <timers>
+                          <keep-alive-interval>20</keep-alive-interval>
+                          <hold-time>60</hold-time>
+                          <min-route-advertisement-interval>5</min-route-advertisement-interval>
+                        </timers>
+                        <multihop>
+                          <enable>yes</enable>
+                          <ttl>2</ttl>
+                        </multihop>
+                        <connection-options>
+                          <incoming-bgp-connection>yes</incoming-bgp-connection>
+                          <outgoing-bgp-connection>yes</outgoing-bgp-connection>
+                          <local-port>179</local-port>
+                        </connection-options>
+                        <address-family>
+                          <ipv6>
+                            <next-hop>
+                              <self />
+                            </next-hop>
+                            <remove-private-AS>
+                              <replace-AS />
+                            </remove-private-AS>
+                            <maximum-prefix>
+                              <num-prefixes>1000</num-prefixes>
+                              <threshold>80</threshold>
+                              <warning-only />
+                            </maximum-prefix>
+                            <allowas-in>
+                              <occurrence>2</occurrence>
+                            </allowas-in>
+                          </ipv6>
+                        </address-family>
+                      </entry>
+                    </peer>
+                  </entry>
+                </peer-group>
+                <policy>
+                  <import>
+                    <rules>
+                      <entry name="import-private">
+                        <action>allow</action>
+                        <match>
+                          <address-prefix>
+                            <entry name="10.0.0.0/8">
+                              <exact>yes</exact>
+                            </entry>
+                          </address-prefix>
+                          <as-path>
+                            <member>^65010_</member>
+                          </as-path>
+                        </match>
+                      </entry>
+                      <entry name="import-access-list">
+                        <action>allow</action>
+                        <match>
+                          <route-table>
+                            <access-list>
+                              <member>corp-routes</member>
+                            </access-list>
+                          </route-table>
+                        </match>
+                      </entry>
+                      <entry name="import-v6">
+                        <action>allow</action>
+                        <match>
+                          <ipv6-address-prefix>
+                            <entry name="2001:db8:100::/48" />
+                          </ipv6-address-prefix>
+                        </match>
+                      </entry>
+                    </rules>
+                  </import>
+                  <export>
+                    <rules>
+                      <entry name="export-default">
+                        <description>Export default only</description>
+                        <action>allow</action>
+                        <match>
+                          <address-prefix>
+                            <entry name="0.0.0.0/0" />
+                          </address-prefix>
+                          <community>
+                            <member>65001:100</member>
+                          </community>
+                        </match>
+                        <set>
+                          <local-preference>200</local-preference>
+                          <metric>50</metric>
+                          <med>75</med>
+                          <next-hop>203.0.113.1</next-hop>
+                          <regular-community>
+                            <member>65001:200</member>
+                          </regular-community>
+                          <as-path-prepend>
+                            <member>65001</member>
+                            <member>65001</member>
+                          </as-path-prepend>
+                          <overwrite-community>yes</overwrite-community>
+                        </set>
+                      </entry>
+                      <entry name="export-v6">
+                        <action>allow</action>
+                        <match>
+                          <ipv6-address-prefix>
+                            <entry name="2001:db8::/32" />
+                          </ipv6-address-prefix>
+                        </match>
+                        <set>
+                          <next-hop>2001:db8::1</next-hop>
+                          <large-community>
+                            <member>65001:1:100</member>
+                          </large-community>
+                        </set>
+                      </entry>
+                    </rules>
+                  </export>
+                </policy>
+                <redist-rules>
+                  <entry name="static-to-bgp">
+                    <type>static</type>
+                    <metric>100</metric>
+                    <action>allow</action>
+                  </entry>
+                  <entry name="connected-to-bgp">
+                    <type>connected</type>
+                    <metric>20</metric>
+                    <action>allow</action>
+                  </entry>
+                </redist-rules>
+              </bgp>
+              <ospf>
+                <enable>yes</enable>
+                <router-id>192.0.2.1</router-id>
+                <redistribution-profile>ospf-redist-local</redistribution-profile>
+                <auth-profile>
+                  <entry name="ospf-simple">
+                    <password>ospf-secret</password>
+                  </entry>
+                  <entry name="ospf-md5">
+                    <md5>
+                      <entry name="1">
+                        <key>md5-secret</key>
+                      </entry>
+                    </md5>
+                  </entry>
+                </auth-profile>
+                <area>
+                  <entry name="0.0.0.0">
+                    <authentication>ospf-simple</authentication>
+                    <type>
+                      <normal />
+                    </type>
+                    <interface>
+                      <entry name="ethernet1/1">
+                        <enable>yes</enable>
+                        <passive>no</passive>
+                        <metric>10</metric>
+                        <authentication>ospf-md5</authentication>
+                        <link-type>
+                          <p2p />
+                        </link-type>
+                        <bfd>
+                          <profile>default</profile>
+                        </bfd>
+                      </entry>
+                    </interface>
+                    <virtual-link>
+                      <entry name="vl-to-abbr">
+                        <neighbor-id>192.0.2.2</neighbor-id>
+                        <transit-area-id>0.0.0.1</transit-area-id>
+                        <enable>yes</enable>
+                        <interface-id>1</interface-id>
+                        <instance-id>0</instance-id>
+                        <authentication>ospf-simple</authentication>
+                        <vr-timing>
+                          <hello-interval>10</hello-interval>
+                          <dead-counts>4</dead-counts>
+                          <retransmit-interval>5</retransmit-interval>
+                          <transit-delay>1</transit-delay>
+                        </vr-timing>
+                      </entry>
+                    </virtual-link>
+                  </entry>
+                  <entry name="0.0.0.1">
+                    <type>
+                      <stub>
+                        <default-route>
+                          <advertise>yes</advertise>
+                          <metric>15</metric>
+                          <type>ext-2</type>
+                        </default-route>
+                        <accept-summary>no</accept-summary>
+                      </stub>
+                    </type>
+                    <import-list>ospf-import-pl</import-list>
+                    <export-list>ospf-export-pl</export-list>
+                    <range>
+                      <entry name="10.20.0.0/16">
+                        <advertise>yes</advertise>
+                        <substitute>10.20.0.0/15</substitute>
+                      </entry>
+                    </range>
+                    <vr-range>
+                      <entry name="10.30.0.0/16">
+                        <suppress />
+                      </entry>
+                    </vr-range>
+                  </entry>
+                </area>
+                <export-rules>
+                  <entry name="connected-to-ospf">
+                    <new-path-type>ext-2</new-path-type>
+                    <new-tag>100</new-tag>
+                    <metric>20</metric>
+                  </entry>
+                </export-rules>
+              </ospf>
+              <ospfv3>
+                <enable>yes</enable>
+                <router-id>192.0.2.1</router-id>
+                <area>
+                  <entry name="0.0.0.0">
+                    <interface>
+                      <entry name="ethernet1/1">
+                        <enable>yes</enable>
+                        <metric>20</metric>
+                        <authentication>ospf-simple</authentication>
+                      </entry>
+                    </interface>
+                  </entry>
+                </area>
+              </ospfv3>
+            </protocol>
+            <routing-table>
+              <ip>
+                <static-route>
+                  <entry name="default-route">
+                    <destination>0.0.0.0/0</destination>
+                    <interface>ethernet1/1</interface>
+                    <nexthop>
+                      <ip-address>203.0.113.254</ip-address>
+                    </nexthop>
+                    <metric>10</metric>
+                    <admin-dist>10</admin-dist>
+                  </entry>
+                  <entry name="discard-rfc1918">
+                    <destination>10.0.0.0/8</destination>
+                    <route-table>
+                      <no-install />
+                    </route-table>
+                    <option>
+                      <passive />
+                    </option>
+                    <nexthop>
+                      <discard />
+                    </nexthop>
+                    <bfd>
+                      <profile>default</profile>
+                    </bfd>
+                    <path-monitor>
+                      <enable>yes</enable>
+                      <failure-condition>any</failure-condition>
+                      <hold-time>2</hold-time>
+                      <monitor-destinations>
+                        <entry name="probe1">
+                          <enable>yes</enable>
+                          <source>10.0.0.1</source>
+                          <destination>10.0.0.254</destination>
+                          <destination-fqdn>probe.example.com</destination-fqdn>
+                          <interval>3</interval>
+                          <count>5</count>
+                        </entry>
+                      </monitor-destinations>
+                    </path-monitor>
+                  </entry>
+                  <entry name="interface-only">
+                    <destination>192.0.2.0/24</destination>
+                    <interface>ethernet1/2</interface>
+                    <route-table>
+                      <multicast />
+                    </route-table>
+                  </entry>
+                </static-route>
+              </ip>
+              <ipv6>
+                <static-route>
+                  <entry name="default-v6">
+                    <destination>::/0</destination>
+                    <interface>ethernet1/1</interface>
+                    <nexthop>
+                      <ipv6-address>2001:db8::1</ipv6-address>
+                    </nexthop>
+                    <metric>20</metric>
+                  </entry>
+                </static-route>
+              </ipv6>
+            </routing-table>
+          </entry>
+        </virtual-router>
+      </network>
+    </entry>
+  </devices>
+</config>
+"""
+
+
+MULTI_PEER_BGP_POLICY_XML = """<config>
+  <devices><entry name="localhost.localdomain"><network><virtual-router>
+    <entry name="edge"><protocol><bgp>
+      <policy>
+        <import><rules>
+          <entry name="import-a"><match><from-peer><member>peer-group-a</member></from-peer><address-prefix><entry name="10.0.0.0/8" /></address-prefix></match><used-by><member>peer-group-a</member></used-by></entry>
+          <entry name="import-b"><match><from-peer><member>peer-group-b</member></from-peer><address-prefix><entry name="192.0.2.0/24" /></address-prefix></match><used-by><member>peer-group-b</member></used-by></entry>
+        </rules></import>
+        <export><rules>
+          <entry name="export-a"><match><address-prefix><entry name="10.10.0.0/16" /></address-prefix></match><used-by><member>peer-group-a</member></used-by></entry>
+          <entry name="export-b"><match><address-prefix><entry name="10.20.0.0/16" /></address-prefix></match><used-by><member>peer-group-b</member></used-by></entry>
+        </rules></export>
+      </policy>
+      <peer-group><entry name="peer-group-a"><peer><entry name="peer-a"><peer-address><ip>192.0.2.2</ip></peer-address></entry></peer></entry><entry name="peer-group-b"><peer><entry name="peer-b"><peer-address><ip>192.0.2.3</ip></peer-address></entry></peer></entry></peer-group>
+    </bgp></protocol></entry>
+  </virtual-router></network></entry></devices>
+</config>"""
+
+
+class PanosLogicalRouterParserTests(unittest.TestCase):
+    def test_bgp_filtering_profiles_follow_used_by_peer_groups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            xml_path = Path(directory) / "running.xml"
+            xml_path.write_text(MULTI_PEER_BGP_POLICY_XML, encoding="utf-8")
+            parsed = XMLParser(str(xml_path), "local").parse_specific_types(
+                ["BgpFilteringProfile", "LogicalRouter"]
+            )
+
+        profiles = {entry["name"]: entry for entry in parsed["BgpFilteringProfile"]}
+        self.assertEqual(
+            profiles["edge-peer-group-a-ipv4-bgp-filtering"]["ipv4"]["unicast"]["route_maps"],
+            {
+                "inbound": "edge-import-import-a-rm",
+                "outbound": "edge-export-export-a-rm",
+            },
+        )
+        self.assertEqual(
+            profiles["edge-peer-group-b-ipv4-bgp-filtering"]["ipv4"]["unicast"]["route_maps"],
+            {
+                "inbound": "edge-import-import-b-rm",
+                "outbound": "edge-export-export-b-rm",
+            },
+        )
+        router = parsed["LogicalRouter"][0]
+        peer_groups = router["vrf"][0]["bgp"]["peer_group"]
+        self.assertEqual(
+            [group["filtering_profile"]["ipv4"] for group in peer_groups],
+            [
+                "edge-peer-group-a-ipv4-bgp-filtering",
+                "edge-peer-group-b-ipv4-bgp-filtering",
+            ],
+        )
+
+    def test_local_panos_virtual_router_entries_are_mapped_to_scm_logical_routers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            xml_path = Path(directory) / "running.xml"
+            xml_path.write_text(LOCAL_LOGICAL_ROUTER_XML, encoding="utf-8")
+
+            routers = XMLParser(str(xml_path), "local").parse_specific_types(["LogicalRouter"])["LogicalRouter"]
+
+        self.assertEqual(
+            routers,
+            [
+                {
+                    "name": "default",
+                    "routing_stack": "advanced",
+                    "vrf": [
+                        {
+                            "name": "default",
+                            "interface": ["ethernet1/1", "ethernet1/1.100"],
+                            "bgp": {
+                                "enable": True,
+                                "router_id": "192.0.2.1",
+                                "local_as": "65001",
+                                "redistribution_profile": "default-bgp-redist",
+                                "peer_group": [
+                                    {
+                                        "name": "upstream",
+                                        "enable": True,
+                                        "authentication_profile": "bgp-md5",
+                                        "timers": {
+                                            "keep_alive_interval": 30,
+                                            "hold_time": 90,
+                                        },
+                                        "address_family": {
+                                            "ipv4": {
+                                                "unicast": {
+                                                    "address_family_profile": "default-upstream-ipv4-af",
+                                                }
+                                            }
+                                        },
+                                        "peer": [
+                                            {
+                                                "name": "peer-a",
+                                                "enable": True,
+                                                "peer_as": "65002",
+                                                "authentication_profile": "bgp-md5",
+                                                "local_address": {
+                                                    "interface": "ethernet1/1",
+                                                    "ip": "192.0.2.1/24",
+                                                },
+                                                "peer_address": "192.0.2.2",
+                                                "timers": {
+                                                    "keep_alive_interval": 20,
+                                                    "hold_time": 60,
+                                                    "min_route_advertisement_interval": 5,
+                                                },
+                                                "multihop": {
+                                                    "enable": True,
+                                                    "ttl": 2,
+                                                },
+                                                "connection_options": {
+                                                    "incoming_bgp_connection": True,
+                                                    "outgoing_bgp_connection": True,
+                                                    "local_port": 179,
+                                                },
+                                                "address_family": {
+                                                    "ipv6": {
+                                                        "unicast": {
+                                                            "address_family_profile": "default-upstream-peer-a-ipv6-af",
+                                                        }
+                                                    }
+                                                },
+                                            }
+                                        ],
+                                        "filtering_profile": {
+                                            "ipv4": "default-ipv4-bgp-filtering",
+                                            "ipv6": "default-ipv6-bgp-filtering",
+                                        },
+                                    }
+                                ],
+                            },
+                            "ospf": {
+                                "enable": True,
+                                "router_id": "192.0.2.1",
+                                "export_rules": [
+                                    {
+                                        "name": "connected-to-ospf",
+                                        "new_path_type": "ext-2",
+                                        "new_tag": "100",
+                                        "metric": 20,
+                                    }
+                                ],
+                                "redistribution_profile": "ospf-redist-local",
+                                "area": [
+                                    {
+                                        "name": "0.0.0.0",
+                                        "authentication": "ospf-simple",
+                                        "type": {"normal": {}},
+                                        "interface": [
+                                            {
+                                                "name": "$ethernet1-1",
+                                                "default_value": "ethernet1/1",
+                                                "enable": True,
+                                                "passive": False,
+                                                "metric": 10,
+                                                "authentication": "ospf-md5",
+                                                "link_type": {"p2p": {}},
+                                                "bfd": {"profile": "default"},
+                                            }
+                                        ],
+                                        "virtual_link": [
+                                            {
+                                                "name": "vl-to-abbr",
+                                                "neighbor_id": "192.0.2.2",
+                                                "transit_area_id": "0.0.0.1",
+                                                "authentication": "ospf-simple",
+                                                "enable": True,
+                                                "interface_id": 1,
+                                                "instance_id": 0,
+                                                "vr_timing": {
+                                                    "hello_interval": 10,
+                                                    "dead_counts": 4,
+                                                    "retransmit_interval": 5,
+                                                    "transit_delay": 1,
+                                                },
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "name": "0.0.0.1",
+                                        "type": {
+                                            "stub": {
+                                                "default_route_advertise": True,
+                                                "default_route_metric": 15,
+                                                "default_route_type": "ext-2",
+                                                "accept_summary": False,
+                                            }
+                                        },
+                                        "import_list": "ospf-import-pl",
+                                        "export_list": "ospf-export-pl",
+                                        "range": [
+                                            {
+                                                "name": "10.20.0.0/16",
+                                                "substitute": "10.20.0.0/15",
+                                                "advertise": True,
+                                            }
+                                        ],
+                                        "vr_range": [
+                                            {
+                                                "suppress": {
+                                                    "name": "10.30.0.0/16",
+                                                }
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                            "ospfv3": {
+                                "enable": True,
+                                "router_id": "192.0.2.1",
+                                "area": [
+                                    {
+                                        "name": "0.0.0.0",
+                                        "interface": [
+                                            {
+                                                "name": "$ethernet1-1",
+                                                "default_value": "ethernet1/1",
+                                                "enable": True,
+                                                "metric": 20,
+                                                "authentication": "ospf-simple",
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                            "routing_table": {
+                                "ip": {
+                                    "static_route": [
+                                        {
+                                            "name": "default-route",
+                                            "destination": "0.0.0.0/0",
+                                            "interface": "ethernet1/1",
+                                            "metric": 10,
+                                            "admin_dist": 10,
+                                            "nexthop": {"ip_address": "203.0.113.254"},
+                                        },
+                                        {
+                                            "name": "discard-rfc1918",
+                                            "destination": "10.0.0.0/8",
+                                            "route_table": {"no_install": {}},
+                                            "option": {"passive": {}},
+                                            "nexthop": {"discard": {}},
+                                            "bfd": {"profile": "default"},
+                                            "path_monitor": {
+                                                "enable": True,
+                                                "failure_condition": "any",
+                                                "hold_time": 2,
+                                                "monitor_destinations": [
+                                                    {
+                                                        "name": "probe1",
+                                                        "enable": True,
+                                                        "source": "10.0.0.1",
+                                                        "destination": "10.0.0.254",
+                                                        "destination_fqdn": "probe.example.com",
+                                                        "interval": 3,
+                                                        "count": 5,
+                                                    }
+                                                ],
+                                            },
+                                        },
+                                        {
+                                            "name": "interface-only",
+                                            "destination": "192.0.2.0/24",
+                                            "interface": "ethernet1/2",
+                                            "route_table": {"multicast": {}},
+                                        },
+                                    ]
+                                },
+                                "ipv6": {
+                                    "static_route": [
+                                        {
+                                            "name": "default-v6",
+                                            "destination": "::/0",
+                                            "interface": "ethernet1/1",
+                                            "metric": 20,
+                                            "nexthop": {"ipv6_address": "2001:db8::1"},
+                                        }
+                                    ]
+                                },
+                            },
+                        }
+                    ],
+                }
+            ],
+        )
+
+    def test_panorama_logical_router_parsing_is_not_claimed_yet(self):
+        with tempfile.TemporaryDirectory() as directory:
+            xml_path = Path(directory) / "running.xml"
+            xml_path.write_text(LOCAL_LOGICAL_ROUTER_XML, encoding="utf-8")
+
+            with self.assertLogs("parse.parse_panos", level="WARNING") as logs:
+                routers = XMLParser(str(xml_path), "panorama/shared").parse_specific_types(["LogicalRouter"])["LogicalRouter"]
+
+        self.assertEqual(routers, [])
+        self.assertIn("local firewall XML only", logs.output[0])
+
+    def test_local_bgp_policy_filters_are_mapped_to_prefix_lists_and_route_maps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            xml_path = Path(directory) / "running.xml"
+            xml_path.write_text(LOCAL_LOGICAL_ROUTER_XML, encoding="utf-8")
+
+            parsed = XMLParser(str(xml_path), "local").parse_specific_types(
+                [
+                    "OSPFAuthProfile",
+                    "BgpAuthProfile",
+                    "BgpAddressFamilyProfile",
+                    "BgpFilteringProfile",
+                    "RoutePrefixList",
+                    "RouteAccessList",
+                    "RouteCommunityList",
+                    "RoutePathAccessList",
+                    "BgpRouteMap",
+                    "BgpRouteMapRedistribution",
+                    "BgpRedistributionProfile",
+                ]
+            )
+
+        self.assertEqual(
+            parsed["OSPFAuthProfile"],
+            [
+                {
+                    "name": "ospf-simple",
+                    "password": "ospf-secret",
+                },
+                {
+                    "name": "ospf-md5",
+                    "md5": [
+                        {
+                            "key": "md5-secret",
+                            "key_id": 1,
+                        }
+                    ],
+                },
+            ],
+        )
+        self.assertEqual(
+            parsed["BgpAuthProfile"],
+            [
+                {
+                    "name": "bgp-md5",
+                    "secret": "bgp-secret",
+                }
+            ],
+        )
+        self.assertEqual(
+            parsed["BgpAddressFamilyProfile"],
+            [
+                {
+                    "name": "default-upstream-ipv4-af",
+                    "ipv4": {
+                        "unicast": {
+                            "route_reflector_client": True,
+                            "default_originate": True,
+                            "default_originate_map": "default-export-export-default-rm",
+                            "send_community": {"both": {}},
+                        }
+                    },
+                },
+                {
+                    "name": "default-upstream-peer-a-ipv6-af",
+                    "ipv6": {
+                        "unicast": {
+                            "allowas_in": {"occurrence": 2},
+                            "maximum_prefix": {
+                                "num_prefixes": 1000,
+                                "threshold": 80,
+                                "action": {"warning_only": {}},
+                            },
+                            "next_hop": {"self": {}},
+                            "remove_private_AS": {"replace_AS": {}},
+                        }
+                    },
+                },
+            ],
+        )
+        self.assertEqual(
+            parsed["BgpFilteringProfile"],
+            [
+                {
+                    "name": "default-ipv4-bgp-filtering",
+                    "ipv4": {
+                        "unicast": {
+                            "route_maps": {
+                                "inbound": "default-import-import-private-rm",
+                                "outbound": "default-export-export-default-rm",
+                            },
+                            "inbound_network_filters": {
+                                "prefix_list": "default-import-import-private-pl",
+                                "distribute_list": "default-import-import-access-list-acl",
+                            },
+                            "outbound_network_filters": {
+                                "prefix_list": "default-export-export-default-pl",
+                            },
+                        }
+                    },
+                },
+                {
+                    "name": "default-ipv6-bgp-filtering",
+                    "ipv6": {
+                        "unicast": {
+                            "route_maps": {
+                                "inbound": "default-import-import-v6-rm",
+                                "outbound": "default-export-export-v6-rm",
+                            },
+                            "inbound_network_filters": {
+                                "prefix_list": "default-import-import-v6-pl",
+                            },
+                            "outbound_network_filters": {
+                                "prefix_list": "default-export-export-v6-pl",
+                            },
+                        }
+                    },
+                },
+            ],
+        )
+        self.assertEqual(
+            parsed["RoutePrefixList"],
+            [
+                {
+                    "name": "default-import-import-private-pl",
+                    "ipv4": {
+                        "prefix_list": [
+                            {
+                                "name": 1,
+                                "action": "permit",
+                                "prefix": "10.0.0.0/8",
+                                "exact": True,
+                            }
+                        ]
+                    },
+                },
+                {
+                    "name": "default-import-import-v6-pl",
+                    "ipv6": {
+                        "prefix_list": [
+                            {
+                                "name": 1,
+                                "action": "permit",
+                                "prefix": "2001:db8:100::/48",
+                            }
+                        ]
+                    },
+                },
+                {
+                    "name": "default-export-export-default-pl",
+                    "ipv4": {
+                        "prefix_list": [
+                            {
+                                "name": 1,
+                                "action": "permit",
+                                "prefix": "0.0.0.0/0",
+                            }
+                        ]
+                    },
+                },
+                {
+                    "name": "default-export-export-v6-pl",
+                    "ipv6": {
+                        "prefix_list": [
+                            {
+                                "name": 1,
+                                "action": "permit",
+                                "prefix": "2001:db8::/32",
+                            }
+                        ]
+                    },
+                },
+            ],
+        )
+        self.assertEqual(
+            parsed["RouteAccessList"],
+            [
+                {
+                    "name": "default-import-import-access-list-acl",
+                    "access_list": [
+                        {
+                            "name": 1,
+                            "action": "permit",
+                            "source": "corp-routes",
+                        }
+                    ],
+                }
+            ],
+        )
+        self.assertEqual(
+            parsed["RouteCommunityList"],
+            [
+                {
+                    "name": "default-export-export-default-cl",
+                    "community_list": [
+                        {
+                            "name": 1,
+                            "action": "permit",
+                            "community": "65001:100",
+                        }
+                    ],
+                }
+            ],
+        )
+        self.assertEqual(
+            parsed["RoutePathAccessList"],
+            [
+                {
+                    "name": "default-import-import-private-pal",
+                    "path_access_list": [
+                        {
+                            "name": 1,
+                            "action": "permit",
+                            "regular_expression": "^65010_",
+                        }
+                    ],
+                }
+            ],
+        )
+        self.assertEqual(
+            parsed["BgpRouteMap"],
+            [
+                {
+                    "name": "default-import-import-private-rm",
+                    "description": "Generated from PAN-OS BGP import rule import-private",
+                    "route_map": [
+                        {
+                            "name": 10,
+                            "action": "permit",
+                            "match": {
+                                "as_path_access_list": "default-import-import-private-pal",
+                                "ipv4": {
+                                    "address": {
+                                        "prefix_list": "default-import-import-private-pl",
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                },
+                {
+                    "name": "default-import-import-access-list-rm",
+                    "description": "Generated from PAN-OS BGP import rule import-access-list",
+                    "route_map": [
+                        {
+                            "name": 20,
+                            "action": "permit",
+                            "match": {
+                                "ipv4": {
+                                    "address": {
+                                        "access_list": "default-import-import-access-list-acl",
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                },
+                {
+                    "name": "default-import-import-v6-rm",
+                    "description": "Generated from PAN-OS BGP import rule import-v6",
+                    "route_map": [
+                        {
+                            "name": 30,
+                            "action": "permit",
+                            "match": {
+                                "ipv6": {
+                                    "address": {
+                                        "prefix_list": "default-import-import-v6-pl",
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                },
+                {
+                    "name": "default-export-export-default-rm",
+                    "description": "Generated from PAN-OS BGP export rule export-default",
+                    "route_map": [
+                        {
+                            "name": 10,
+                            "description": "Export default only",
+                            "action": "permit",
+                            "match": {
+                                "regular_community": "default-export-export-default-cl",
+                                "ipv4": {
+                                    "address": {
+                                        "prefix_list": "default-export-export-default-pl",
+                                    }
+                                }
+                            },
+                            "set": {
+                                "local_preference": 200,
+                                "med": 75,
+                                "metric": {"action": "set", "value": 50},
+                                "ipv4": {"next_hop": "203.0.113.1"},
+                                "regular_community": ["65001:200"],
+                                "as_path_prepend": [65001, 65001],
+                                "overwrite_regular_community": True,
+                            },
+                        }
+                    ],
+                },
+                {
+                    "name": "default-export-export-v6-rm",
+                    "description": "Generated from PAN-OS BGP export rule export-v6",
+                    "route_map": [
+                        {
+                            "name": 20,
+                            "action": "permit",
+                            "match": {
+                                "ipv6": {
+                                    "address": {
+                                        "prefix_list": "default-export-export-v6-pl",
+                                    }
+                                }
+                            },
+                            "set": {
+                                "ipv6": {"next_hop": "2001:db8::1"},
+                                "large_community": ["65001:1:100"],
+                            },
+                        }
+                    ],
+                },
+            ],
+        )
+        self.assertEqual(
+            parsed["BgpRouteMapRedistribution"],
+            [
+                {
+                    "name": "default-redist-static-to-bgp-rm",
+                    "route_map": [
+                        {
+                            "name": 10,
+                            "action": "permit",
+                            "set": {"metric": {"action": "set", "value": 100}},
+                        }
+                    ],
+                },
+                {
+                    "name": "default-redist-connected-to-bgp-rm",
+                    "route_map": [
+                        {
+                            "name": 10,
+                            "action": "permit",
+                            "set": {"metric": {"action": "set", "value": 20}},
+                        }
+                    ],
+                },
+            ],
+        )
+        self.assertEqual(
+            parsed["BgpRedistributionProfile"],
+            [
+                {
+                    "name": "default-bgp-redist",
+                    "ipv4": {
+                        "unicast": {
+                            "static": {
+                                "enable": True,
+                                "metric": 100,
+                                "route_map": "default-redist-static-to-bgp-rm",
+                            },
+                            "connected": {
+                                "enable": True,
+                                "metric": 20,
+                                "route_map": "default-redist-connected-to-bgp-rm",
+                            },
+                        }
+                    },
+                }
+            ],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,63 @@
+<config>
+  <devices>
+    <entry name="localhost.localdomain">
+      <network>
+        <virtual-router>
+          <entry name="branch-vr">
+            <interface>
+              <member>ethernet1/4</member>
+            </interface>
+            <protocol>
+              <ospf>
+                <enable>yes</enable>
+                <area>
+                  <entry name="0.0.0.10">
+                    <type>
+                      <nssa>
+                        <default-route>
+                          <advertise>yes</advertise>
+                          <metric>30</metric>
+                        </default-route>
+                        <accept-summary>yes</accept-summary>
+                      </nssa>
+                    </type>
+                    <interface>
+                      <entry name="ethernet1/4">
+                        <enable>yes</enable>
+                        <priority>5</priority>
+                        <instance-id>2</instance-id>
+                        <neighbor>
+                          <entry name="10.10.10.2" />
+                        </neighbor>
+                        <vr-timing>
+                          <hello-interval>5</hello-interval>
+                          <dead-counts>3</dead-counts>
+                          <gr-delay>10</gr-delay>
+                        </vr-timing>
+                      </entry>
+                    </interface>
+                  </entry>
+                </area>
+              </ospf>
+            </protocol>
+            <routing-table>
+              <ip>
+                <static-route>
+                  <entry name="branch-summary">
+                    <destination>10.10.0.0/16</destination>
+                    <interface>ethernet1/4</interface>
+                    <route-table>both</route-table>
+                    <nexthop>
+                      <fqdn>next-hop.example.com</fqdn>
+                    </nexthop>
+                    <metric>15</metric>
+                  </entry>
+                </static-route>
+              </ip>
+            </routing-table>
+          </entry>
+        </virtual-router>
+      </network>
+    </entry>
+  </devices>
+</config>

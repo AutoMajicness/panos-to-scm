@@ -1,0 +1,59 @@
+<config>
+  <devices>
+    <entry name="localhost.localdomain">
+      <network>
+        <virtual-router>
+          <entry name="unsupported-vr">
+            <ecmp>
+              <enable>yes</enable>
+            </ecmp>
+            <protocol>
+              <bgp>
+                <dampening-profile>
+                  <entry name="default">
+                    <enable>yes</enable>
+                  </entry>
+                </dampening-profile>
+                <conditional-advertisement>
+                  <entry name="conditional-default" />
+                </conditional-advertisement>
+                <routing-options>
+                  <graceful-restart>
+                    <enable>yes</enable>
+                  </graceful-restart>
+                </routing-options>
+                <redist-rules>
+                  <entry name="rip-to-bgp">
+                    <type>rip</type>
+                  </entry>
+                </redist-rules>
+              </bgp>
+              <pim>
+                <enable>yes</enable>
+              </pim>
+              <multicast>
+                <enable>yes</enable>
+              </multicast>
+            </protocol>
+            <routing-table>
+              <ip>
+                <static-route>
+                  <entry name="qualified-route">
+                    <destination>203.0.113.0/24</destination>
+                    <nexthop>
+                      <qualified-next-hop>
+                        <entry name="203.0.113.1">
+                          <metric>10</metric>
+                        </entry>
+                      </qualified-next-hop>
+                    </nexthop>
+                  </entry>
+                </static-route>
+              </ip>
+            </routing-table>
+          </entry>
+        </virtual-router>
+      </network>
+    </entry>
+  </devices>
+</config>

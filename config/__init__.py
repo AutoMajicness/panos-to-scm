@@ -3,6 +3,7 @@ import sys
 import yaml
 import logging
 import scm.obj as obj
+from api.config import panapi_config_path
 
 class AppConfig:
     def __init__(self):
@@ -15,9 +16,22 @@ class AppConfig:
             obj.ServiceGroup, obj.ExternalDynamicList, obj.URLCategory, 
             obj.URLAccessProfile, obj.VulnerabilityProtectionProfile, 
             obj.AntiSpywareProfile, obj.FileBlockingProfile,
-            # obj.WildFireAntivirusProfile,
+            obj.WildFireAntivirusProfile,
             obj.DNSSecurityProfile, obj.ProfileGroup, obj.ApplicationFilter, obj.ApplicationGroup,
             obj.Schedule, obj.DecryptionProfile, obj.HipObject, obj.HipProfile
+        ]
+        self.network_obj_types = [
+            obj.InterfaceManagementProfile, obj.ZoneProtectionProfile,
+            obj.AggregateInterface,
+            obj.EthernetInterface, obj.Layer2Subinterface, obj.Layer3Subinterface,
+            obj.VlanInterface, obj.TunnelInterface, obj.LoopbackInterface,
+            obj.DHCPInterface, obj.Zones,
+            obj.OSPFAuthProfile, obj.BgpAuthProfile, obj.BgpAddressFamilyProfile,
+            obj.RoutePrefixList, obj.RouteAccessList, obj.RouteCommunityList,
+            obj.RoutePathAccessList, obj.BgpRouteMap, obj.BgpRouteMapRedistribution,
+            obj.BgpFilteringProfile, obj.BgpRedistributionProfile,
+            obj.IKECryptoProfile, obj.IPsecCryptoProfile,
+            obj.IKEGateway, obj.IPsecTunnel, obj.LogicalRouter, obj.PbfRule
         ]
         self.sec_obj = obj.SecurityRule
         self.nat_obj = obj.NatRule
@@ -26,7 +40,7 @@ class AppConfig:
 
 class ConfigurationManager:
     def __init__(self):
-        self.config_file_path = os.path.expanduser('~/.panapi/config.yml')
+        self.config_file_path = str(panapi_config_path())
         self.app_config = AppConfig()
         self.ensure_config_exists()
         self.check_for_default_settings()

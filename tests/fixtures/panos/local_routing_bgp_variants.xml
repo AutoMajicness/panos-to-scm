@@ -1,0 +1,85 @@
+<config>
+  <devices>
+    <entry name="localhost.localdomain">
+      <network>
+        <virtual-router>
+          <entry name="edge-vr">
+            <interface>
+              <member>ethernet1/3</member>
+            </interface>
+            <protocol>
+              <bgp>
+                <enable>yes</enable>
+                <router-id>198.51.100.1</router-id>
+                <local-as>65100</local-as>
+                <auth-profiles>
+                  <entry name="edge-md5">
+                    <password>sanitized-secret</password>
+                  </entry>
+                </auth-profiles>
+                <peer-group>
+                  <entry name="transit">
+                    <enable>yes</enable>
+                    <authentication-profile>edge-md5</authentication-profile>
+                    <address-family>
+                      <ipv4-unicast>
+                        <soft-reconfig-with-stored-info>yes</soft-reconfig-with-stored-info>
+                        <send-community>standard</send-community>
+                        <next-hop>self-force</next-hop>
+                        <remove-private-as>all</remove-private-as>
+                      </ipv4-unicast>
+                    </address-family>
+                    <peer>
+                      <entry name="transit-v6">
+                        <enable>yes</enable>
+                        <peer-as>65200</peer-as>
+                        <local-address>
+                          <interface>ethernet1/3</interface>
+                          <ip>2001:db8:10::1/64</ip>
+                        </local-address>
+                        <peer-address>
+                          <ip>2001:db8:10::2</ip>
+                        </peer-address>
+                        <afi-safi>
+                          <ipv6-unicast>
+                            <default-originate>yes</default-originate>
+                            <maximum-prefix>
+                              <number>500</number>
+                              <action>restart</action>
+                            </maximum-prefix>
+                          </ipv6-unicast>
+                        </afi-safi>
+                      </entry>
+                    </peer>
+                  </entry>
+                </peer-group>
+                <policy>
+                  <import>
+                    <entry name="import-corp">
+                      <action>allow</action>
+                      <match>
+                        <nlri>
+                          <member>172.16.0.0/12</member>
+                        </nlri>
+                      </match>
+                    </entry>
+                  </import>
+                  <export>
+                    <entry name="export-corp-v6">
+                      <action>allow</action>
+                      <match>
+                        <ipv6-nlri>
+                          <member>2001:db8:feed::/48</member>
+                        </ipv6-nlri>
+                      </match>
+                    </entry>
+                  </export>
+                </policy>
+              </bgp>
+            </protocol>
+          </entry>
+        </virtual-router>
+      </network>
+    </entry>
+  </devices>
+</config>

@@ -1,13 +1,107 @@
-import xml.etree.ElementTree as ET
 import logging
 import re
+import xml.etree.ElementTree as ET
+
+
+BRACE_COLLECTION_PARENTS = {
+    "devices", "vsys", "zone", "rules", "address", "address-group", "service",
+    "service-group", "application", "application-group", "virtual-router",
+    "aggregate-ethernet", "ethernet", "loopback", "tunnel", "vlan", "peer-group",
+    "peer", "certificate", "external-list", "custom-url-category", "schedule",
+    "device-object", "authentication-object", "interface-management-profile",
+    "zone-protection-profile", "profile-group", "server-profile",
+}
+
+BRACE_TAG_BLOCKS = {
+    "config", "shared", "panorama", "network", "deviceconfig", "system", "setting",
+    "management", "service", "high-availability", "import", "interface", "layer3",
+    "layer2", "virtual-wire", "ha", "rulebase", "pre-rulebase", "post-rulebase",
+    "security", "nat", "default-security-rules", "application-override", "decryption",
+    "tunnel-inspect", "virtual-router", "protocol", "bgp", "ospf", "ospfv3", "rip",
+    "multicast", "routing-options", "redistribution-profile", "bfd", "path-monitor",
+}
+
+
+def _strip_brace_quotes(value):
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        return value[1:-1]
+    return value
+
+
+def _looks_like_brace_config(file_path):
+    with open(file_path, "r", encoding="utf-8", errors="replace") as file:
+        sample = file.read(12000).lstrip()
+    first_line = next((line.strip() for line in sample.splitlines() if line.strip()), "")
+    return first_line.startswith("config {") or first_line == "config" or "config {" in sample[:1200]
+
+
+def _brace_child_is_entry(parent, token):
+    return parent.tag in BRACE_COLLECTION_PARENTS and token not in BRACE_TAG_BLOCKS
+
+
+def _brace_block_for_token(parent, token):
+    if _brace_child_is_entry(parent, token):
+        return ET.SubElement(parent, "entry", {"name": token})
+    return ET.SubElement(parent, token)
+
+
+def _parse_brace_config(file_path):
+    with open(file_path, "r", encoding="utf-8", errors="replace") as file:
+        lines = file.read().splitlines()
+    root = ET.Element("config")
+
+    def parse_children(parent, index):
+        while index < len(lines):
+            raw = lines[index].strip()
+            index += 1
+            if not raw or raw.startswith("#") or raw.startswith("//"):
+                continue
+            if raw in {"}", "};"}:
+                return index
+            if raw == "config {" and parent.tag == "config":
+                index = parse_children(parent, index)
+                continue
+            if raw.endswith("{"):
+                header = raw[:-1].strip()
+                if header:
+                    child = _brace_block_for_token(parent, _strip_brace_quotes(header))
+                    index = parse_children(child, index)
+                continue
+            if not raw.endswith(";"):
+                continue
+            statement = raw[:-1].strip()
+            if not statement:
+                continue
+            match = re.match(r"^(?P<tag>[A-Za-z0-9_.\-/]+)\s+\[(?P<items>.*)\]$", statement)
+            if match:
+                container = ET.SubElement(parent, match.group("tag"))
+                for item in re.split(r"\s+", match.group("items").strip()):
+                    if item:
+                        member = ET.SubElement(container, "member")
+                        member.text = _strip_brace_quotes(item)
+                continue
+            if statement.startswith('"') and statement.endswith('"'):
+                member = ET.SubElement(parent, "member")
+                member.text = _strip_brace_quotes(statement)
+                continue
+            parts = statement.split(None, 1)
+            if len(parts) == 1:
+                ET.SubElement(parent, parts[0])
+            else:
+                child = ET.SubElement(parent, parts[0])
+                child.text = _strip_brace_quotes(parts[1])
+        return index
+
+    parse_children(root, 0)
+    return ET.ElementTree(root)
 
 class XMLParser:
     def __init__(self, file_path, config_type, device_group_name=None):
         self.file_path = file_path
         self.config_type = config_type
         self.device_group_name = device_group_name
-        self.tree = ET.parse(self.file_path)
+        self.tree = _parse_brace_config(self.file_path) if _looks_like_brace_config(self.file_path) else ET.parse(self.file_path)
         self.root = self.tree.getroot()
         self.logger = logging.getLogger(__name__)
         self.logger.debug(f"Initialized XMLParser with file_path: {self.file_path}, config_type: {self.config_type}, device_group_name: {self.device_group_name}")
@@ -34,8 +128,23 @@ class XMLParser:
         sanitized_name = re.sub(r'[^a-zA-Z0-9._-]', '-', name)
         return sanitized_name[:63]
 
+    def _scm_interface_object_name(self, interface_name: str) -> str:
+        if not interface_name:
+            return interface_name
+        if interface_name.startswith('$'):
+            return interface_name
+        if re.match(r'^tunnel\.\d+$', interface_name):
+            suffix = interface_name.split('.', 1)[1]
+            return f"$tunnel{suffix}"
+        if re.match(r'^loopback\.\d+$', interface_name):
+            suffix = interface_name.split('.', 1)[1]
+            return f"$loopback{suffix}"
+        if re.match(r'^(ethernet\d+/\d+(\.\d+)?|ae\d+(\.\d+)?)$', interface_name):
+            return f"${self._sanitize_name(interface_name)}"
+        return interface_name
+
     def parse_config_and_set_scope(self, xml_file_path):
-        tree = ET.parse(xml_file_path)
+        tree = _parse_brace_config(xml_file_path) if _looks_like_brace_config(xml_file_path) else ET.parse(xml_file_path)
         root = tree.getroot()
 
         device_group_xpath = root.find('.//devices/entry/device-group')
@@ -109,6 +218,33 @@ class XMLParser:
             'nat_pre_rules': self._parse_entries(self._nat_pre_rules_entries),
             'nat_post_rules': self._parse_entries(self._nat_post_rules_entries),
             'Application': self._parse_entries(self._application_entries),
+            'InterfaceManagementProfile': self._parse_entries(self._interface_management_profile_entries),
+            'ZoneProtectionProfile': self._parse_entries(self._zone_protection_profile_entries),
+            'DHCPInterface': self._parse_entries(self._dhcp_interface_entries),
+            'AggregateInterface': self._parse_entries(self._aggregate_interface_entries),
+            'EthernetInterface': self._parse_entries(self._ethernet_interface_entries),
+            'Layer2Subinterface': self._parse_entries(self._layer2_subinterface_entries),
+            'Layer3Subinterface': self._parse_entries(self._layer3_subinterface_entries),
+            'VlanInterface': self._parse_entries(self._vlan_interface_entries),
+            'TunnelInterface': self._parse_entries(self._tunnel_interface_entries),
+            'LoopbackInterface': self._parse_entries(self._loopback_interface_entries),
+            'OSPFAuthProfile': self._parse_entries(self._ospf_auth_profile_entries),
+            'BgpAuthProfile': self._parse_entries(self._bgp_auth_profile_entries),
+            'BgpAddressFamilyProfile': self._parse_entries(self._bgp_address_family_profile_entries),
+            'BgpFilteringProfile': self._parse_entries(self._bgp_filtering_profile_entries),
+            'LogicalRouter': self._parse_entries(self._logical_router_entries),
+            'RoutePrefixList': self._parse_entries(self._route_prefix_list_entries),
+            'RouteAccessList': self._parse_entries(self._route_access_list_entries),
+            'RouteCommunityList': self._parse_entries(self._route_community_list_entries),
+            'RoutePathAccessList': self._parse_entries(self._route_path_access_list_entries),
+            'BgpRouteMap': self._parse_entries(self._bgp_route_map_entries),
+            'BgpRouteMapRedistribution': self._parse_entries(self._bgp_route_map_redistribution_entries),
+            'BgpRedistributionProfile': self._parse_entries(self._bgp_redistribution_profile_entries),
+            'IKECryptoProfile': self._parse_entries(self._ike_crypto_profile_entries),
+            'IPsecCryptoProfile': self._parse_entries(self._ipsec_crypto_profile_entries),
+            'IKEGateway': self._parse_entries(self._ike_gateway_entries),
+            'IPsecTunnel': self._parse_entries(self._ipsec_tunnel_entries),
+            'PbfRule': self._parse_entries(self._pbf_rule_entries),
             'Zones': self._parse_entries(self._zones),
             'DecryptionProfile': self._parse_entries(self._decryption_profiles_entries),
             'decryption_pre_rules': self._parse_entries(self._decryption_pre_rules_entries),
@@ -116,6 +252,7 @@ class XMLParser:
             'DNSSecurityProfile': self._parse_entries(self._dns_security_profiles_entries),
             'HipObject': self._parse_entries(self._hip_objects_entries),
             'HipProfile': self._parse_entries(self._hip_profiles_entries),
+            '_migration_warnings': self._migration_warning_entries(),
         }
 
     def parse_specific_types(self, object_types):
@@ -144,6 +281,33 @@ class XMLParser:
             'nat_pre_rules': self._nat_pre_rules_entries,
             'nat_post_rules': self._nat_post_rules_entries,
             'Application': self._application_entries,
+            'InterfaceManagementProfile': self._interface_management_profile_entries,
+            'ZoneProtectionProfile': self._zone_protection_profile_entries,
+            'DHCPInterface': self._dhcp_interface_entries,
+            'AggregateInterface': self._aggregate_interface_entries,
+            'EthernetInterface': self._ethernet_interface_entries,
+            'Layer2Subinterface': self._layer2_subinterface_entries,
+            'Layer3Subinterface': self._layer3_subinterface_entries,
+            'VlanInterface': self._vlan_interface_entries,
+            'TunnelInterface': self._tunnel_interface_entries,
+            'LoopbackInterface': self._loopback_interface_entries,
+            'OSPFAuthProfile': self._ospf_auth_profile_entries,
+            'BgpAuthProfile': self._bgp_auth_profile_entries,
+            'BgpAddressFamilyProfile': self._bgp_address_family_profile_entries,
+            'BgpFilteringProfile': self._bgp_filtering_profile_entries,
+            'LogicalRouter': self._logical_router_entries,
+            'RoutePrefixList': self._route_prefix_list_entries,
+            'RouteAccessList': self._route_access_list_entries,
+            'RouteCommunityList': self._route_community_list_entries,
+            'RoutePathAccessList': self._route_path_access_list_entries,
+            'BgpRouteMap': self._bgp_route_map_entries,
+            'BgpRouteMapRedistribution': self._bgp_route_map_redistribution_entries,
+            'BgpRedistributionProfile': self._bgp_redistribution_profile_entries,
+            'IKECryptoProfile': self._ike_crypto_profile_entries,
+            'IPsecCryptoProfile': self._ipsec_crypto_profile_entries,
+            'IKEGateway': self._ike_gateway_entries,
+            'IPsecTunnel': self._ipsec_tunnel_entries,
+            'PbfRule': self._pbf_rule_entries,
             'Zones': self._zones,
             'DecryptionProfile': self._decryption_profiles_entries,
             'decryption_pre_rules': self._decryption_pre_rules_entries,
@@ -159,10 +323,151 @@ class XMLParser:
             else:
                 self.logger.warning(f"Unknown object type requested: {obj_type}")
 
+        parsed_data['_migration_warnings'] = self._migration_warning_entries()
         return parsed_data
 
     def _parse_entries(self, parse_function):
         return parse_function()
+
+    def _migration_warning_entries(self):
+        if self.config_type != 'local':
+            return []
+
+        warnings = []
+        router_entries = self.root.findall('./devices/entry/network/virtual-router/entry')
+        if not router_entries and self.root.findall('.//network/virtual-router/entry'):
+            warnings.append(
+                self._migration_warning(
+                    "LogicalRouter",
+                    "local",
+                    "network.virtual-router",
+                    "unsupported-panos-config-layout",
+                    "PAN-OS virtual routers were found outside the local firewall network path; use a supported local running-config XML or add Panorama template parsing before migrating this file.",
+                )
+            )
+
+        for router_entry in router_entries:
+            router_name = router_entry.get('name') or "unknown"
+            if router_entry.find('ecmp') is not None:
+                warnings.append(
+                    self._migration_warning(
+                        "LogicalRouter",
+                        router_name,
+                        f"network.virtual-router.entry[{router_name}].ecmp",
+                        "unsupported-panos-routing-node",
+                        "PAN-OS ECMP settings are not migrated yet; review and recreate ECMP behavior in SCM if required.",
+                    )
+                )
+
+            bgp = router_entry.find('protocol/bgp')
+            if bgp is not None:
+                warnings.extend(self._bgp_unsupported_warning_entries(router_entry, router_name, bgp))
+
+            for path, message in [
+                (
+                    "protocol/pim",
+                    "PAN-OS PIM settings are not migrated yet; review multicast routing requirements in SCM.",
+                ),
+                (
+                    "protocol/multicast",
+                    "PAN-OS multicast routing settings are not migrated yet; review multicast routing requirements in SCM.",
+                ),
+            ]:
+                if router_entry.find(path) is not None:
+                    warnings.append(
+                        self._migration_warning(
+                            "LogicalRouter",
+                            router_name,
+                            f"network.virtual-router.entry[{router_name}].{path.replace('/', '.')}",
+                            "unsupported-panos-routing-node",
+                            message,
+                        )
+                    )
+
+            for route_family, route_path in [
+                ("ip", "routing-table/ip/static-route/entry"),
+                ("ipv6", "routing-table/ipv6/static-route/entry"),
+            ]:
+                for route_entry in router_entry.findall(route_path):
+                    route_name = route_entry.get('name') or "unnamed-static-route"
+                    if route_entry.find('nexthop/qualified-next-hop') is not None:
+                        warnings.append(
+                            self._migration_warning(
+                                "LogicalRouter",
+                                router_name,
+                                f"network.virtual-router.entry[{router_name}].routing-table.{route_family}.static-route.entry[{route_name}].nexthop.qualified-next-hop",
+                                "unsupported-panos-routing-node",
+                                "PAN-OS qualified-next-hop static route data is not migrated because the target SCM static route field is not implemented in this tool yet.",
+                            )
+                        )
+        return warnings
+
+    def _bgp_unsupported_warning_entries(self, router_entry, router_name, bgp):
+        warnings = []
+        for profile_entry in bgp.findall('dampening-profile/entry'):
+            profile_name = profile_entry.get('name') or "unnamed-dampening-profile"
+            warnings.append(
+                self._migration_warning(
+                    "LogicalRouter",
+                    router_name,
+                    f"network.virtual-router.entry[{router_name}].protocol.bgp.dampening-profile.entry[{profile_name}]",
+                    "unsupported-panos-routing-node",
+                    "PAN-OS BGP dampening profiles are not migrated yet; review BGP address-family behavior in SCM.",
+                )
+            )
+
+        for path in ['conditional-advertisement', 'conditional-advertise']:
+            if bgp.find(path) is not None and not any(
+                self._convert_bgp_conditional_advertisement(router_entry, family)
+                for family in ('ipv4', 'ipv6')
+            ):
+                warnings.append(
+                    self._migration_warning(
+                        "LogicalRouter",
+                        router_name,
+                        f"network.virtual-router.entry[{router_name}].protocol.bgp.{path}",
+                        "unsupported-panos-routing-node",
+                        "PAN-OS BGP conditional advertisement is not migrated yet; recreate conditional advertisement logic in SCM if required.",
+                    )
+                )
+
+        if bgp.find('routing-options/graceful-restart') is not None and not self._convert_bgp_graceful_restart(bgp):
+            warnings.append(
+                self._migration_warning(
+                    "LogicalRouter",
+                    router_name,
+                    f"network.virtual-router.entry[{router_name}].protocol.bgp.routing-options.graceful-restart",
+                    "unsupported-panos-routing-node",
+                    "PAN-OS BGP graceful-restart routing options are not migrated yet; validate BGP restart behavior in SCM.",
+                )
+            )
+
+        for redist_entry in self._bgp_redist_rule_entries_from_bgp(bgp):
+            source_type = self._bgp_redist_source_type(redist_entry)
+            if source_type not in {'static', 'connected', 'ospf'}:
+                rule_name = redist_entry.get('name') or "unnamed-redist-rule"
+                warnings.append(
+                    self._migration_warning(
+                        "BgpRedistributionProfile",
+                        router_name,
+                        f"network.virtual-router.entry[{router_name}].protocol.bgp.redist-rules.entry[{rule_name}]",
+                        "unsupported-panos-routing-node",
+                        "PAN-OS BGP redistribution rule source type is not mapped to the current SCM redistribution profile conversion.",
+                    )
+                )
+
+        return warnings
+
+    @staticmethod
+    def _migration_warning(object_type, name, path, code, message, severity="warning"):
+        return {
+            "object_type": object_type,
+            "name": name,
+            "path": path,
+            "code": code,
+            "severity": severity,
+            "message": message,
+        }
 
     def _url_category_entries(self):
         # Example: You can refactor individual parse methods in a similar way
@@ -919,6 +1224,18 @@ class XMLParser:
             addresses.append(filtered_address)
 
         return addresses
+
+    def _resolve_panos_ip(self, value):
+        if not value:
+            return value
+
+        for address_entry in self.root.findall('./devices/entry/vsys/entry/address/entry'):
+            if address_entry.get('name') != value:
+                continue
+            ip_netmask = self._child_text(address_entry, 'ip-netmask')
+            return ip_netmask or value
+
+        return value
 
     def _address_group_entries(self):
         base_xpath_dict = {
@@ -1686,33 +2003,3080 @@ class XMLParser:
 
         return schedules
 
-    def _zones(self):
-        tree = ET.parse(self.file_path)
-        root = tree.getroot()
+    def _interface_management_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Interface management profile migration currently supports local firewall XML only.")
+            return []
 
-        zone_entries = []
+        profiles = []
+        for entry in self.root.findall('./devices/entry/network/profiles/interface-management-profile/entry'):
+            payload = self._convert_interface_management_profile(entry)
+            if payload:
+                profiles.append(payload)
 
-        for zone_entry in root.findall('../devices/entry/vsys/entry/zone/entry'):
-            zone_name = zone_entry.get('name')
-            zone_protection_profile = zone_entry.find('.//zone-protection-profile')
+        return profiles
 
-            network_data = {}
+    def _convert_interface_management_profile(self, entry):
+        profile_name = entry.get('name')
+        if not profile_name:
+            return None
 
-            for layer in ['layer3', 'layer2', 'v-wire']:
-                layer_element = zone_entry.find(f'.//{layer}')
-                if layer_element is not None:
-                    interfaces = [member.text for member in layer_element.findall('member')]
-                    network_data[layer] = {'member': interfaces}
+        payload = {'name': profile_name}
+        for service in ['ping', 'https', 'ssh', 'snmp', 'response-pages', 'userid-service']:
+            value = self._child_text(entry, service)
+            if value:
+                payload[service.replace('-', '_')] = value.lower() == 'yes'
 
-            entry_data = {
-                '@name': zone_name,
-                'network': network_data
+        permitted_ips = self._member_or_entry_names(entry.find('permitted-ip'))
+        if permitted_ips:
+            payload['permitted_ip'] = [{'name': permitted_ip} for permitted_ip in permitted_ips]
+
+        return payload
+
+    @staticmethod
+    def _member_or_entry_names(parent):
+        if parent is None:
+            return []
+
+        values = [
+            child.text.strip()
+            for child in parent.findall('member')
+            if child.text and child.text.strip()
+        ]
+        values.extend(
+            child.get('name')
+            for child in parent.findall('entry')
+            if child.get('name')
+        )
+        return values
+
+    def _zone_protection_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Zone protection profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        for entry in self.root.findall('./devices/entry/network/profiles/zone-protection-profile/entry'):
+            payload = self._convert_zone_protection_profile(entry)
+            if payload:
+                profiles.append(payload)
+
+        return profiles
+
+    def _convert_zone_protection_profile(self, entry):
+        profile_name = entry.get('name')
+        if not profile_name:
+            return None
+
+        payload = {'name': profile_name}
+        description = self._child_text(entry, 'description')
+        if description:
+            payload['description'] = description
+
+        flood = self._convert_zone_protection_flood(entry.find('flood'))
+        if flood:
+            payload['flood'] = flood
+
+        reconnaissance = self._convert_zone_protection_reconnaissance(entry.find('scan'))
+        if reconnaissance:
+            payload['reconnaissance'] = reconnaissance
+
+        return payload
+
+    def _convert_zone_protection_flood(self, flood):
+        if flood is None:
+            return None
+
+        flood_payload = {}
+        for panos_name, scm_name in [
+            ('tcp-syn', 'tcp_syn'),
+            ('udp', 'udp'),
+            ('icmp', 'icmp'),
+            ('icmpv6', 'icmpv6'),
+            ('other-ip', 'other_ip'),
+        ]:
+            section = flood.find(panos_name)
+            if section is None:
+                continue
+            converted = self._convert_zone_protection_flood_section(section)
+            if converted:
+                flood_payload[scm_name] = converted
+
+        return flood_payload
+
+    def _convert_zone_protection_flood_section(self, section):
+        payload = {}
+        enabled = self._child_text(section, 'enable')
+        if enabled:
+            payload['enable'] = enabled.lower() == 'yes'
+
+        red = section.find('red')
+        if red is not None:
+            red_payload = self._int_child_map(
+                red,
+                {
+                    'alarm-rate': 'alarm_rate',
+                    'activate-rate': 'activate_rate',
+                    'maximal-rate': 'maximal_rate',
+                    'block-duration': 'block_duration',
+                },
+            )
+            if red_payload:
+                payload['red'] = red_payload
+
+        syn_cookies = section.find('syn-cookies')
+        if syn_cookies is not None:
+            syn_cookie_payload = self._int_child_map(
+                syn_cookies,
+                {
+                    'alarm-rate': 'alarm_rate',
+                    'activate-rate': 'activate_rate',
+                    'maximal-rate': 'maximal_rate',
+                },
+            )
+            if syn_cookie_payload:
+                payload['syn_cookies'] = syn_cookie_payload
+
+        return payload
+
+    def _convert_zone_protection_reconnaissance(self, scan):
+        if scan is None:
+            return None
+
+        reconnaissance = {}
+        for entry in scan.findall('entry'):
+            scan_name = entry.get('name')
+            if not scan_name:
+                continue
+
+            scan_payload = self._int_child_map(
+                entry,
+                {
+                    'interval': 'interval',
+                    'threshold': 'threshold',
+                },
+            )
+            action = self._first_child_name(entry.find('action'))
+            if action:
+                scan_payload['action'] = action
+            if scan_payload:
+                reconnaissance[scan_name.replace('-', '_')] = scan_payload
+
+        return reconnaissance
+
+    def _int_child_map(self, entry, field_map):
+        payload = {}
+        for panos_name, scm_name in field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value and value.isdigit():
+                payload[scm_name] = int(value)
+        return payload
+
+    @staticmethod
+    def _first_child_name(entry):
+        if entry is not None and list(entry):
+            return list(entry)[0].tag.replace('-', '_')
+        return None
+
+    def _dhcp_interface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("DHCP interface migration currently supports local firewall XML only.")
+            return []
+
+        interfaces = []
+        for entry in self.root.findall('./devices/entry/network/dhcp/interface/entry'):
+            payload = self._convert_dhcp_interface(entry)
+            if payload:
+                interfaces.append(payload)
+
+        return interfaces
+
+    def _convert_dhcp_interface(self, entry):
+        interface_name = entry.get('name')
+        if not interface_name:
+            return None
+
+        payload = {'name': interface_name}
+
+        server = self._convert_dhcp_server(entry.find('server'))
+        if server:
+            payload['server'] = server
+
+        relay = self._convert_dhcp_relay(entry.find('relay'))
+        if relay:
+            payload['relay'] = relay
+
+        if not server and not relay:
+            self.logger.warning(f"Skipping DHCP interface '{interface_name}' because it has no supported server or relay configuration.")
+            return None
+
+        return payload
+
+    def _convert_dhcp_server(self, server):
+        if server is None:
+            return None
+
+        payload = {}
+        mode = self._child_text(server, 'mode')
+        if mode:
+            payload['mode'] = mode
+
+        ip_pool = self._member_or_entry_names(server.find('ip-pool'))
+        if ip_pool:
+            payload['ip_pool'] = ip_pool
+
+        option = self._convert_dhcp_server_option(server.find('option'))
+        if option:
+            payload['option'] = option
+
+        reserved = []
+        for reserved_entry in server.findall('reserved/entry'):
+            reservation = self._convert_dhcp_reservation(reserved_entry)
+            if reservation:
+                reserved.append(reservation)
+        if reserved:
+            payload['reserved'] = reserved
+
+        return payload or None
+
+    def _convert_dhcp_server_option(self, option):
+        if option is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('gateway', 'gateway'),
+            ('subnet-mask', 'subnet_mask'),
+            ('primary-dns', 'primary_dns'),
+            ('secondary-dns', 'secondary_dns'),
+            ('primary-wins', 'primary_wins'),
+            ('secondary-wins', 'secondary_wins'),
+            ('domain', 'domain'),
+        ]:
+            value = self._child_text(option, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        lease = self._convert_dhcp_lease(option.find('lease'))
+        if lease:
+            payload['lease'] = lease
+
+        dns_suffix = self._member_texts(option.find('dns-suffix'))
+        if dns_suffix:
+            payload['dns_suffix'] = dns_suffix
+
+        return payload or None
+
+    def _convert_dhcp_lease(self, lease):
+        if lease is None:
+            return None
+
+        if lease.find('unlimited') is not None:
+            return {'unlimited': {}}
+
+        timeout = lease.find('timeout')
+        if timeout is not None:
+            timeout_payload = self._int_child_map(
+                timeout,
+                {
+                    'days': 'days',
+                    'hours': 'hours',
+                    'minutes': 'minutes',
+                },
+            )
+            if timeout_payload:
+                return {'timeout': timeout_payload}
+
+        return None
+
+    def _convert_dhcp_reservation(self, entry):
+        reservation_name = entry.get('name')
+        if not reservation_name:
+            return None
+
+        payload = {'name': reservation_name}
+        for panos_name, scm_name in [
+            ('mac', 'mac'),
+            ('ip', 'ip'),
+            ('description', 'description'),
+        ]:
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        return payload
+
+    def _convert_dhcp_relay(self, relay):
+        if relay is None:
+            return None
+
+        payload = {}
+        enabled = self._child_text(relay, 'enable')
+        if enabled:
+            payload['enable'] = enabled.lower() == 'yes'
+
+        servers = self._member_texts(relay.find('server'))
+        if servers:
+            payload['server'] = servers
+
+        return payload or None
+
+    def _aggregate_interface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Aggregate interface migration currently supports local firewall XML only.")
+            return []
+
+        interfaces = []
+        for entry in self.root.findall('./devices/entry/network/interface/aggregate-ethernet/entry'):
+            payload = self._convert_aggregate_interface(entry)
+            if payload:
+                interfaces.append(payload)
+
+        return interfaces
+
+    def _convert_aggregate_interface(self, entry):
+        aggregate_name = entry.get('name')
+        if not aggregate_name:
+            return None
+
+        payload = {
+            'name': self._scm_interface_object_name(aggregate_name),
+            'default_value': aggregate_name,
+        }
+
+        comment = self._child_text(entry, 'comment')
+        if comment:
+            payload['comment'] = comment
+
+        lacp = self._convert_lacp(entry.find('lacp'))
+        if lacp:
+            payload['lacp'] = lacp
+
+        layer3 = entry.find('layer3')
+        if layer3 is not None:
+            payload['layer3'] = self._convert_ethernet_layer3(layer3)
+            return payload
+
+        if entry.find('layer2') is not None:
+            payload['layer2'] = {}
+            return payload
+
+        self.logger.warning(f"Skipping aggregate interface '{aggregate_name}' because it has no supported mode.")
+        return None
+
+    def _convert_lacp(self, lacp):
+        if lacp is None:
+            return None
+
+        lacp_payload = {}
+        enabled = self._child_text(lacp, 'enable')
+        if enabled:
+            lacp_payload['enable'] = enabled.lower() == 'yes'
+
+        mode = self._child_text(lacp, 'mode')
+        if mode:
+            lacp_payload['mode'] = mode
+
+        transmission_rate = self._child_text(lacp, 'transmission-rate')
+        if transmission_rate:
+            lacp_payload['transmission_rate'] = transmission_rate
+
+        return lacp_payload or None
+
+    def _ethernet_interface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Ethernet interface migration currently supports local firewall XML only.")
+            return []
+
+        interfaces = []
+        for entry in self.root.findall('./devices/entry/network/interface/ethernet/entry'):
+            payload = self._convert_ethernet_interface(entry)
+            if payload:
+                interfaces.append(payload)
+
+        return interfaces
+
+    def _convert_ethernet_interface(self, entry):
+        physical_name = entry.get('name')
+        if not physical_name:
+            return None
+
+        payload = {
+            'name': self._scm_interface_object_name(physical_name),
+            'default_value': physical_name,
+        }
+
+        field_map = {
+            'comment': 'comment',
+            'link-speed': 'link_speed',
+            'link-duplex': 'link_duplex',
+            'link-state': 'link_state',
+        }
+        for panos_name, scm_name in field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        aggregate_group = self._child_text(entry, 'aggregate-group')
+        if aggregate_group:
+            payload['aggregate_group'] = aggregate_group
+            return payload
+
+        layer3 = entry.find('layer3')
+        if layer3 is not None:
+            payload['layer3'] = self._convert_ethernet_layer3(layer3)
+            return payload
+
+        if entry.find('layer2') is not None:
+            payload['layer2'] = {}
+            return payload
+
+        if entry.find('virtual-wire') is not None or entry.find('virtual-wire-interfaces') is not None:
+            payload['virtual_wire'] = {}
+            return payload
+
+        if entry.find('tap') is not None:
+            payload['tap'] = {}
+            return payload
+
+        self.logger.warning(f"Skipping ethernet interface '{physical_name}' because it has no supported mode.")
+        return None
+
+    def _convert_ethernet_layer3(self, layer3):
+        layer3_payload = {}
+
+        dhcp_client = self._convert_dhcp_client(layer3.find('dhcp-client'))
+        if dhcp_client:
+            layer3_payload['dhcp_client'] = dhcp_client
+        else:
+            ip_entries = [
+                self._resolve_panos_ip(ip_entry.get('name'))
+                for ip_entry in layer3.findall('ip/entry')
+                if ip_entry.get('name')
+            ]
+            if ip_entries:
+                layer3_payload['ip'] = [{'name': ip_address} for ip_address in ip_entries]
+
+        mtu = self._child_text(layer3, 'mtu')
+        if mtu and mtu.isdigit():
+            layer3_payload['mtu'] = int(mtu)
+
+        management_profile = self._child_text(layer3, 'interface-management-profile')
+        if management_profile:
+            layer3_payload['interface_management_profile'] = management_profile
+
+        return layer3_payload
+
+    def _convert_dhcp_client(self, dhcp_client):
+        if dhcp_client is None:
+            return None
+
+        payload = {}
+        boolean_fields = {
+            'enable': 'enable',
+            'create-default-route': 'create_default_route',
+        }
+        for panos_name, scm_name in boolean_fields.items():
+            value = self._child_text(dhcp_client, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes'
+
+        metric = self._child_text(dhcp_client, 'default-route-metric')
+        if metric and metric.isdigit():
+            payload['default_route_metric'] = int(metric)
+
+        send_hostname = dhcp_client.find('send-hostname')
+        if send_hostname is not None:
+            send_hostname_payload = {}
+            enabled = self._child_text(send_hostname, 'enable')
+            if enabled:
+                send_hostname_payload['enable'] = enabled.lower() == 'yes'
+            hostname = self._child_text(send_hostname, 'hostname')
+            if hostname:
+                send_hostname_payload['hostname'] = hostname
+            if send_hostname_payload:
+                payload['send_hostname'] = send_hostname_payload
+
+        return payload or None
+
+    def _static_ip_entries(self, entry):
+        ip_entries = [
+            self._resolve_panos_ip(ip_entry.get('name'))
+            for ip_entry in entry.findall('ip/entry')
+            if ip_entry.get('name')
+        ]
+        return [{'name': ip_address} for ip_address in ip_entries]
+
+    def _apply_common_l3_interface_fields(self, payload, entry):
+        field_map = {
+            'comment': 'comment',
+            'interface-management-profile': 'interface_management_profile',
+            'netflow-profile': 'netflow_profile',
+        }
+        for panos_name, scm_name in field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        mtu = self._child_text(entry, 'mtu')
+        if mtu and mtu.isdigit():
+            payload['mtu'] = int(mtu)
+
+        dhcp_client = self._convert_dhcp_client(entry.find('dhcp-client'))
+        if dhcp_client:
+            payload['dhcp_client'] = dhcp_client
+        else:
+            ip_entries = self._static_ip_entries(entry)
+            if ip_entries:
+                payload['ip'] = ip_entries
+
+        return payload
+
+    def _apply_common_l2_interface_fields(self, payload, entry):
+        field_map = {
+            'comment': 'comment',
+            'netflow-profile': 'netflow_profile',
+        }
+        for panos_name, scm_name in field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        return payload
+
+    def _layer2_subinterface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Layer 2 subinterface migration currently supports local firewall XML only.")
+            return []
+
+        subinterfaces = []
+        for parent_entry in self.root.findall('./devices/entry/network/interface/ethernet/entry'):
+            parent_name = parent_entry.get('name')
+            if not parent_name:
+                continue
+
+            for subinterface_entry in parent_entry.findall('layer2/units/entry'):
+                payload = self._convert_layer2_subinterface(parent_name, subinterface_entry)
+                if payload:
+                    subinterfaces.append(payload)
+
+        for parent_entry in self.root.findall('./devices/entry/network/interface/aggregate-ethernet/entry'):
+            parent_name = parent_entry.get('name')
+            if not parent_name:
+                continue
+
+            for subinterface_entry in parent_entry.findall('layer2/units/entry'):
+                payload = self._convert_layer2_subinterface(parent_name, subinterface_entry)
+                if payload:
+                    subinterfaces.append(payload)
+
+        return subinterfaces
+
+    def _convert_layer2_subinterface(self, parent_name, entry):
+        subinterface_name = entry.get('name')
+        if not subinterface_name:
+            return None
+
+        payload = {
+            'name': self._scm_interface_object_name(subinterface_name),
+            'default_value': subinterface_name,
+            'parent_interface': parent_name,
+        }
+
+        tag = self._child_text(entry, 'tag')
+        if tag and tag.isdigit():
+            payload['tag'] = int(tag)
+
+        return self._apply_common_l2_interface_fields(payload, entry)
+
+    def _layer3_subinterface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Layer 3 subinterface migration currently supports local firewall XML only.")
+            return []
+
+        subinterfaces = []
+        for parent_entry in self.root.findall('./devices/entry/network/interface/ethernet/entry'):
+            parent_name = parent_entry.get('name')
+            if not parent_name:
+                continue
+
+            for subinterface_entry in parent_entry.findall('layer3/units/entry'):
+                payload = self._convert_layer3_subinterface(parent_name, subinterface_entry)
+                if payload:
+                    subinterfaces.append(payload)
+
+        for parent_entry in self.root.findall('./devices/entry/network/interface/aggregate-ethernet/entry'):
+            parent_name = parent_entry.get('name')
+            if not parent_name:
+                continue
+
+            for subinterface_entry in parent_entry.findall('layer3/units/entry'):
+                payload = self._convert_layer3_subinterface(parent_name, subinterface_entry)
+                if payload:
+                    subinterfaces.append(payload)
+
+        return subinterfaces
+
+    def _convert_layer3_subinterface(self, parent_name, entry):
+        subinterface_name = entry.get('name')
+        if not subinterface_name:
+            return None
+
+        payload = {
+            'name': self._scm_interface_object_name(subinterface_name),
+            'default_value': subinterface_name,
+            'parent_interface': parent_name,
+        }
+
+        tag = self._child_text(entry, 'tag')
+        if tag and tag.isdigit():
+            payload['tag'] = int(tag)
+
+        return self._apply_common_l3_interface_fields(payload, entry)
+
+    def _vlan_interface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("VLAN interface migration currently supports local firewall XML only.")
+            return []
+
+        interfaces = []
+        for entry in self.root.findall('./devices/entry/network/interface/vlan/units/entry'):
+            payload = self._convert_vlan_interface(entry)
+            if payload:
+                interfaces.append(payload)
+
+        return interfaces
+
+    def _convert_vlan_interface(self, entry):
+        interface_name = entry.get('name')
+        if not interface_name:
+            return None
+
+        payload = {'name': interface_name}
+        vlan_tag = self._child_text(entry, 'tag')
+        if vlan_tag:
+            payload['vlan_tag'] = vlan_tag
+
+        return self._apply_common_l3_interface_fields(payload, entry)
+
+    def _tunnel_interface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Tunnel interface migration currently supports local firewall XML only.")
+            return []
+
+        interfaces = []
+        for entry in self.root.findall('./devices/entry/network/interface/tunnel/units/entry'):
+            payload = self._convert_tunnel_interface(entry)
+            if payload:
+                interfaces.append(payload)
+
+        return interfaces
+
+    def _convert_tunnel_interface(self, entry):
+        interface_name = entry.get('name')
+        if not interface_name:
+            return None
+
+        payload = {
+            'name': self._scm_interface_object_name(interface_name),
+            'default_value': interface_name,
+        }
+
+        return self._apply_common_l3_interface_fields(payload, entry)
+
+    def _loopback_interface_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Loopback interface migration currently supports local firewall XML only.")
+            return []
+
+        interfaces = []
+        for entry in self.root.findall('./devices/entry/network/interface/loopback/units/entry'):
+            payload = self._convert_loopback_interface(entry)
+            if payload:
+                interfaces.append(payload)
+
+        return interfaces
+
+    def _convert_loopback_interface(self, entry):
+        interface_name = entry.get('name')
+        if not interface_name:
+            return None
+
+        payload = {
+            'name': self._scm_interface_object_name(interface_name),
+            'default_value': interface_name,
+        }
+        field_map = {
+            'comment': 'comment',
+            'interface-management-profile': 'interface_management_profile',
+        }
+        for panos_name, scm_name in field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        mtu = self._child_text(entry, 'mtu')
+        if mtu and mtu.isdigit():
+            payload['mtu'] = int(mtu)
+
+        ip_entries = [
+            self._resolve_panos_ip(ip_entry.get('name'))
+            for ip_entry in entry.findall('ip/entry')
+            if ip_entry.get('name')
+        ]
+        if ip_entries:
+            payload['ip'] = ip_entries
+
+        return payload
+
+    def _logical_router_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Logical router migration currently supports local firewall XML only.")
+            return []
+
+        logical_routers = []
+        for entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            payload = self._convert_panos_virtual_router_to_logical_router(entry)
+            if payload:
+                logical_routers.append(payload)
+
+        return logical_routers
+
+    def _convert_panos_virtual_router_to_logical_router(self, entry):
+        router_name = entry.get('name')
+        if not router_name:
+            return None
+
+        vrf = {'name': 'default'}
+        interfaces = [
+            member.text.strip()
+            for member in entry.findall('interface/member')
+            if member.text and member.text.strip()
+        ]
+        if interfaces:
+            vrf['interface'] = interfaces
+
+        static_routes = []
+        for route_entry in entry.findall('routing-table/ip/static-route/entry'):
+            route = self._convert_static_route(route_entry)
+            if route:
+                static_routes.append(route)
+
+        if static_routes:
+            vrf['routing_table'] = {'ip': {'static_route': static_routes}}
+
+        static_routes_v6 = []
+        for route_entry in entry.findall('routing-table/ipv6/static-route/entry'):
+            route = self._convert_static_route(route_entry)
+            if route:
+                static_routes_v6.append(route)
+
+        if static_routes_v6:
+            routing_table = vrf.setdefault('routing_table', {})
+            routing_table['ipv6'] = {'static_route': static_routes_v6}
+
+        bgp = self._convert_bgp(entry.find('protocol/bgp'), entry)
+        if bgp:
+            vrf['bgp'] = bgp
+
+        ospf = self._convert_ospf(entry.find('protocol/ospf'))
+        if ospf:
+            vrf['ospf'] = ospf
+
+        ospfv3 = self._convert_ospfv3(entry.find('protocol/ospfv3'))
+        if ospfv3:
+            vrf['ospfv3'] = ospfv3
+
+        return {
+            'name': router_name,
+            'routing_stack': 'advanced',
+            'vrf': [vrf],
+        }
+
+    def _convert_static_route(self, entry):
+        route_name = entry.get('name')
+        if not route_name:
+            return None
+
+        route = {'name': self._sanitize_name(route_name)}
+        field_map = {
+            'destination': 'destination',
+            'interface': 'interface',
+        }
+        for panos_name, scm_name in field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value:
+                if panos_name == 'destination':
+                    value = self._resolve_panos_ip(value)
+                    if '/' not in value:
+                        if re.match(r'^\d{1,3}(?:\.\d{1,3}){3}$', value):
+                            value = f'{value}/32'
+                        elif ':' in value:
+                            value = f'{value}/128'
+                route[scm_name] = value
+
+        int_field_map = {
+            'metric': 'metric',
+            'admin-dist': 'admin_dist',
+        }
+        for panos_name, scm_name in int_field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value and value.isdigit():
+                route[scm_name] = int(value)
+
+        route_table = self._convert_static_route_table(entry.find('route-table'))
+        if route_table:
+            route['route_table'] = route_table
+
+        option = self._convert_static_route_option(entry.find('option'))
+        if option:
+            route['option'] = option
+
+        nexthop = self._convert_static_route_nexthop(entry.find('nexthop'))
+        if nexthop:
+            route['nexthop'] = nexthop
+
+        bfd_profile = self._child_text(entry, 'bfd/profile')
+        if bfd_profile:
+            route['bfd'] = {'profile': bfd_profile}
+
+        path_monitor = self._convert_static_route_path_monitor(entry.find('path-monitor'))
+        if path_monitor:
+            route['path_monitor'] = path_monitor
+
+        return route
+
+    def _convert_static_route_table(self, route_table):
+        if route_table is None:
+            return None
+
+        for table_name in ['unicast', 'multicast', 'both', 'no-install', 'no_install']:
+            if route_table.find(table_name) is not None:
+                return {table_name.replace('-', '_'): {}}
+
+        value = self._first_text_or_member(route_table)
+        if value:
+            return {value.replace('-', '_'): {}}
+        return None
+
+    def _convert_static_route_option(self, option):
+        if option is None:
+            return None
+
+        payload = {}
+        if option.find('passive') is not None:
+            payload['passive'] = {}
+        return payload or None
+
+    def _convert_static_route_nexthop(self, nexthop):
+        if nexthop is None:
+            return None
+
+        text_fields = {
+            'ip-address': 'ip_address',
+            'ipv6-address': 'ipv6_address',
+            'fqdn': 'fqdn',
+            'next-vr': 'next_lr',
+            'next-lr': 'next_lr',
+            'tunnel': 'tunnel',
+        }
+        for panos_name, scm_name in text_fields.items():
+            value = self._child_text(nexthop, panos_name)
+            if value:
+                if scm_name in {'ip_address', 'ipv6_address'}:
+                    value = self._resolve_panos_ip(value)
+                return {scm_name: value}
+
+        for empty_field in ['receive', 'discard']:
+            if nexthop.find(empty_field) is not None:
+                return {empty_field: {}}
+
+        return None
+
+    def _convert_static_route_path_monitor(self, path_monitor):
+        if path_monitor is None:
+            return None
+
+        payload = {}
+        enabled = self._child_text(path_monitor, 'enable')
+        if enabled:
+            payload['enable'] = enabled.lower() == 'yes'
+
+        failure_condition = self._child_text(path_monitor, 'failure-condition')
+        if failure_condition:
+            payload['failure_condition'] = failure_condition
+
+        hold_time = self._child_text(path_monitor, 'hold-time')
+        if hold_time and hold_time.isdigit():
+            payload['hold_time'] = int(hold_time)
+
+        destinations = []
+        for destination_entry in path_monitor.findall('monitor-destinations/entry'):
+            destination = {'name': destination_entry.get('name')}
+            for panos_name, scm_name in [
+                ('enable', 'enable'),
+                ('source', 'source'),
+                ('destination', 'destination'),
+                ('destination-fqdn', 'destination_fqdn'),
+                ('interval', 'interval'),
+                ('count', 'count'),
+            ]:
+                value = self._child_text(destination_entry, panos_name)
+                if not value:
+                    continue
+                if panos_name == 'enable':
+                    destination[scm_name] = value.lower() == 'yes'
+                elif value.isdigit():
+                    destination[scm_name] = int(value)
+                else:
+                    destination[scm_name] = value
+            if destination.get('name'):
+                destinations.append(destination)
+
+        if destinations:
+            payload['monitor_destinations'] = destinations
+
+        return payload or None
+
+    def _ike_crypto_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("IKE crypto profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        for entry in self.root.findall('./devices/entry/network/ike/crypto-profiles/ike-crypto-profiles/entry'):
+            payload = self._convert_ike_crypto_profile(entry)
+            if payload:
+                profiles.append(payload)
+
+        return profiles
+
+    def _convert_ike_crypto_profile(self, entry):
+        profile_name = entry.get('name')
+        if not profile_name:
+            return None
+
+        payload = {'name': profile_name}
+        for panos_name, scm_name in [
+            ('hash', 'hash'),
+            ('encryption', 'encryption'),
+            ('dh-group', 'dh_group'),
+        ]:
+            values = self._member_texts(entry.find(panos_name))
+            if values:
+                payload[scm_name] = values
+
+        lifetime = self._convert_lifetime(entry.find('lifetime'))
+        if lifetime:
+            payload['lifetime'] = lifetime
+
+        authentication_multiple = self._child_text(entry, 'authentication-multiple')
+        if authentication_multiple and authentication_multiple.isdigit():
+            payload['authentication_multiple'] = int(authentication_multiple)
+
+        return payload
+
+    def _ipsec_crypto_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("IPsec crypto profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        for entry in self.root.findall('./devices/entry/network/ike/crypto-profiles/ipsec-crypto-profiles/entry'):
+            payload = self._convert_ipsec_crypto_profile(entry)
+            if payload:
+                profiles.append(payload)
+
+        return profiles
+
+    def _convert_ipsec_crypto_profile(self, entry):
+        profile_name = entry.get('name')
+        if not profile_name:
+            return None
+
+        payload = {'name': profile_name}
+        esp = entry.find('esp')
+        if esp is not None:
+            esp_payload = {}
+            encryption = self._member_texts(esp.find('encryption'))
+            if encryption:
+                esp_payload['encryption'] = encryption
+            authentication = self._member_texts(esp.find('authentication'))
+            if authentication:
+                esp_payload['authentication'] = authentication
+            if esp_payload:
+                payload['esp'] = esp_payload
+
+        dh_group = self._first_text_or_member(entry.find('dh-group'))
+        if dh_group:
+            payload['dh_group'] = dh_group
+
+        lifetime = self._convert_lifetime(entry.find('lifetime'))
+        if lifetime:
+            payload['lifetime'] = lifetime
+
+        return payload
+
+    def _ike_gateway_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("IKE gateway migration currently supports local firewall XML only.")
+            return []
+
+        gateways = []
+        for entry in self.root.findall('./devices/entry/network/ike/gateway/entry'):
+            payload = self._convert_ike_gateway(entry)
+            if payload:
+                gateways.append(payload)
+
+        return gateways
+
+    def _convert_ike_gateway(self, entry):
+        gateway_name = entry.get('name')
+        if not gateway_name:
+            return None
+
+        payload = {'name': gateway_name}
+
+        protocol = self._convert_ike_gateway_protocol(entry.find('protocol'))
+        if protocol:
+            payload['protocol'] = protocol
+
+        local_address = self._convert_named_text_fields(
+            entry.find('local-address'),
+            {
+                'interface': 'interface',
+                'ip': 'ip',
+                'floating-ip': 'floating_ip',
+            },
+        )
+        if local_address:
+            if 'ip' in local_address:
+                local_address['ip'] = self._resolve_panos_ip(local_address['ip'])
+            payload['local_address'] = local_address
+
+        peer_address = self._convert_named_text_fields(
+            entry.find('peer-address'),
+            {
+                'ip': 'ip',
+                'fqdn': 'fqdn',
+                'dynamic': 'dynamic',
+            },
+        )
+        if peer_address:
+            payload['peer_address'] = peer_address
+
+        authentication = self._convert_ike_gateway_authentication(entry.find('authentication'))
+        if authentication:
+            payload['authentication'] = authentication
+
+        return payload
+
+    def _convert_ike_gateway_protocol(self, protocol):
+        if protocol is None:
+            return None
+
+        payload = {}
+        version = self._child_text(protocol, 'version')
+        if version:
+            payload['version'] = version
+
+        for version_name in ['ikev1', 'ikev2']:
+            version_element = protocol.find(version_name)
+            if version_element is None:
+                continue
+            version_payload = {}
+            crypto_profile = self._child_text(version_element, 'ike-crypto-profile')
+            if crypto_profile:
+                version_payload['ike_crypto_profile'] = crypto_profile
+            dpd = self._convert_dpd(version_element.find('dpd'))
+            if dpd:
+                version_payload['dpd'] = dpd
+            if version_payload:
+                payload[version_name] = version_payload
+
+        return payload or None
+
+    def _convert_dpd(self, dpd):
+        if dpd is None:
+            return None
+
+        payload = {}
+        enable = self._child_text(dpd, 'enable')
+        if enable:
+            payload['enable'] = enable.lower() == 'yes'
+
+        interval = self._child_text(dpd, 'interval')
+        if interval and interval.isdigit():
+            payload['interval'] = int(interval)
+
+        retry = self._child_text(dpd, 'retry')
+        if retry and retry.isdigit():
+            payload['retry'] = int(retry)
+
+        return payload or None
+
+    def _convert_ike_gateway_authentication(self, authentication):
+        if authentication is None:
+            return None
+
+        psk = authentication.find('pre-shared-key')
+        if psk is not None:
+            key = self._child_text(psk, 'key')
+            return {'pre_shared_key': {'key': key}} if key else {'pre_shared_key': {}}
+
+        certificate = authentication.find('certificate')
+        if certificate is not None:
+            certificate_profile = self._child_text(certificate, 'certificate-profile')
+            return {'certificate': {'certificate_profile': certificate_profile}} if certificate_profile else {'certificate': {}}
+
+        return None
+
+    def _ipsec_tunnel_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("IPsec tunnel migration currently supports local firewall XML only.")
+            return []
+
+        tunnels = []
+        for entry in self.root.findall('./devices/entry/network/tunnel/ipsec/entry'):
+            payload = self._convert_ipsec_tunnel(entry)
+            if payload:
+                tunnels.append(payload)
+
+        return tunnels
+
+    def _convert_ipsec_tunnel(self, entry):
+        tunnel_name = entry.get('name')
+        if not tunnel_name:
+            return None
+
+        payload = {'name': tunnel_name}
+        tunnel_interface = self._child_text(entry, 'tunnel-interface')
+        if tunnel_interface:
+            payload['tunnel_interface'] = tunnel_interface
+
+        auto_key = self._convert_ipsec_auto_key(entry.find('auto-key'))
+        if auto_key:
+            payload['auto_key'] = auto_key
+
+        for panos_name, scm_name in [
+            ('anti-replay', 'anti_replay'),
+            ('copy-tos', 'copy_tos'),
+            ('enable-gre-encapsulation', 'enable_gre_encapsulation'),
+        ]:
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes'
+
+        tunnel_monitor = self._convert_tunnel_monitor(entry.find('tunnel-monitor'))
+        if tunnel_monitor:
+            payload['tunnel_monitor'] = tunnel_monitor
+
+        return payload
+
+    def _convert_ipsec_auto_key(self, auto_key):
+        if auto_key is None:
+            return None
+
+        payload = {}
+        gateways = self._entry_names_or_member_texts(auto_key.find('ike-gateway'))
+        if gateways:
+            payload['ike_gateway'] = [{'name': gateway} for gateway in gateways]
+
+        crypto_profile = self._child_text(auto_key, 'ipsec-crypto-profile')
+        if crypto_profile:
+            payload['ipsec_crypto_profile'] = crypto_profile
+
+        proxy_ids = []
+        for proxy_id_entry in auto_key.findall('proxy-id/entry'):
+            proxy_id = self._convert_proxy_id(proxy_id_entry)
+            if proxy_id:
+                proxy_ids.append(proxy_id)
+        if proxy_ids:
+            payload['proxy_id'] = proxy_ids
+
+        return payload or None
+
+    def _convert_proxy_id(self, entry):
+        proxy_name = entry.get('name')
+        if not proxy_name:
+            return None
+
+        payload = {'name': proxy_name}
+        for panos_name, scm_name in [
+            ('local', 'local'),
+            ('remote', 'remote'),
+        ]:
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        protocol = entry.find('protocol')
+        if protocol is not None:
+            protocol_payload = {}
+            number = self._child_text(protocol, 'number')
+            if number and number.isdigit():
+                protocol_payload['number'] = int(number)
+            for protocol_name in ['any', 'tcp', 'udp']:
+                if protocol.find(protocol_name) is not None:
+                    protocol_payload[protocol_name] = {}
+                    break
+            if protocol_payload:
+                payload['protocol'] = protocol_payload
+
+        return payload
+
+    def _convert_tunnel_monitor(self, tunnel_monitor):
+        if tunnel_monitor is None:
+            return None
+
+        payload = {}
+        enable = self._child_text(tunnel_monitor, 'enable')
+        if enable:
+            payload['enable'] = enable.lower() == 'yes'
+
+        destination_ip = self._child_text(tunnel_monitor, 'destination-ip')
+        if destination_ip:
+            payload['destination_ip'] = destination_ip
+
+        proxy_id = self._child_text(tunnel_monitor, 'proxy-id')
+        if proxy_id:
+            payload['proxy_id'] = proxy_id
+
+        return payload or None
+
+    def _pbf_rule_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("PBF rule migration currently supports local firewall XML only.")
+            return []
+
+        rules = []
+        for entry in self.root.findall('./devices/entry/vsys/entry/rulebase/pbf/rules/entry'):
+            payload = self._convert_pbf_rule(entry)
+            if payload:
+                rules.append(payload)
+
+        return rules
+
+    def _convert_pbf_rule(self, entry):
+        rule_name = entry.get('name')
+        if not rule_name:
+            return None
+
+        payload = {'name': rule_name}
+        description = self._child_text(entry, 'description')
+        if description:
+            payload['description'] = description
+
+        for panos_name, scm_name in [
+            ('from', 'from'),
+            ('source', 'source'),
+            ('source-user', 'source_user'),
+            ('destination', 'destination'),
+            ('application', 'application'),
+            ('service', 'service'),
+        ]:
+            values = self._member_texts(entry.find(panos_name))
+            if values:
+                payload[scm_name] = values
+
+        for panos_name, scm_name in [
+            ('negate-source', 'negate_source'),
+            ('negate-destination', 'negate_destination'),
+            ('disabled', 'disabled'),
+        ]:
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes'
+
+        tags = self._member_texts(entry.find('tag'))
+        if tags:
+            payload['tag'] = tags
+
+        action = self._convert_pbf_action(entry.find('action'))
+        if action:
+            payload['action'] = action
+
+        return payload
+
+    def _convert_pbf_action(self, action):
+        if action is None:
+            return None
+
+        forwarding = action.find('forwarding')
+        if forwarding is not None:
+            forwarding_payload = self._convert_named_text_fields(
+                forwarding,
+                {
+                    'egress-interface': 'egress_interface',
+                },
+            ) or {}
+
+            symmetric_return = self._child_text(forwarding, 'symmetric-return')
+            if symmetric_return:
+                forwarding_payload['symmetric_return'] = symmetric_return.lower() == 'yes'
+
+            nexthop = self._convert_static_route_nexthop(forwarding.find('nexthop'))
+            if nexthop:
+                forwarding_payload['nexthop'] = nexthop
+
+            monitor = self._convert_pbf_monitor(forwarding.find('monitor'))
+            if monitor:
+                forwarding_payload['monitor'] = monitor
+
+            return {'forwarding': forwarding_payload}
+
+        if action.find('no-pbf') is not None:
+            return {'no_pbf': {}}
+
+        if action.find('discard') is not None:
+            return {'discard': {}}
+
+        return None
+
+    def _convert_pbf_monitor(self, monitor):
+        if monitor is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('ip-address', 'ip_address'),
+            ('profile', 'profile'),
+        ]:
+            value = self._child_text(monitor, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        disable_if_unreachable = self._child_text(monitor, 'disable-if-unreachable')
+        if disable_if_unreachable:
+            payload['disable_if_unreachable'] = disable_if_unreachable.lower() == 'yes'
+
+        return payload or None
+
+    def _ospf_auth_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("OSPF auth profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for protocol_name in ['ospf', 'ospfv3']:
+                for profile_entry in self._ospf_auth_profile_config_entries(router_entry.find(f'protocol/{protocol_name}')):
+                    profile = self._convert_ospf_auth_profile(profile_entry)
+                    if not profile or profile['name'] in seen_names:
+                        continue
+                    seen_names.add(profile['name'])
+                    profiles.append(profile)
+
+        return profiles
+
+    def _ospf_auth_profile_config_entries(self, protocol_entry):
+        if protocol_entry is None:
+            return []
+
+        entries = []
+        for path in ['auth-profile/entry', 'auth-profiles/entry']:
+            entries.extend(protocol_entry.findall(path))
+        return entries
+
+    def _convert_ospf_auth_profile(self, profile_entry):
+        profile_name = profile_entry.get('name')
+        if not profile_name:
+            return None
+
+        payload = {'name': profile_name}
+        password = self._child_text(profile_entry, 'password')
+        if password:
+            payload['password'] = password
+            return payload
+
+        md5_entries = []
+        for key_entry in profile_entry.findall('md5/entry'):
+            key_id = key_entry.get('name')
+            key = self._child_text(key_entry, 'key') or self._child_text(key_entry, 'password')
+            if not key_id or not key:
+                continue
+            md5 = {'key': key}
+            if key_id.isdigit():
+                md5['key_id'] = int(key_id)
+            else:
+                md5['name'] = key_id
+            md5_entries.append(md5)
+        if md5_entries:
+            payload['md5'] = md5_entries
+
+        return payload if len(payload) > 1 else None
+
+    def _bgp_auth_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("BGP auth profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            bgp = router_entry.find('protocol/bgp')
+            if bgp is None:
+                continue
+            for profile_entry in self._bgp_auth_profile_config_entries(bgp):
+                profile = self._convert_bgp_auth_profile(profile_entry)
+                if not profile or profile['name'] in seen_names:
+                    continue
+                seen_names.add(profile['name'])
+                profiles.append(profile)
+
+        return profiles
+
+    def _bgp_auth_profile_config_entries(self, bgp):
+        entries = []
+        for path in ['auth-profile/entry', 'auth-profiles/entry', 'authentication-profile/entry', 'authentication-profiles/entry']:
+            entries.extend(bgp.findall(path))
+        return entries
+
+    def _convert_bgp_auth_profile(self, profile_entry):
+        profile_name = profile_entry.get('name')
+        if not profile_name:
+            return None
+
+        secret = (
+            self._child_text(profile_entry, 'secret')
+            or self._child_text(profile_entry, 'password')
+            or self._child_text(profile_entry, 'key')
+        )
+        if not secret:
+            return None
+
+        return {'name': profile_name, 'secret': secret}
+
+    def _bgp_address_family_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("BGP address family profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            router_name = router_entry.get('name')
+            bgp = router_entry.find('protocol/bgp')
+            if not router_name or bgp is None:
+                continue
+
+            for group_entry in bgp.findall('peer-group/entry'):
+                group_name = group_entry.get('name')
+                if not group_name:
+                    continue
+                group_entries = self._bgp_address_family_entries(group_entry)
+                peer_has_families = any(
+                    self._bgp_address_family_entries(peer_entry)
+                    for peer_entry in group_entry.findall('peer/entry')
+                )
+                group_families = [family for family, _ in group_entries]
+                if not group_families and not peer_has_families:
+                    group_families = ['ipv4']
+                for family in group_families:
+                    af_entry = next(
+                        (entry for item_family, entry in group_entries if item_family == family),
+                        None,
+                    )
+                    profile = self._convert_bgp_address_family_profile(
+                        self._bgp_address_family_profile_name(router_name, group_name, None, family),
+                        family,
+                        af_entry,
+                    )
+                    if profile and profile['name'] not in seen_names:
+                        seen_names.add(profile['name'])
+                        profiles.append(profile)
+
+                for peer_entry in group_entry.findall('peer/entry'):
+                    peer_name = peer_entry.get('name')
+                    if not peer_name:
+                        continue
+                    for family, af_entry in self._bgp_address_family_entries(peer_entry):
+                        profile = self._convert_bgp_address_family_profile(
+                            self._bgp_address_family_profile_name(router_name, group_name, peer_name, family),
+                            family,
+                            af_entry,
+                        )
+                        if profile and profile['name'] not in seen_names:
+                            seen_names.add(profile['name'])
+                            profiles.append(profile)
+
+        return profiles
+
+    def _bgp_address_family_entries(self, entry):
+        entries = []
+        for family, paths in {
+            'ipv4': [
+                'address-family/ipv4',
+                'address-family/ipv4-unicast',
+                'address-family/ipv4/unicast',
+                'afi-safi/ipv4-unicast',
+            ],
+            'ipv6': [
+                'address-family/ipv6',
+                'address-family/ipv6-unicast',
+                'address-family/ipv6/unicast',
+                'afi-safi/ipv6-unicast',
+            ],
+        }.items():
+            for path in paths:
+                af_entry = entry.find(path)
+                if af_entry is not None:
+                    entries.append((family, af_entry))
+                    break
+        return entries
+
+    def _convert_bgp_address_family_profile(self, profile_name, family, af_entry):
+        if af_entry is None:
+            return {'name': profile_name, family: {'unicast': {}}}
+        unicast = self._convert_bgp_address_family_unicast(af_entry)
+        if not unicast:
+            return None
+        return {'name': profile_name, family: {'unicast': unicast}}
+
+    def _convert_bgp_address_family_unicast(self, af_entry):
+        payload = {}
+        for panos_name, scm_name in [
+            ('enable', 'enable'),
+            ('soft-reconfig-with-stored-info', 'soft_reconfig_with_stored_info'),
+            ('soft-reconfiguration-with-stored-info', 'soft_reconfig_with_stored_info'),
+            ('as-override', 'as_override'),
+            ('route-reflector-client', 'route_reflector_client'),
+            ('default-originate', 'default_originate'),
+        ]:
+            value = self._child_text(af_entry, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes' if value.lower() in {'yes', 'no'} else value
+
+        default_originate_map = self._child_text(af_entry, 'default-originate-map')
+        if default_originate_map:
+            payload['default_originate_map'] = default_originate_map
+
+        add_path = self._convert_bgp_add_path(af_entry.find('add-path'))
+        if add_path:
+            payload['add_path'] = add_path
+
+        allowas_in = self._convert_bgp_allowas_in(af_entry.find('allowas-in'))
+        if allowas_in:
+            payload['allowas_in'] = allowas_in
+
+        maximum_prefix_entry = af_entry.find('maximum-prefix')
+        if maximum_prefix_entry is None:
+            maximum_prefix_entry = af_entry.find('max-prefix')
+        maximum_prefix = self._convert_bgp_maximum_prefix(maximum_prefix_entry)
+        if maximum_prefix:
+            payload['maximum_prefix'] = maximum_prefix
+
+        next_hop = self._convert_bgp_next_hop_option(af_entry.find('next-hop'))
+        if next_hop:
+            payload['next_hop'] = next_hop
+
+        remove_private_as_entry = af_entry.find('remove-private-AS')
+        if remove_private_as_entry is None:
+            remove_private_as_entry = af_entry.find('remove-private-as')
+        remove_private_as = self._convert_bgp_remove_private_as(remove_private_as_entry)
+        if remove_private_as:
+            payload['remove_private_AS'] = remove_private_as
+
+        send_community = self._convert_bgp_send_community(af_entry.find('send-community'))
+        if send_community:
+            payload['send_community'] = send_community
+
+        orf = self._convert_bgp_orf(af_entry.find('orf'))
+        if orf:
+            payload['orf'] = orf
+
+        return payload
+
+    def _convert_bgp_add_path(self, add_path):
+        if add_path is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('tx-all-paths', 'tx_all_paths'),
+            ('tx-bestpath-per-AS', 'tx_bestpath_per_AS'),
+            ('tx-bestpath-per-as', 'tx_bestpath_per_AS'),
+        ]:
+            value = self._child_text(add_path, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes' if value.lower() in {'yes', 'no'} else value
+        return payload or None
+
+    def _convert_bgp_allowas_in(self, allowas_in):
+        if allowas_in is None:
+            return None
+
+        occurrence = self._child_text(allowas_in, 'occurrence')
+        if occurrence and occurrence.isdigit():
+            return {'occurrence': int(occurrence)}
+        if allowas_in.find('origin') is not None:
+            return {'origin': {}}
+        value = self._first_text_or_member(allowas_in)
+        if value and value.isdigit():
+            return {'occurrence': int(value)}
+        if value == 'origin':
+            return {'origin': {}}
+        return None
+
+    def _convert_bgp_maximum_prefix(self, maximum_prefix):
+        if maximum_prefix is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('num-prefixes', 'num_prefixes'),
+            ('number', 'num_prefixes'),
+            ('prefix-limit', 'num_prefixes'),
+            ('threshold', 'threshold'),
+        ]:
+            value = self._child_text(maximum_prefix, panos_name)
+            if value and value.isdigit():
+                payload[scm_name] = int(value)
+
+        action = self._child_text(maximum_prefix, 'action')
+        if action:
+            payload['action'] = {action.replace('-', '_'): {}}
+        elif maximum_prefix.find('warning-only') is not None:
+            payload['action'] = {'warning_only': {}}
+        elif maximum_prefix.find('restart') is not None:
+            payload['action'] = {'restart': {}}
+
+        return payload or None
+
+    def _convert_bgp_next_hop_option(self, next_hop):
+        if next_hop is None:
+            return None
+        if next_hop.find('self-force') is not None:
+            return {'self_force': {}}
+        if next_hop.find('self') is not None:
+            return {'self': {}}
+        value = self._first_text_or_member(next_hop)
+        if value in {'self', 'self-force', 'self_force'}:
+            return {value.replace('-', '_'): {}}
+        return None
+
+    def _convert_bgp_remove_private_as(self, remove_private_as):
+        if remove_private_as is None:
+            return None
+        if remove_private_as.find('replace-AS') is not None or remove_private_as.find('replace-as') is not None:
+            return {'replace_AS': {}}
+        if remove_private_as.find('all') is not None:
+            return {'all': {}}
+        value = self._first_text_or_member(remove_private_as)
+        if value in {'all', 'replace-AS', 'replace-as'}:
+            return {value.replace('-', '_').replace('_as', '_AS'): {}}
+        return None
+
+    def _convert_bgp_send_community(self, send_community):
+        if send_community is None:
+            return None
+        for option in ['all', 'both', 'extended', 'large', 'standard']:
+            if send_community.find(option) is not None:
+                return {option: {}}
+        value = self._first_text_or_member(send_community)
+        if value in {'all', 'both', 'extended', 'large', 'standard'}:
+            return {value: {}}
+        return None
+
+    def _convert_bgp_orf(self, orf):
+        if orf is None:
+            return None
+
+        orf_prefix_list = self._child_text(orf, 'orf-prefix-list') or self._child_text(orf, 'prefix-list')
+        if orf_prefix_list:
+            return {'orf_prefix_list': orf_prefix_list}
+        value = self._first_text_or_member(orf)
+        if value in {'none', 'both', 'receive', 'send'}:
+            return {'orf_prefix_list': value}
+        return None
+
+    def _bgp_address_family_profile_name(self, router_name, group_name, peer_name, family):
+        if peer_name:
+            return self._sanitize_name(f"{router_name}-{group_name}-{peer_name}-{family}-af")
+        return self._sanitize_name(f"{router_name}-{group_name}-{family}-af")
+
+    def _bgp_group_families(self, group_entry):
+        families = {family for family, _ in self._bgp_address_family_entries(group_entry)}
+        for peer_entry in group_entry.findall('peer/entry'):
+            families.update(family for family, _ in self._bgp_address_family_entries(peer_entry))
+        return sorted(families or {'ipv4'})
+
+    def _bgp_filtering_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("BGP filtering profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for family in ['ipv4', 'ipv6']:
+                policy_groups = [
+                    group_entry.get('name')
+                    for group_entry in router_entry.findall('protocol/bgp/peer-group/entry')
+                    if group_entry.get('name')
+                    and self._bgp_group_has_policy(router_entry, group_entry.get('name'), family)
+                ]
+                if policy_groups:
+                    for group_name in policy_groups:
+                        unicast = self._convert_bgp_filtering_profile_unicast(
+                            router_entry,
+                            family,
+                            peer_group_name=group_name,
+                        )
+                        if not unicast:
+                            continue
+                        profiles.append(
+                            {
+                                'name': self._bgp_filtering_profile_name(
+                                    router_entry,
+                                    family,
+                                    peer_group_name=group_name if len(policy_groups) > 1 else None,
+                                ),
+                                family: {'unicast': unicast},
+                            }
+                        )
+                    continue
+
+                unicast = self._convert_bgp_filtering_profile_unicast(router_entry, family)
+                if unicast:
+                    profiles.append(
+                        {
+                            'name': self._bgp_filtering_profile_name(router_entry, family),
+                            family: {'unicast': unicast},
+                        }
+                    )
+        return profiles
+
+    def _convert_bgp_filtering_profile_unicast(self, router_entry, family, peer_group_name=None):
+        payload = {}
+
+        route_maps = {}
+        inbound_route_map = self._first_bgp_policy_artifact(
+            router_entry,
+            'import',
+            family,
+            self._bgp_policy_route_map_name,
+            peer_group_name=peer_group_name,
+        )
+        if inbound_route_map:
+            route_maps['inbound'] = inbound_route_map
+        outbound_route_map = self._first_bgp_policy_artifact(
+            router_entry,
+            'export',
+            family,
+            self._bgp_policy_route_map_name,
+            peer_group_name=peer_group_name,
+        )
+        if outbound_route_map:
+            route_maps['outbound'] = outbound_route_map
+        if route_maps:
+            payload['route_maps'] = route_maps
+
+        inbound_filters = self._convert_bgp_filtering_network_filters(
+            router_entry,
+            'import',
+            family,
+            peer_group_name=peer_group_name,
+        )
+        if inbound_filters:
+            payload['inbound_network_filters'] = inbound_filters
+
+        outbound_filters = self._convert_bgp_filtering_network_filters(
+            router_entry,
+            'export',
+            family,
+            peer_group_name=peer_group_name,
+        )
+        if outbound_filters:
+            payload['outbound_network_filters'] = outbound_filters
+
+        conditional_advertisement = self._convert_bgp_conditional_advertisement(router_entry, family)
+        if conditional_advertisement:
+            payload['conditional_advertisement'] = conditional_advertisement
+
+        return payload or None
+
+    def _convert_bgp_conditional_advertisement(self, router_entry, family):
+        bgp = router_entry.find('protocol/bgp')
+        if bgp is None:
+            return None
+
+        source = None
+        for path in ['conditional-advertisement', 'conditional-advertise']:
+            candidate = bgp.find(path)
+            if candidate is not None:
+                source = candidate
+                break
+        if source is None:
+            return None
+
+        family_source = source.find(family)
+        if family_source is not None:
+            source = family_source
+
+        payload = {}
+        for condition_name, fields in {
+            'exist': ('advertise-map', 'exist-map'),
+            'non_exist': ('advertise-map', 'non-exist-map'),
+        }.items():
+            condition = source.find(condition_name.replace('_', '-'))
+            if condition is None:
+                continue
+            condition_payload = {}
+            for panos_name, scm_name in fields:
+                value = self._child_text(condition, panos_name)
+                if not value:
+                    value = self._first_text_or_member(condition.find(panos_name))
+                if value:
+                    condition_payload[scm_name] = value
+            if condition_payload:
+                payload[condition_name] = condition_payload
+
+        unsuppress_map = self._child_text(source, 'unsuppress-map')
+        if unsuppress_map:
+            payload['unsuppress_map'] = unsuppress_map
+        return payload or None
+
+    def _convert_bgp_filtering_network_filters(self, router_entry, direction, family, peer_group_name=None):
+        filters = {}
+        prefix_list = self._first_bgp_policy_artifact(
+            router_entry,
+            direction,
+            family,
+            self._bgp_policy_prefix_list_name,
+            needs_prefix=True,
+            peer_group_name=peer_group_name,
+        )
+        if prefix_list:
+            filters['prefix_list'] = prefix_list
+
+        access_list = self._first_bgp_policy_artifact(
+            router_entry,
+            direction,
+            family,
+            self._bgp_policy_access_list_name,
+            needs_access_list=True,
+            peer_group_name=peer_group_name,
+        )
+        if access_list:
+            filters['distribute_list'] = access_list
+
+        return filters or None
+
+    def _first_bgp_policy_artifact(
+        self,
+        router_entry,
+        direction,
+        family,
+        name_builder,
+        needs_prefix=False,
+        needs_access_list=False,
+        peer_group_name=None,
+    ):
+        for rule_entry in self._bgp_policy_rule_entries(router_entry, direction):
+            if self._bgp_policy_rule_family(rule_entry) != family:
+                continue
+            if peer_group_name and not self._bgp_policy_rule_applies_to_group(rule_entry, peer_group_name):
+                continue
+            if needs_prefix and not self._bgp_policy_rule_prefixes(rule_entry):
+                continue
+            if needs_access_list and not self._member_texts(rule_entry.find('match/route-table/access-list')):
+                continue
+            return name_builder(router_entry, direction, rule_entry)
+        return None
+
+    def _bgp_filtering_profile_name(self, router_entry, family, peer_group_name=None):
+        suffix = f"-{peer_group_name}" if peer_group_name else ""
+        return self._sanitize_name(f"{router_entry.get('name')}{suffix}-{family}-bgp-filtering")
+
+    def _bgp_group_has_policy(self, router_entry, peer_group_name, family):
+        return any(
+            self._bgp_policy_rule_family(rule_entry) == family
+            and self._bgp_policy_rule_applies_to_group(rule_entry, peer_group_name)
+            for direction in ('import', 'export')
+            for rule_entry in self._bgp_policy_rule_entries(router_entry, direction)
+        )
+
+    def _bgp_policy_rule_applies_to_group(self, rule_entry, peer_group_name):
+        used_by = self._member_texts(rule_entry.find('used-by'))
+        if used_by:
+            return peer_group_name in used_by
+        from_peer = self._member_texts(rule_entry.find('match/from-peer'))
+        if from_peer:
+            return peer_group_name in from_peer
+        return True
+
+    def _route_prefix_list_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Route prefix list migration currently supports local firewall XML only.")
+            return []
+
+        prefix_lists = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for direction in ['import', 'export']:
+                for rule_entry in self._bgp_policy_rule_entries(router_entry, direction):
+                    prefixes = self._bgp_policy_rule_prefixes(rule_entry)
+                    if not prefixes:
+                        continue
+
+                    list_name = self._bgp_policy_prefix_list_name(router_entry, direction, rule_entry)
+                    if list_name in seen_names:
+                        continue
+                    seen_names.add(list_name)
+
+                    action = self._bgp_policy_rule_action(rule_entry)
+                    family = 'ipv6' if any(':' in prefix.get('prefix', '') for prefix in prefixes) else 'ipv4'
+                    prefix_lists.append(
+                        {
+                            'name': list_name,
+                            family: {
+                                'prefix_list': [
+                                    self._route_prefix_list_rule(index, prefix, action)
+                                    for index, prefix in enumerate(prefixes, start=1)
+                                ],
+                            },
+                        }
+                    )
+
+        return prefix_lists
+
+    def _route_access_list_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Route access list migration currently supports local firewall XML only.")
+            return []
+
+        access_lists = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for direction in ['import', 'export']:
+                for rule_entry in self._bgp_policy_rule_entries(router_entry, direction):
+                    values = self._member_texts(rule_entry.find('match/route-table/access-list'))
+                    if not values:
+                        continue
+                    name = self._bgp_policy_access_list_name(router_entry, direction, rule_entry)
+                    if name in seen_names:
+                        continue
+                    seen_names.add(name)
+                    access_lists.append(
+                        {
+                            'name': name,
+                            'access_list': [
+                                {'name': index, 'action': self._bgp_policy_rule_action(rule_entry), 'source': value}
+                                for index, value in enumerate(values, start=1)
+                            ],
+                        }
+                    )
+
+        return access_lists
+
+    def _route_community_list_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Route community list migration currently supports local firewall XML only.")
+            return []
+
+        community_lists = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for direction in ['import', 'export']:
+                for rule_entry in self._bgp_policy_rule_entries(router_entry, direction):
+                    values = []
+                    for path in ['match/community', 'match/regular-community']:
+                        values.extend(self._member_texts(rule_entry.find(path)))
+                    if not values:
+                        continue
+                    name = self._bgp_policy_community_list_name(router_entry, direction, rule_entry)
+                    if name in seen_names:
+                        continue
+                    seen_names.add(name)
+                    community_lists.append(
+                        {
+                            'name': name,
+                            'community_list': [
+                                {'name': index, 'action': self._bgp_policy_rule_action(rule_entry), 'community': value}
+                                for index, value in enumerate(values, start=1)
+                            ],
+                        }
+                    )
+
+        return community_lists
+
+    def _route_path_access_list_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("Route path access list migration currently supports local firewall XML only.")
+            return []
+
+        path_lists = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for direction in ['import', 'export']:
+                for rule_entry in self._bgp_policy_rule_entries(router_entry, direction):
+                    values = []
+                    for path in ['match/as-path', 'match/as-path-access-list']:
+                        values.extend(self._member_texts(rule_entry.find(path)))
+                    if not values:
+                        continue
+                    name = self._bgp_policy_path_access_list_name(router_entry, direction, rule_entry)
+                    if name in seen_names:
+                        continue
+                    seen_names.add(name)
+                    path_lists.append(
+                        {
+                            'name': name,
+                            'path_access_list': [
+                                {'name': index, 'action': self._bgp_policy_rule_action(rule_entry), 'regular_expression': value}
+                                for index, value in enumerate(values, start=1)
+                            ],
+                        }
+                    )
+
+        return path_lists
+
+    def _bgp_route_map_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("BGP route map migration currently supports local firewall XML only.")
+            return []
+
+        route_maps = []
+        seen_names = set()
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for direction in ['import', 'export']:
+                for sequence, rule_entry in enumerate(self._bgp_policy_rule_entries(router_entry, direction), start=1):
+                    route_map_name = self._bgp_policy_route_map_name(router_entry, direction, rule_entry)
+                    if route_map_name in seen_names:
+                        continue
+                    seen_names.add(route_map_name)
+
+                    rule = {
+                        'name': sequence * 10,
+                        'action': self._bgp_policy_rule_action(rule_entry),
+                    }
+
+                    description = self._child_text(rule_entry, 'description')
+                    if description:
+                        rule['description'] = description
+
+                    prefixes = self._bgp_policy_rule_prefixes(rule_entry)
+                    if prefixes:
+                        family = self._bgp_policy_rule_family(rule_entry)
+                        rule['match'] = {
+                            family: {
+                                'address': {
+                                    'prefix_list': self._bgp_policy_prefix_list_name(router_entry, direction, rule_entry)
+                                }
+                            }
+                        }
+
+                    access_list = self._bgp_policy_access_list_name_if_needed(router_entry, direction, rule_entry)
+                    if access_list:
+                        match = rule.setdefault('match', {})
+                        ipv4 = match.setdefault('ipv4', {})
+                        address = ipv4.setdefault('address', {})
+                        address['access_list'] = access_list
+
+                    community_list = self._bgp_policy_community_list_name_if_needed(router_entry, direction, rule_entry)
+                    if community_list:
+                        rule.setdefault('match', {})['regular_community'] = community_list
+
+                    path_access_list = self._bgp_policy_path_access_list_name_if_needed(router_entry, direction, rule_entry)
+                    if path_access_list:
+                        rule.setdefault('match', {})['as_path_access_list'] = path_access_list
+
+                    scalar_match = self._convert_bgp_policy_match(rule_entry.find('match'))
+                    if scalar_match:
+                        match = rule.setdefault('match', {})
+                        match.update(scalar_match)
+
+                    set_payload = self._convert_bgp_policy_set(rule_entry.find('set'))
+                    if set_payload:
+                        rule['set'] = set_payload
+
+                    route_maps.append(
+                        {
+                            'name': route_map_name,
+                            'description': f"Generated from PAN-OS BGP {direction} rule {rule_entry.get('name')}",
+                            'route_map': [rule],
+                        }
+                    )
+
+        return route_maps
+
+    def _bgp_route_map_redistribution_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("BGP route map redistribution migration currently supports local firewall XML only.")
+            return []
+
+        entries = []
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            for redist_entry in self._bgp_redist_rule_entries(router_entry):
+                if self._bgp_redist_source_type(redist_entry) not in {'static', 'connected', 'ospf'}:
+                    continue
+                name = self._bgp_redist_route_map_name(router_entry, redist_entry)
+                route_map = {
+                    'name': 10,
+                    'action': self._bgp_policy_rule_action(redist_entry),
+                }
+                metric = self._child_text(redist_entry, 'metric')
+                if metric and metric.isdigit():
+                    route_map['set'] = {'metric': {'action': 'set', 'value': int(metric)}}
+                entries.append({'name': name, 'route_map': [route_map]})
+
+        return entries
+
+    def _bgp_redistribution_profile_entries(self):
+        if self.config_type != 'local':
+            self.logger.warning("BGP redistribution profile migration currently supports local firewall XML only.")
+            return []
+
+        profiles = []
+        for router_entry in self.root.findall('./devices/entry/network/virtual-router/entry'):
+            redist_rules = self._bgp_redist_rule_entries(router_entry)
+            if not redist_rules:
+                continue
+
+            unicast = {}
+            for redist_entry in redist_rules:
+                source_type = self._bgp_redist_source_type(redist_entry)
+                if source_type not in {'static', 'connected', 'ospf'}:
+                    continue
+                payload = {'enable': True}
+                metric = self._child_text(redist_entry, 'metric')
+                if metric and metric.isdigit():
+                    payload['metric'] = int(metric)
+                payload['route_map'] = self._bgp_redist_route_map_name(router_entry, redist_entry)
+                unicast[source_type] = payload
+
+            if unicast:
+                profiles.append(
+                    {
+                        'name': self._sanitize_name(f"{router_entry.get('name')}-bgp-redist"),
+                        'ipv4': {'unicast': unicast},
+                    }
+                )
+
+        return profiles
+
+    def _convert_bgp(self, bgp, router_entry):
+        if bgp is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('enable', 'enable'),
+            ('router-id', 'router_id'),
+        ]:
+            value = self._child_text(bgp, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes' if panos_name == 'enable' else value
+
+        local_as = self._child_text(bgp, 'local-as')
+        if local_as:
+            payload['local_as'] = local_as
+
+        redist_profile_name = self._bgp_redist_profile_name_if_needed(router_entry)
+        if redist_profile_name:
+            payload['redistribution_profile'] = redist_profile_name
+
+        graceful_restart = self._convert_bgp_graceful_restart(bgp)
+        if graceful_restart:
+            payload['graceful_restart'] = graceful_restart
+
+        peer_groups = []
+        for group_entry in bgp.findall('peer-group/entry'):
+            group_payload = self._convert_bgp_peer_group(group_entry, router_entry)
+            if group_payload:
+                peer_groups.append(group_payload)
+        if peer_groups:
+            payload['peer_group'] = peer_groups
+
+        return payload or None
+
+    def _convert_bgp_peer_group(self, group_entry, router_entry):
+        group_name = group_entry.get('name')
+        if not group_name:
+            return None
+
+        payload = {'name': group_name}
+        for panos_name, scm_name in [
+            ('enable', 'enable'),
+            ('type', 'type'),
+            ('auth-profile', 'authentication_profile'),
+            ('authentication-profile', 'authentication_profile'),
+        ]:
+            value = self._child_text(group_entry, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes' if panos_name == 'enable' else value
+
+        timers = self._convert_bgp_timers(group_entry.find('timers'))
+        if timers:
+            payload['timers'] = timers
+
+        address_family = self._convert_bgp_address_family_references(
+            router_entry,
+            group_entry,
+            group_name,
+        )
+        if address_family:
+            payload['address_family'] = address_family
+        else:
+            payload['address_family'] = {
+                family: self._bgp_address_family_profile_name(
+                    router_entry.get('name'), group_name, None, family
+                )
+                for family in self._bgp_group_families(group_entry)
             }
 
-            if zone_protection_profile is not None:
-                entry_data['network']['zone-protection-profile'] = zone_protection_profile.text
+        filtering_profile = {}
+        for family in ('ipv4', 'ipv6'):
+            if self._bgp_group_has_policy(router_entry, group_name, family):
+                policy_groups = [
+                    entry.get('name')
+                    for entry in router_entry.findall('protocol/bgp/peer-group/entry')
+                    if entry.get('name') and self._bgp_group_has_policy(router_entry, entry.get('name'), family)
+                ]
+                filtering_profile[family] = self._bgp_filtering_profile_name(
+                    router_entry,
+                    family,
+                    peer_group_name=group_name if len(policy_groups) > 1 else None,
+                )
+        if filtering_profile:
+            payload['filtering_profile'] = filtering_profile
 
-            zone_entries.append({'entry': entry_data})
+        peers = []
+        for peer_entry in group_entry.findall('peer/entry'):
+            peer_payload = self._convert_bgp_peer(peer_entry, router_entry, group_name)
+            if peer_payload:
+                peers.append(peer_payload)
+        if peers:
+            payload['peer'] = peers
+
+        return payload
+
+    def _convert_bgp_peer(self, peer_entry, router_entry, group_name):
+        peer_name = peer_entry.get('name')
+        if not peer_name:
+            return None
+
+        payload = {'name': self._sanitize_name(peer_name)}
+        for panos_name, scm_name in [
+            ('enable', 'enable'),
+            ('peer-as', 'peer_as'),
+            ('peer-address/ip', 'peer_address'),
+            ('auth-profile', 'authentication_profile'),
+            ('authentication-profile', 'authentication_profile'),
+        ]:
+            value = self._child_text(peer_entry, panos_name)
+            if value:
+                if panos_name == 'peer-address/ip':
+                    value = self._resolve_panos_ip(value)
+                payload[scm_name] = value.lower() == 'yes' if panos_name == 'enable' else value
+
+        local_address = self._convert_named_text_fields(
+            peer_entry.find('local-address'),
+            {'interface': 'interface', 'ip': 'ip'},
+        )
+        if local_address:
+            if 'ip' in local_address:
+                local_address['ip'] = self._resolve_panos_ip(local_address['ip'])
+            payload['local_address'] = local_address
+
+        timers = self._convert_bgp_timers(peer_entry.find('timers'))
+        if timers:
+            payload['timers'] = timers
+
+        multihop = self._convert_bgp_multihop(peer_entry.find('multihop'))
+        if multihop:
+            payload['multihop'] = multihop
+
+        connection_options = self._convert_bgp_connection_options(peer_entry.find('connection-options'))
+        if connection_options:
+            payload['connection_options'] = connection_options
+
+        address_family = self._convert_bgp_address_family_references(
+            router_entry,
+            peer_entry,
+            group_name,
+            peer_name,
+        )
+
+        if address_family:
+            payload['address_family'] = address_family
+
+        return payload
+
+    def _convert_bgp_address_family_references(self, router_entry, entry, group_name, peer_name=None):
+        router_name = router_entry.get('name')
+        if not router_name or not group_name:
+            return {}
+
+        address_family = {}
+        for family, _ in self._bgp_address_family_entries(entry):
+            address_family[family] = {
+                'unicast': {
+                    'address_family_profile': self._bgp_address_family_profile_name(
+                        router_name,
+                        group_name,
+                        peer_name,
+                        family,
+                    )
+                }
+            }
+        return address_family
+
+    def _convert_bgp_graceful_restart(self, bgp):
+        restart = bgp.find('routing-options/graceful-restart')
+        if restart is None:
+            return None
+
+        payload = {}
+        enable = self._child_text(restart, 'enable')
+        if enable:
+            payload['enable'] = enable.lower() == 'yes'
+        for panos_name, scm_name in [
+            ('local-restart-time', 'local_restart_time'),
+            ('max-peer-restart-time', 'max_peer_restart_time'),
+            ('stale-route-time', 'stale_route_time'),
+        ]:
+            value = self._child_text(restart, panos_name)
+            if value and value.isdigit():
+                payload[scm_name] = int(value)
+        return payload or None
+
+    def _convert_bgp_timers(self, timers):
+        if timers is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('keep-alive-interval', 'keep_alive_interval'),
+            ('hold-time', 'hold_time'),
+            ('open-delay-time', 'open_delay_time'),
+            ('idle-hold-time', 'idle_hold_time'),
+            ('min-route-advertisement-interval', 'min_route_advertisement_interval'),
+        ]:
+            value = self._child_text(timers, panos_name)
+            if value and value.isdigit():
+                payload[scm_name] = int(value)
+        return payload or None
+
+    def _convert_bgp_multihop(self, multihop):
+        if multihop is None:
+            return None
+
+        payload = {}
+        enable = self._child_text(multihop, 'enable')
+        if enable:
+            payload['enable'] = enable.lower() == 'yes'
+
+        ttl = self._child_text(multihop, 'ttl')
+        if ttl and ttl.isdigit():
+            payload['ttl'] = int(ttl)
+
+        return payload or None
+
+    def _convert_bgp_connection_options(self, connection_options):
+        if connection_options is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('incoming-bgp-connection', 'incoming_bgp_connection'),
+            ('outgoing-bgp-connection', 'outgoing_bgp_connection'),
+        ]:
+            value = self._child_text(connection_options, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes' if value.lower() in {'yes', 'no'} else value
+
+        source_port = self._child_text(connection_options, 'local-port')
+        if source_port and source_port.isdigit():
+            payload['local_port'] = int(source_port)
+
+        return payload or None
+
+    def _convert_ospf(self, ospf):
+        if ospf is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('enable', 'enable'),
+            ('router-id', 'router_id'),
+            ('rfc1583', 'rfc1583'),
+            ('reject-default-route', 'reject_default_route'),
+            ('allow-redist-default-route', 'allow_redist_default_route'),
+        ]:
+            value = self._child_text(ospf, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes' if value.lower() in {'yes', 'no'} else value
+
+        areas = []
+        for area_entry in ospf.findall('area/entry'):
+            area = self._convert_ospf_area(area_entry)
+            if area:
+                areas.append(area)
+        if areas:
+            payload['area'] = areas
+
+        export_rules = self._convert_ospf_export_rules(ospf)
+        if export_rules:
+            payload['export_rules'] = export_rules
+
+        redistribution_profile = self._ospf_redistribution_profile_name(ospf)
+        if redistribution_profile:
+            payload['redistribution_profile'] = redistribution_profile
+
+        return payload or None
+
+    def _convert_ospfv3(self, ospfv3):
+        if ospfv3 is None:
+            return None
+
+        payload = self._convert_ospf(ospfv3) or {}
+        return payload or None
+
+    def _convert_ospf_area(self, area_entry):
+        area_name = area_entry.get('name')
+        if not area_name:
+            return None
+
+        payload = {'name': area_name}
+        authentication = self._child_text(area_entry, 'authentication')
+        if authentication:
+            payload['authentication'] = authentication
+
+        area_type = area_entry.find('type')
+        if area_type is not None:
+            type_payload = self._convert_ospf_area_type(area_type)
+            if type_payload:
+                payload['type'] = type_payload
+
+        for panos_name, scm_name in [
+            ('import-list', 'import_list'),
+            ('export-list', 'export_list'),
+            ('inbound-filter-list', 'inbound_filter_list'),
+            ('outbound-filter-list', 'outbound_filter_list'),
+        ]:
+            value = self._child_text(area_entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        ranges = self._convert_ospf_ranges(area_entry)
+        if ranges:
+            payload['range'] = ranges
+
+        vr_ranges = self._convert_ospf_vr_ranges(area_entry)
+        if vr_ranges:
+            payload['vr_range'] = vr_ranges
+
+        interfaces = []
+        for interface_entry in area_entry.findall('interface/entry'):
+            interface = self._convert_ospf_interface(interface_entry)
+            if interface:
+                interfaces.append(interface)
+        if interfaces:
+            payload['interface'] = interfaces
+
+        virtual_links = []
+        for virtual_link_entry in area_entry.findall('virtual-link/entry'):
+            virtual_link = self._convert_ospf_virtual_link(virtual_link_entry)
+            if virtual_link:
+                virtual_links.append(virtual_link)
+        if virtual_links:
+            payload['virtual_link'] = virtual_links
+
+        return payload
+
+    def _convert_ospf_area_type(self, area_type):
+        child_name = self._first_child_name(area_type)
+        if not child_name:
+            return None
+
+        child = area_type.find(child_name)
+        payload = {}
+        for panos_name, scm_name in [
+            ('default-route/advertise', 'default_route_advertise'),
+            ('default-route/metric', 'default_route_metric'),
+            ('default-route/type', 'default_route_type'),
+            ('accept-summary', 'accept_summary'),
+        ]:
+            value = self._child_text(child, panos_name) if child is not None else None
+            if not value:
+                continue
+            if value.lower() in {'yes', 'no'}:
+                payload[scm_name] = value.lower() == 'yes'
+            elif value.isdigit():
+                payload[scm_name] = int(value)
+            else:
+                payload[scm_name] = value
+
+        abr = self._child_text(child, 'abr') if child is not None else None
+        if abr:
+            payload['abr'] = abr
+
+        return {child_name: payload}
+
+    def _convert_ospf_ranges(self, area_entry):
+        ranges = []
+        for range_entry in area_entry.findall('range/entry'):
+            name = range_entry.get('name')
+            if not name:
+                continue
+            payload = {'name': name}
+            substitute = self._child_text(range_entry, 'substitute')
+            if substitute:
+                payload['substitute'] = substitute
+            advertise = self._child_text(range_entry, 'advertise')
+            if advertise:
+                payload['advertise'] = advertise.lower() == 'yes'
+            ranges.append(payload)
+        return ranges
+
+    def _convert_ospf_vr_ranges(self, area_entry):
+        ranges = []
+        for range_entry in area_entry.findall('vr-range/entry'):
+            name = range_entry.get('name')
+            if not name:
+                continue
+            mode = self._first_child_name(range_entry)
+            if mode in {'advertise', 'suppress'}:
+                ranges.append({mode: {'name': name}})
+            else:
+                ranges.append({'advertise': {'name': name}})
+        return ranges
+
+    def _convert_ospf_export_rules(self, ospf):
+        export_rules = []
+        for rule_entry in self._ospf_export_rule_entries(ospf):
+            rule = self._convert_ospf_export_rule(rule_entry)
+            if rule:
+                export_rules.append(rule)
+        return export_rules
+
+    def _ospf_export_rule_entries(self, ospf):
+        entries = []
+        for path in ['export-rules/entry', 'export-rule/entry', 'redist-rules/entry', 'redist-rule/entry']:
+            entries.extend(ospf.findall(path))
+        return entries
+
+    def _convert_ospf_export_rule(self, rule_entry):
+        rule_name = rule_entry.get('name')
+        if not rule_name:
+            return None
+
+        payload = {'name': rule_name}
+        new_path_type = (
+            self._child_text(rule_entry, 'new-path-type')
+            or self._child_text(rule_entry, 'path-type')
+            or self._child_text(rule_entry, 'type')
+        )
+        if new_path_type:
+            payload['new_path_type'] = new_path_type
+
+        new_tag = self._child_text(rule_entry, 'new-tag') or self._child_text(rule_entry, 'tag')
+        if new_tag:
+            payload['new_tag'] = new_tag
+
+        metric = self._child_text(rule_entry, 'metric')
+        if metric and metric.isdigit():
+            payload['metric'] = int(metric)
+
+        return payload
+
+    def _ospf_redistribution_profile_name(self, ospf):
+        explicit = (
+            self._child_text(ospf, 'redistribution-profile')
+            or self._child_text(ospf, 'redist-profile')
+        )
+        if explicit:
+            return explicit
+        return None
+
+    def _convert_ospf_virtual_link(self, virtual_link_entry):
+        link_name = virtual_link_entry.get('name')
+        if not link_name:
+            return None
+
+        payload = {'name': link_name}
+        for panos_name, scm_name in [
+            ('neighbor-id', 'neighbor_id'),
+            ('transit-area-id', 'transit_area_id'),
+            ('authentication', 'authentication'),
+            ('timing', 'timing'),
+        ]:
+            value = self._child_text(virtual_link_entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        for panos_name, scm_name in [
+            ('enable', 'enable'),
+            ('passive', 'passive'),
+        ]:
+            value = self._child_text(virtual_link_entry, panos_name)
+            if value:
+                payload[scm_name] = value.lower() == 'yes'
+
+        for panos_name, scm_name in [
+            ('interface-id', 'interface_id'),
+            ('instance-id', 'instance_id'),
+        ]:
+            value = self._child_text(virtual_link_entry, panos_name)
+            if value and value.isdigit():
+                payload[scm_name] = int(value)
+
+        vr_timing = self._convert_ospf_vr_timing(virtual_link_entry.find('vr-timing'))
+        if vr_timing:
+            payload['vr_timing'] = vr_timing
+
+        bfd_profile = self._child_text(virtual_link_entry, 'bfd/profile')
+        if bfd_profile:
+            payload['bfd'] = {'profile': bfd_profile}
+
+        return payload
+
+    def _convert_ospf_interface(self, interface_entry):
+        interface_name = interface_entry.get('name')
+        if not interface_name:
+            return None
+
+        payload = {
+            'name': self._scm_interface_object_name(interface_name),
+            'default_value': interface_name,
+        }
+        for panos_name, scm_name in [
+            ('enable', 'enable'),
+            ('passive', 'passive'),
+            ('mtu-ignore', 'mtu_ignore'),
+            ('priority', 'priority'),
+            ('metric', 'metric'),
+            ('instance-id', 'instance_id'),
+            ('authentication', 'authentication'),
+            ('timing', 'timing'),
+        ]:
+            value = self._child_text(interface_entry, panos_name)
+            if not value:
+                continue
+            if value.lower() in {'yes', 'no'}:
+                payload[scm_name] = value.lower() == 'yes'
+            elif value.isdigit():
+                payload[scm_name] = int(value)
+            else:
+                payload[scm_name] = value
+
+        link_type = interface_entry.find('link-type')
+        if link_type is not None:
+            child_name = self._first_child_name(link_type)
+            if child_name:
+                payload['link_type'] = {child_name: {}}
+
+        bfd_profile = self._child_text(interface_entry, 'bfd/profile')
+        if bfd_profile:
+            payload['bfd'] = {'profile': bfd_profile}
+
+        neighbors = []
+        for neighbor_entry in interface_entry.findall('neighbor/entry'):
+            neighbor_name = neighbor_entry.get('name')
+            if neighbor_name:
+                neighbors.append({'name': neighbor_name})
+        if neighbors:
+            payload['neighbor'] = neighbors
+
+        vr_timing = self._convert_ospf_vr_timing(interface_entry.find('vr-timing'))
+        if vr_timing:
+            payload['vr_timing'] = vr_timing
+
+        return payload
+
+    def _convert_ospf_vr_timing(self, timing_entry):
+        if timing_entry is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('hello-interval', 'hello_interval'),
+            ('dead-counts', 'dead_counts'),
+            ('retransmit-interval', 'retransmit_interval'),
+            ('transit-delay', 'transit_delay'),
+            ('gr-delay', 'gr_delay'),
+        ]:
+            value = self._child_text(timing_entry, panos_name)
+            if value and value.isdigit():
+                payload[scm_name] = int(value)
+        return payload or None
+
+    def _bgp_policy_rule_entries(self, router_entry, direction):
+        entries = []
+        for path in [
+            f'protocol/bgp/policy/{direction}/rules/entry',
+            f'protocol/bgp/policy/{direction}/entry',
+        ]:
+            entries.extend(router_entry.findall(path))
+        return entries
+
+    def _bgp_policy_route_map_names(self, router_entry, direction, family=None):
+        names = []
+        for rule_entry in self._bgp_policy_rule_entries(router_entry, direction):
+            if family and self._bgp_policy_rule_family(rule_entry) != family:
+                continue
+            names.append(self._bgp_policy_route_map_name(router_entry, direction, rule_entry))
+        return names
+
+    def _bgp_policy_route_map_name(self, router_entry, direction, rule_entry):
+        return self._sanitize_name(f"{router_entry.get('name')}-{direction}-{rule_entry.get('name')}-rm")
+
+    def _bgp_policy_prefix_list_name(self, router_entry, direction, rule_entry):
+        return self._sanitize_name(f"{router_entry.get('name')}-{direction}-{rule_entry.get('name')}-pl")
+
+    def _bgp_policy_access_list_name(self, router_entry, direction, rule_entry):
+        return self._sanitize_name(f"{router_entry.get('name')}-{direction}-{rule_entry.get('name')}-acl")
+
+    def _bgp_policy_community_list_name(self, router_entry, direction, rule_entry):
+        return self._sanitize_name(f"{router_entry.get('name')}-{direction}-{rule_entry.get('name')}-cl")
+
+    def _bgp_policy_path_access_list_name(self, router_entry, direction, rule_entry):
+        return self._sanitize_name(f"{router_entry.get('name')}-{direction}-{rule_entry.get('name')}-pal")
+
+    def _bgp_policy_access_list_name_if_needed(self, router_entry, direction, rule_entry):
+        if self._member_texts(rule_entry.find('match/route-table/access-list')):
+            return self._bgp_policy_access_list_name(router_entry, direction, rule_entry)
+        return None
+
+    def _bgp_policy_community_list_name_if_needed(self, router_entry, direction, rule_entry):
+        for path in ['match/community', 'match/regular-community']:
+            if self._member_texts(rule_entry.find(path)):
+                return self._bgp_policy_community_list_name(router_entry, direction, rule_entry)
+        return None
+
+    def _bgp_policy_path_access_list_name_if_needed(self, router_entry, direction, rule_entry):
+        for path in ['match/as-path', 'match/as-path-access-list']:
+            if self._member_texts(rule_entry.find(path)):
+                return self._bgp_policy_path_access_list_name(router_entry, direction, rule_entry)
+        return None
+
+    def _bgp_policy_rule_family(self, rule_entry):
+        for prefix in self._bgp_policy_rule_prefixes(rule_entry):
+            if ':' in prefix.get('prefix', ''):
+                return 'ipv6'
+        for path in ['match/ipv6-address-prefix', 'match/ipv6-nlri', 'match/ipv6-route-table']:
+            if rule_entry.find(path) is not None:
+                return 'ipv6'
+        return 'ipv4'
+
+    def _bgp_redist_rule_entries(self, router_entry):
+        return self._bgp_redist_rule_entries_from_bgp(router_entry.find('protocol/bgp'))
+
+    def _bgp_redist_rule_entries_from_bgp(self, bgp):
+        entries = []
+        if bgp is None:
+            return entries
+        for path in [
+            'redist-rules/entry',
+            'redistribution-rule/entry',
+            'redist-profile/entry',
+        ]:
+            entries.extend(bgp.findall(path))
+        return entries
+
+    def _bgp_redist_route_map_name(self, router_entry, redist_entry):
+        return self._sanitize_name(f"{router_entry.get('name')}-redist-{redist_entry.get('name')}-rm")
+
+    def _bgp_redist_profile_name_if_needed(self, router_entry):
+        if any(
+            self._bgp_redist_source_type(entry) in {'static', 'connected', 'ospf'}
+            for entry in self._bgp_redist_rule_entries(router_entry)
+        ):
+            return self._sanitize_name(f"{router_entry.get('name')}-bgp-redist")
+        return None
+
+    def _bgp_redist_source_type(self, redist_entry):
+        source_type = self._child_text(redist_entry, 'source/type') or self._child_text(redist_entry, 'type')
+        if source_type:
+            source_type = source_type.replace('-', '_')
+        if source_type in {'connect', 'connected'}:
+            return 'connected'
+        if source_type in {'static', 'ospf'}:
+            return source_type
+        rule_name = redist_entry.get('name') or ''
+        for candidate in ['static', 'connected', 'ospf']:
+            if candidate in rule_name.lower():
+                return candidate
+        return None
+
+    def _bgp_policy_rule_action(self, rule_entry):
+        action = self._child_text(rule_entry, 'action')
+        if action in {'allow', 'permit'}:
+            return 'permit'
+        if action == 'deny':
+            return 'deny'
+        return 'permit'
+
+    def _bgp_policy_rule_prefixes(self, rule_entry):
+        prefixes = []
+        for path in [
+            'match/address-prefix',
+            'match/ipv6-address-prefix',
+            'match/route-table',
+            'match/ipv6-route-table',
+            'match/nlri',
+            'match/ipv6-nlri',
+        ]:
+            prefixes.extend(self._route_prefix_values(rule_entry.find(path)))
+        return prefixes
+
+    def _route_prefix_values(self, entry):
+        if entry is None:
+            return []
+
+        values = []
+        for member in entry.findall('member'):
+            if member.text and member.text.strip():
+                values.append({'prefix': member.text.strip()})
+
+        for child in entry.findall('entry'):
+            prefix = child.get('name') or self._child_text(child, 'prefix')
+            if not prefix:
+                continue
+            payload = {'prefix': prefix}
+            for panos_name, scm_name in [
+                ('exact', 'exact'),
+                ('greater-equal', 'ge'),
+                ('less-equal', 'le'),
+            ]:
+                value = self._child_text(child, panos_name)
+                if not value:
+                    continue
+                if panos_name == 'exact':
+                    payload[scm_name] = value.lower() == 'yes'
+                elif value.isdigit():
+                    payload[scm_name] = int(value)
+                else:
+                    payload[scm_name] = value
+            values.append(payload)
+
+        return values
+
+    @staticmethod
+    def _route_prefix_list_rule(index, prefix, action):
+        rule = {
+            'name': index,
+            'action': action,
+            'prefix': prefix['prefix'],
+        }
+        for optional_key in ['exact', 'ge', 'le']:
+            if optional_key in prefix:
+                rule[optional_key] = prefix[optional_key]
+        return rule
+
+    def _convert_bgp_policy_match(self, match_entry):
+        if match_entry is None:
+            return None
+
+        payload = {}
+        scalar_fields = {
+            'metric': 'metric',
+            'local-preference': 'local_preference',
+            'local-preference-value': 'local_preference',
+            'origin': 'origin',
+            'peer': 'peer',
+            'interface': 'interface',
+            'tag': 'tag',
+        }
+        for panos_name, scm_name in scalar_fields.items():
+            value = self._first_text_or_member(match_entry.find(panos_name))
+            if not value:
+                continue
+            payload[scm_name] = int(value) if value.isdigit() else value
+
+        extended_communities = []
+        for path in ['extended-community', 'ext-community']:
+            extended_communities.extend(self._member_texts(match_entry.find(path)))
+        if extended_communities:
+            payload['extended_community'] = extended_communities
+
+        large_communities = self._member_texts(match_entry.find('large-community'))
+        if large_communities:
+            payload['large_community'] = large_communities
+
+        return payload or None
+
+    def _convert_bgp_policy_set(self, set_entry):
+        if set_entry is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in [
+            ('local-preference', 'local_preference'),
+            ('weight', 'weight'),
+            ('tag', 'tag'),
+            ('med', 'med'),
+        ]:
+            value = self._child_text(set_entry, panos_name)
+            if value and value.isdigit():
+                payload[scm_name] = int(value)
+
+        metric = self._child_text(set_entry, 'metric') or self._child_text(set_entry, 'metric-value')
+        if metric and metric.isdigit():
+            payload['metric'] = {'action': 'set', 'value': int(metric)}
+
+        origin = self._child_text(set_entry, 'origin')
+        if origin:
+            payload['origin'] = origin
+
+        next_hop = self._child_text(set_entry, 'nexthop') or self._child_text(set_entry, 'next-hop')
+        if next_hop:
+            family = 'ipv6' if ':' in next_hop else 'ipv4'
+            payload[family] = {'next_hop': next_hop}
+
+        regular_communities = []
+        for path in ['community', 'regular-community']:
+            regular_communities.extend(self._member_texts(set_entry.find(path)))
+        if regular_communities:
+            payload['regular_community'] = regular_communities
+
+        extended_communities = []
+        for path in ['extended-community', 'ext-community']:
+            extended_communities.extend(self._member_texts(set_entry.find(path)))
+        if extended_communities:
+            payload['extended_community'] = extended_communities
+
+        large_communities = self._member_texts(set_entry.find('large-community'))
+        if large_communities:
+            payload['large_community'] = large_communities
+
+        as_path_prepend = []
+        for path in ['as-path-prepend', 'aspath-prepend']:
+            as_path_prepend.extend(self._member_texts(set_entry.find(path)))
+        if as_path_prepend:
+            payload['as_path_prepend'] = [
+                int(value) if value.isdigit() else value
+                for value in as_path_prepend
+            ]
+
+        as_path_exclude = []
+        for path in ['as-path-exclude', 'aspath-exclude']:
+            as_path_exclude.extend(self._member_texts(set_entry.find(path)))
+        if as_path_exclude:
+            payload['as_path_exclude'] = as_path_exclude
+
+        remove_communities = []
+        for path in ['remove-community', 'remove-regular-community']:
+            remove_communities.extend(self._member_texts(set_entry.find(path)))
+            value = self._child_text(set_entry, path)
+            if value:
+                remove_communities.append(value)
+        if remove_communities:
+            payload['remove_regular_community'] = remove_communities
+
+        overwrite_community = self._child_text(set_entry, 'overwrite-community')
+        if overwrite_community:
+            payload['overwrite_regular_community'] = overwrite_community.lower() == 'yes'
+
+        return payload or None
+
+    def _convert_lifetime(self, lifetime):
+        if lifetime is None:
+            return None
+
+        for unit in ['seconds', 'minutes', 'hours', 'days']:
+            value = self._child_text(lifetime, unit)
+            if value and value.isdigit():
+                return {unit: int(value)}
+
+        return None
+
+    def _convert_named_text_fields(self, entry, field_map):
+        if entry is None:
+            return None
+
+        payload = {}
+        for panos_name, scm_name in field_map.items():
+            value = self._child_text(entry, panos_name)
+            if value:
+                payload[scm_name] = value
+
+        return payload or None
+
+    @staticmethod
+    def _member_texts(entry):
+        if entry is None:
+            return []
+
+        return [
+            member.text.strip()
+            for member in entry.findall('member')
+            if member.text and member.text.strip()
+        ]
+
+    def _first_text_or_member(self, entry):
+        if entry is None:
+            return None
+
+        if entry.text and entry.text.strip():
+            return entry.text.strip()
+
+        members = self._member_texts(entry)
+        return members[0] if members else None
+
+    def _entry_names_or_member_texts(self, entry):
+        if entry is None:
+            return []
+
+        names = [
+            child.get('name')
+            for child in entry.findall('entry')
+            if child.get('name')
+        ]
+        names.extend(self._member_texts(entry))
+        return names
+
+    @staticmethod
+    def _child_text(entry, path):
+        child = entry.find(path)
+        if child is not None and child.text:
+            return child.text.strip()
+        return None
+
+    def _zones(self):
+        if self.config_type != 'local':
+            self.logger.warning("Zone migration currently supports local firewall/vsys XML only.")
+            return []
+
+        zone_entries = []
+        layer_map = {
+            'layer3': 'layer3',
+            'layer2': 'layer2',
+            'v-wire': 'virtual_wire',
+            'tap': 'tap',
+        }
+
+        for zone_entry in self.root.findall('./devices/entry/vsys/entry/zone/entry'):
+            zone_name = zone_entry.get('name')
+            if not zone_name:
+                continue
+
+            network_data = {}
+            for panos_layer, scm_layer in layer_map.items():
+                layer_element = zone_entry.find(f'network/{panos_layer}')
+                if layer_element is None:
+                    continue
+
+                interfaces = [
+                    member.text.strip()
+                    for member in layer_element.findall('member')
+                    if member.text and member.text.strip()
+                ]
+                interfaces = [interface_name for interface_name in interfaces if interface_name != 'tunnel']
+                if interfaces:
+                    network_data[scm_layer] = interfaces
+
+            zone_protection_profile = zone_entry.find('network/zone-protection-profile')
+            if zone_protection_profile is not None and zone_protection_profile.text:
+                network_data['zone_protection_profile'] = zone_protection_profile.text.strip()
+
+            zone_payload = {'name': zone_name}
+            if network_data:
+                zone_payload['network'] = network_data
+
+            zone_entries.append(zone_payload)
 
         return zone_entries
 
