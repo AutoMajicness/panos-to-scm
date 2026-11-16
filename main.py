@@ -5,6 +5,7 @@ import os
 from config import AppConfig, ConfigurationManager
 from parse.parse_panos import XMLParser
 from parse.parse_cisco import CiscoParser
+from parse.parse_pfsense import PfSenseParser
 from scm.process import Processor, SCMObjectManager
 from migration import build_network_report, build_plan
 import scm.obj as obj
@@ -432,12 +433,12 @@ def get_file_path_and_type(config, logger, parser_type=None, config_file="", fet
     if parser_type:
         config_choice = parser_type
     elif interactive and os.path.exists('cisco_config.txt'):
-        config_choice = input("Do you want to parse Cisco or PANOS configuration? (cisco/panos): ").strip().lower()
+        config_choice = input("Do you want to parse Cisco, PANOS, or pfSense configuration? (cisco/panos/pfsense): ").strip().lower()
     else:
         config_choice = 'panos'
 
-    if config_choice not in {'panos', 'cisco'}:
-        raise CliError("--parser must be either 'panos' or 'cisco'")
+    if config_choice not in {'panos', 'cisco', 'pfsense'}:
+        raise CliError("--parser must be 'panos', 'cisco', or 'pfsense'")
 
     if config_choice == 'panos':
         if interactive and not fetch_panos_config and not config_file:
@@ -461,9 +462,12 @@ def get_file_path_and_type(config, logger, parser_type=None, config_file="", fet
         else:
             file_path = config_file or config.xml_file_path
             logger.info(f"Using local XML file: {file_path}")
-    else:
+    elif config_choice == 'cisco':
         file_path = config_file or config.cisco_file_path
         logger.info(f"Using Cisco configuration file: {file_path}")
+    else:
+        file_path = config_file or "config.xml"
+        logger.info(f"Using pfSense configuration file: {file_path}")
 
     return file_path, config_choice
 
@@ -917,7 +921,7 @@ def should_default_full_import(
 
     if run_objects or run_security or run_app_override or run_decrypt_rules or run_nat or run_all:
         return False
-    if parser_type not in (None, "panos"):
+    if parser_type not in (None, "panos", "pfsense"):
         return False
     return fetch_panos_config or config_file.lower().endswith(".xml")
 
@@ -1585,12 +1589,29 @@ def main(
                     run_objects_list = []  # Initialize as empty list
                     parsed_data = parser.parse_all()
                 
-            else:
+            elif config_type == 'cisco':
                 parser = CiscoParser(file_path)
                 parser.parse()
                 parsed_data = parser.get_parsed_data()
                 device_group_name = None
                 run_objects_list = run_objects.split(',') if run_objects else []
+            else:
+                parser = PfSenseParser(file_path)
+                if run_objects:
+                    parsed_data = parser.parse_specific_types(
+                        selected_type_names_for_parse(
+                            run_objects_list,
+                            run_all=run_all,
+                            run_security=run_security,
+                            run_app_override=run_app_override,
+                            run_decrypt_rules=run_decrypt_rules,
+                            run_nat=run_nat,
+                        )
+                    )
+                else:
+                    run_objects_list = []
+                    parsed_data = parser.parse_all()
+                device_group_name = None
 
             logger.debug(f"Parse Data: {json.dumps(parsed_data,indent=4)}")
             logger.debug(f"Parsed data keys: {list(parsed_data.keys())}")
@@ -1911,8 +1932,8 @@ if __name__ == "__main__":
     parser.add_argument('-n', '--nat-rules', action='store_true', help="Run NAT rules")
     parser.add_argument('-a', '--all', action='store_true', help="Run all: Object types as well as Security, App Override, Decryption and NAT policies")
     parser.add_argument('-j', '--json', action='store', default="", help="Take input from local JSON configuration")
-    parser.add_argument('--parser', choices=['panos', 'cisco'], default=None, help="Configuration parser to use")
-    parser.add_argument('--config-file', action='store', default="", help="Configuration source file for PAN-OS XML or Cisco config")
+    parser.add_argument('--parser', choices=['panos', 'cisco', 'pfsense'], default=None, help="Configuration parser to use")
+    parser.add_argument('--config-file', action='store', default="", help="Configuration source file for PAN-OS XML, Cisco config, or pfSense config.xml")
     parser.add_argument('--scope', action='store', default="", help="SCM scope in the format folder:All, snippet:Shared, or device:name")
     parser.add_argument('--object-scope', action='store', default="", help="SCM scope for objects and profiles. Falls back to --scope.")
     parser.add_argument('--policy-scope', action='store', default="", help="SCM scope for policy and NAT rulebases. Falls back to --scope.")

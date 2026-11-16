@@ -2,6 +2,7 @@
 - **Migrate local PAN-OS firewall config into Strata Cloud Manager NGFW**
 - **Migrate Panorama Device Group objects and policy into Strata Cloud Manager NGFW - legacy/in progress**
 - **Migrate Cisco ASA/Firepower running config into Strata Cloud Manager - In progress**
+- **Migrate pfSense config.xml backups into Strata Cloud Manager - In progress**
 - **Network stack migration currently targets local firewall XML only**
 
 ## Understand the following items before running
@@ -179,7 +180,7 @@ For repeatable smoke checks against local real-world PAN-OS XML exports, use the
 
 ```bash
 python3 -m tools.smoke_real_configs \
-  --config-dir /home/hawkinsd/As-Built_Document_Helper \
+  --config-dir path/to/configs \
   --strict-local-firewall \
   --fail-on-blockers \
   --output /tmp/panos-to-scm-smoke.json
@@ -379,10 +380,49 @@ Sanitized local PAN-OS regression fixtures live under `tests/fixtures/panos/`. A
 
 Virtual-wire zone membership is parsed under security zones. Physical ethernet interfaces using virtual-wire mode are detected in the ethernet interface parser, but SCM currently exposes virtual-wire assignment differently than a standalone network object, so validate those dry-run payloads before posting.
 
+## pfSense config.xml migration to SCM
+- The pfSense parser reads offline pfSense `config.xml` backups exported from Diagnostics > Backup & Restore.
+- The initial parser supports aliases, interface-derived zones, filter rules, port-forward NAT, and outbound NAT. Unsupported alias types and 1:1 NAT are reported as migration warnings for review.
+- pfSense interface names are not PAN-OS interface names. For VMware pfSense backups, the parser currently maps `vmx0` to `ethernet1/1` and `vmx1` to `ethernet1/2`, deriving dotted VLAN interfaces from that parent mapping. Other interface naming schemes require an explicit source-to-target mapping before live posting.
+- Layer 3 VLAN interfaces are converted to mapped PAN-OS subinterfaces. pfSense default gateways and static routes are converted to SCM Logical Router static routes. DHCP, virtual IP/CARP, and IPsec configuration are detected and reported as unsupported migration sections rather than being silently dropped.
+- FRR BGP configuration is converted into SCM Logical Router BGP data, including the local AS/router ID, global timers, eBGP peers, mapped update-source interfaces, peer route-map references, connected/static redistribution, prefix lists, community lists, and route maps. FRR options without a direct SCM equivalent remain review items.
+- A pfSense run with no object or policy flags defaults to a full supported import, like local PAN-OS XML.
+
+Validate a pfSense backup before posting:
+
+```bash
+python3 main.py \
+  --parser pfsense \
+  --config-file config.xml \
+  --validate-only
+```
+
+Dry-run against a target folder/scope:
+
+```bash
+python3 main.py \
+  --parser pfsense \
+  --config-file config.xml \
+  --scope folder:All \
+  --dry-run
+```
+
+### Currently Supported pfSense Migration Features:
+- **Address Objects from host/network aliases**
+- **Address Groups from multi-value host/network aliases**
+- **Service Objects from port aliases and policy ports**
+- **Service Groups from multi-value port aliases**
+- **Security Zones inferred from pfSense interfaces**
+- **Logical Router default/static routes from pfSense gateways and static routes**
+- **Security Rules from pfSense filter rules**
+- **Destination NAT from pfSense port forwards**
+- **Source NAT from pfSense outbound NAT rules**
+- **FRR BGP peers, route policies, and connected/static redistribution**
+
 ## Cisco ASA/Firepower migration to SCM for PANOS
 - Currently ASA/Firepower we need the running-config. `more system:running-config` or from FTD/FMC export the config. Must be in familiar ASA format
 - Your cisco config must be in the project directory and named `cisco_config.txt`
-- If you run `main.py` as is, it'll ask if you want to use the `cisco` or `panos` parser, type `cisco`
+- If you run `main.py` as is, it'll ask if you want to use the `cisco`, `panos`, or `pfsense` parser, type `cisco`
 - Optionally, you can target specific object types such as `python main.py -o Address,AddressGroup`
 - The script creates address objects in the form of:
   - N-address-CIDR for networks/ips that aren't objects in cisco config
